@@ -13,7 +13,7 @@
 #include "misc/logging.h"
 
 extern "C" {
-#include <lua.h>
+#include "lua.h"
 }
 
 using json = nlohmann::json;

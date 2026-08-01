@@ -14,8 +14,8 @@
 #include <utility>
 
 extern "C" {
-#include <lauxlib.h>
-#include <lua.h>
+#include "lauxlib.h"
+#include "lua.h"
 }
 
 namespace Lua {

@@ -19,8 +19,8 @@
 #include "misc/logging.h"
 
 extern "C" {
-#include <lauxlib.h>
-#include <lua.h>
+#include "lauxlib.h"
+#include "lua.h"
 }
 
 #include <algorithm>

@@ -15,8 +15,9 @@ if (USE_SYSTEM_LIBS)
   pkg_check_modules(OPUSFILE REQUIRED IMPORTED_TARGET opusfile)
   target_link_libraries(decoders PRIVATE PkgConfig::OPUSFILE)
 else()
-  find_package(OpusFile REQUIRED)
-  target_link_libraries(decoders PRIVATE OpusFile::opusfile)
+  find_package(PkgConfig REQUIRED)
+pkg_check_modules(OpusFile REQUIRED IMPORTED_TARGET opusfile)
+  target_link_libraries(decoders PRIVATE PkgConfig::OpusFile)
 endif()
 
 target_link_libraries(decoders

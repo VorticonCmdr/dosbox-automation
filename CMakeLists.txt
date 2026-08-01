@@ -1,4 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
+include_directories(/opt/homebrew/opt/lua/include/lua5.5 /opt/homebrew/opt/lua/include)
+link_directories(/opt/homebrew/opt/lua/lib)
 
 # The project only tests preset build configurations, so we use
 # the IS_PRESET_USED variable to check and recommend using a preset.
