@@ -34,9 +34,12 @@
 #include "misc/std_filesystem.h"
 #include "misc/support.h"
 #include "misc/video.h"
+#include "lua/lua_bridge_commands.h"
 #include "shell/shell.h"
 #include "utils/checks.h"
 #include "utils/string_utils.h"
+#include "webserver/bridge.h"
+#include "webserver/webserver.h"
 
 #include <imgui.h>
 
@@ -2565,6 +2568,94 @@ int32_t DEBUG_Run(int32_t amount, bool quickexit)
 	return ret;
 }
 
+// Resume/step entry points for callers other than the interactive debugger
+// UI (e.g. the automation API). Mirrors the F5/F11 key handlers in
+// DEBUG_CheckKeys() below, minus the ImGui redraw calls those do to show
+// "(Running)" before blocking -- callers here don't have a frame to draw.
+bool DEBUG_Resume(void)
+{
+	if (!debugging) {
+		return false;
+	}
+	debugging = false;
+	DEBUG_Run(1, false);
+	return true;
+}
+
+bool DEBUG_SingleStep(void)
+{
+	if (!debugging) {
+		return false;
+	}
+	exitLoop = false;
+	DEBUG_Run(1, true);
+	return true;
+}
+
+// Breakpoints added here aren't armed immediately (matching the BP/BPINT
+// interactive commands): CBreakpoint::ActivateBreakpoints() only runs when
+// execution is resumed via DEBUG_Run(), i.e. on the next DEBUG_Resume().
+void DEBUG_AddExecuteBreakpoint(uint16_t seg, uint32_t off)
+{
+	CBreakpoint::AddBreakpoint(seg, off, false);
+}
+
+void DEBUG_AddIntBreakpoint(uint8_t int_num, uint16_t ah, uint16_t al)
+{
+	CBreakpoint::AddIntBreakpoint(int_num, ah, al, false);
+}
+
+void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off)
+{
+	CBreakpoint::AddMemBreakpoint(seg, off);
+}
+
+bool DEBUG_DeleteBreakpointByIndex(uint16_t index)
+{
+	return CBreakpoint::DeleteByIndex(index);
+}
+
+void DEBUG_DeleteAllBreakpoints(void)
+{
+	CBreakpoint::DeleteAll();
+}
+
+std::vector<DebugBreakpointInfo> DEBUG_ListBreakpoints(void)
+{
+	std::vector<DebugBreakpointInfo> result;
+	uint16_t idx = 0;
+	for (auto& bp : BPoints) {
+		DebugBreakpointInfo info;
+		info.index  = idx++;
+		info.once   = bp->GetOnce();
+		info.active = bp->IsActive();
+		switch (bp->GetType()) {
+		case BKPNT_INTERRUPT:
+			info.type    = DebugBreakpointType::Interrupt;
+			info.int_num = bp->GetIntNr();
+			info.ah      = bp->GetValue();
+			info.al      = bp->GetOther();
+			break;
+		case BKPNT_MEMORY:
+		case BKPNT_MEMORY_READ:
+		case BKPNT_MEMORY_PROT:
+		case BKPNT_MEMORY_LINEAR:
+			info.type    = DebugBreakpointType::Memory;
+			info.segment = bp->GetSegment();
+			info.offset  = bp->GetOffset();
+			break;
+		case BKPNT_PHYSICAL:
+		default:
+			info.type    = DebugBreakpointType::Execute;
+			info.segment = bp->GetSegment();
+			info.offset  = bp->GetOffset();
+			break;
+		}
+		result.push_back(info);
+	}
+	return result;
+}
+
 uint32_t DEBUG_CheckKeys(void)
 {
 	Bits ret       = 0;
@@ -2858,6 +2949,14 @@ uint32_t DEBUG_CheckKeys(void)
 
 Bitu DEBUG_Loop(void)
 {
+	// The debugger runs its own loop while paused, bypassing normal_loop()
+	// entirely. Without this, the automation API goes unresponsive for
+	// the whole time the emulator is stopped at a breakpoint.
+	if (WEBSERVER_IsEnabled()) {
+		Webserver::Bridge::Instance().ProcessRequests();
+		LuaReapStalledWaits();
+	}
+
 	// TODO Disable sound
 	GFX_PollAndHandleEvents();
 
@@ -2891,23 +2990,29 @@ void DEBUG_Enable(bool pressed)
 		return;
 	}
 
-	// Maybe construct the debugger's UI
+	// Maybe construct the debugger's UI. This can fail in headless
+	// setups (e.g. no GPU device available for ImGui to render with,
+	// such as under a dummy/offscreen video driver) -- that's fine, the
+	// debugger's state machine and breakpoint engine below don't depend
+	// on the UI, only on-screen interaction does. Every Draw*/DBGUI_*
+	// call already no-ops when !DBGUI_IsInitialized().
 	static bool was_ui_started = false;
 	if (!was_ui_started) {
 		DBGUI_StartUp();
 		was_ui_started = DBGUI_IsInitialized();
+		if (!was_ui_started) {
+			LOG_WARNING(
+			        "DEBUG: Failed to start up the debug window; "
+			        "continuing in headless mode (no interactive UI)");
+		}
 	}
 
-	// The debugger is run in release mode so cannot use asserts
-	if (!was_ui_started) {
-		LOG_ERR("DEBUG: Failed to start up the debug window");
-		return;
+	if (was_ui_started) {
+		// Defocus the graphical UI and bring the debugger UI into focus
+		GFX_LosingFocus();
+		SDL_ShowWindow(dbg.win_main);
+		SDL_RaiseWindow(dbg.win_main);
 	}
-
-	// Defocus the graphical UI and bring the debugger UI into focus
-	GFX_LosingFocus();
-	SDL_ShowWindow(dbg.win_main);
-	SDL_RaiseWindow(dbg.win_main);
 	SetCodeWinStart();
 
 	// Maybe show help for the first time in the debugger

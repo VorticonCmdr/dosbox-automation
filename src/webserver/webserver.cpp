@@ -10,6 +10,7 @@
 #include "input.h"
 #include "private/auth.h"
 #include "private/cpu.h"
+#include "private/debug.h"
 #include "private/dos.h"
 #include "private/shutdown.h"
 #include "private/freeze.h"
@@ -133,6 +134,15 @@ static void setup_api_handlers()
 	server.Get("/api/v1/io/port", PortReadCommand::Get);
 	server.Put("/api/v1/io/port", PortWriteCommand::Put);
 	server.Put("/api/v1/cpu/register", WriteRegisterCommand::Put);
+
+	server.Get("/api/v1/debug/status", DebugStatusCommand::Get);
+	server.Post("/api/v1/debug/pause", DebugPauseCommand::Post);
+	server.Post("/api/v1/debug/continue", DebugContinueCommand::Post);
+	server.Post("/api/v1/debug/step", DebugStepCommand::Post);
+
+	server.Get("/api/v1/debug/breakpoints", DebugListBreakpointsCommand::Get);
+	server.Post("/api/v1/debug/breakpoints", DebugAddBreakpointCommand::Post);
+	server.Delete("/api/v1/debug/breakpoints", DebugDeleteBreakpointCommand::Delete);
 
 	server.Post("/api/v1/input/sequence", InputSequenceCommand::Post);
 	server.Post("/api/v1/input/type", InputTypeCommand::Post);
@@ -434,7 +444,7 @@ static void run(const std::string addr, const int port,
 		                   {"cpu_control", true},
 		                   {"port_io", true},
 		                   {"freeze", true},
-		                   {"debugger", false},
+		                   {"debugger", static_cast<bool>(C_DEBUGGER)},
 		           };
 		           send_json(res, j);
 	           });

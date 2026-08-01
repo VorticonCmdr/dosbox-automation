@@ -18,6 +18,7 @@ elseif (DOSBOX_PLATFORM_MACOS)
 
   # macOS-only CoreAudio MIDI backend
   target_sources(dosboxcommon PRIVATE coreaudio.cpp)
+  target_link_libraries(dosboxcommon PRIVATE "-framework AudioToolbox")
 endif()
 
 # Linux-only ALSA MIDI backend

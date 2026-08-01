@@ -3,6 +3,7 @@ target_sources(dosboxcommon PRIVATE
   capture.cpp
   control.cpp
   cpu.cpp
+  debug.cpp
   dos.cpp
   drive.cpp
   freeze.cpp
