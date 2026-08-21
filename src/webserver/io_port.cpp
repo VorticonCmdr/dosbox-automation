@@ -35,15 +35,13 @@ void PortReadCommand::Execute()
 
 void PortReadCommand::Get(const Request& req, Response& res)
 {
-	const auto port_str  = req.get_param_value("port");
-	const auto width_str = req.get_param_value("width");
-
-	if (port_str.empty()) {
-		throw std::invalid_argument("missing 'port' query parameter");
-	}
-
-	const uint32_t port = static_cast<uint32_t>(std::stoul(port_str, nullptr, 0));
-	const int width     = width_str.empty() ? 1 : std::stoi(width_str);
+	// num_param requires full-string parses (no silently-ignored
+	// trailing garbage like std::stoul's "123abc" -> 123) and matches
+	// how every other route in this module parses query parameters.
+	const uint32_t port = num_param<uint32_t>(req, Source::Param, "port");
+	const int width = req.has_param("width")
+	                        ? num_param<int>(req, Source::Param, "width")
+	                        : 1;
 
 	ValidatePortRequest(port, width);
 
@@ -63,11 +61,9 @@ void PortReadCommand::Get(const Request& req, Response& res)
 void PortWriteCommand::Execute()
 {
 	if (width == 2) {
-		IO_WriteW(static_cast<io_port_t>(port),
-		          static_cast<io_val_t>(value));
+		IO_WriteW(static_cast<io_port_t>(port), static_cast<io_val_t>(value));
 	} else {
-		IO_WriteB(static_cast<io_port_t>(port),
-		          static_cast<io_val_t>(value));
+		IO_WriteB(static_cast<io_port_t>(port), static_cast<io_val_t>(value));
 	}
 }
 

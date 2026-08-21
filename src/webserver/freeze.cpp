@@ -20,8 +20,7 @@ FreezeRegistry& FreezeRegistry::Instance()
 	return instance;
 }
 
-bool FreezeRegistry::Add(const uint32_t address, const uint32_t value,
-                         const int width)
+bool FreezeRegistry::Add(const uint32_t address, const uint32_t value, const int width)
 {
 	if (width != 1 && width != 2 && width != 4) {
 		return false;
@@ -69,9 +68,16 @@ std::vector<FreezeEntry> FreezeRegistry::List() const
 	return entries;
 }
 
+bool ValidateFreezeRange(const uint32_t address, const int width,
+                         const uint64_t mem_total)
+{
+	return static_cast<uint64_t>(address) + static_cast<uint64_t>(width) <=
+	       mem_total;
+}
+
 void ApplyFreezes()
 {
-	auto& reg = FreezeRegistry::Instance();
+	auto& reg          = FreezeRegistry::Instance();
 	const auto entries = reg.List();
 	for (const auto& e : entries) {
 		uint8_t buf[4] = {};
@@ -100,7 +106,7 @@ void FreezeHandlers::Post(const Request& req, Response& res)
 
 	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
 	                           MemPageSize;
-	if (address + width > mem_total) {
+	if (!ValidateFreezeRange(address, width, mem_total)) {
 		res.status = 400;
 		json err;
 		err["error"] = "address out of range";
@@ -128,7 +134,7 @@ void FreezeHandlers::Post(const Request& req, Response& res)
 void FreezeHandlers::Get(const Request&, Response& res)
 {
 	const auto entries = FreezeRegistry::Instance().List();
-	json j = json::array();
+	json j             = json::array();
 	for (const auto& e : entries) {
 		json entry;
 		entry["address"] = e.address;

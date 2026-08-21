@@ -4,9 +4,12 @@
 
 #include "webserver/private/freeze.h"
 
+#include <cstdint>
 #include <gtest/gtest.h>
+#include <limits>
 
 using Webserver::FreezeRegistry;
+using Webserver::ValidateFreezeRange;
 
 namespace {
 
@@ -77,6 +80,38 @@ TEST_F(FreezeTest, AcceptsAllValidWidths)
 	EXPECT_TRUE(reg.Add(0x1000, 0, 1));
 	EXPECT_TRUE(reg.Add(0x2000, 0, 2));
 	EXPECT_TRUE(reg.Add(0x3000, 0, 4));
+}
+
+TEST(FreezeRangeValidation, AcceptsInRangeAddress)
+{
+	EXPECT_TRUE(ValidateFreezeRange(0x1000, 4, 16 * 1024 * 1024));
+}
+
+TEST(FreezeRangeValidation, AcceptsExactUpperBoundary)
+{
+	EXPECT_TRUE(ValidateFreezeRange(1000 - 4, 4, 1000));
+}
+
+TEST(FreezeRangeValidation, RejectsOneBytePastTheEnd)
+{
+	EXPECT_FALSE(ValidateFreezeRange(1000 - 3, 4, 1000));
+}
+
+TEST(FreezeRangeValidation, RejectsAddressNearUint32MaxWithout32BitWraparound)
+{
+	// address=0xFFFFFFFE, width=4: address + width in 32-bit arithmetic
+	// wraps to 2, which is < any real mem_total and would wrongly pass.
+	// The 64-bit sum is far beyond any real mem_total and must fail.
+	EXPECT_FALSE(ValidateFreezeRange(std::numeric_limits<uint32_t>::max() - 1,
+	                                 4,
+	                                 16 * 1024 * 1024));
+}
+
+TEST(FreezeRangeValidation, RejectsMaxUint32AddressAtAnyWidth)
+{
+	EXPECT_FALSE(ValidateFreezeRange(std::numeric_limits<uint32_t>::max(),
+	                                 1,
+	                                 16 * 1024 * 1024));
 }
 
 } // namespace

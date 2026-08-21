@@ -9,7 +9,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "http/http.h"
@@ -28,17 +30,16 @@ struct McbBlock {
 using McbReader = std::function<McbBlock(uint16_t segment)>;
 
 std::vector<McbBlock> WalkMcbChain(uint16_t start_segment,
-                                   const McbReader& reader,
-                                   int max_blocks);
+                                   const McbReader& reader, int max_blocks);
 
 // Get pointers to interesting data structures, this command is just to prevent
 // breakages if these ever change and users hard-code these offsets. It's not
 // a place to pull random info that can also be read by the client from these
 // addresses directly.
 class DosInternalsCommand : public Command {
-	uint16_t list_of_lists      = {};
-	uint16_t dos_swappable_area = {};
-	uint16_t first_shell        = {};
+	uint16_t list_of_lists           = {};
+	uint16_t dos_swappable_area      = {};
+	uint16_t first_shell             = {};
 	std::vector<McbBlock> memory_map = {};
 
 public:
@@ -49,6 +50,35 @@ public:
 enum class MemoryArea { Conv, Uma, Xms };
 
 enum class AllocStrategy { FirstFit, BestFit, LastFit };
+
+// Tracks addresses this API has allocated and not yet freed, so
+// FreeMemoryCommand can refuse to reach DOS_FreeMemory/MEM_ReleasePages
+// with an address the API never minted. Without this gate, an
+// unvalidated address from the request body reaches
+// MEM_ReleasePages(addr / MEM_PAGE_SIZE), which indexes its internal
+// handle vector with no bounds check.
+//
+// Mutex-guarded even though today's only callers (AllocMemoryCommand
+// and FreeMemoryCommand::Execute) are already serialized on the
+// emulation thread via the Bridge, matching FreezeRegistry's pattern in
+// case that changes.
+class AllocationRegistry {
+public:
+	static constexpr size_t MaxEntries = 4096;
+
+	bool IsFull() const;
+	void Add(uint32_t addr);
+
+	// False if addr was never allocated through this API, or was
+	// already freed - the caller must not proceed to free it.
+	bool Remove(uint32_t addr);
+
+	static AllocationRegistry& Instance();
+
+private:
+	mutable std::mutex mtx                  = {};
+	std::unordered_set<uint32_t> live_addrs = {};
+};
 
 class AllocMemoryCommand : public Command {
 public:

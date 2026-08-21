@@ -28,6 +28,45 @@ using json = nlohmann::json;
 
 namespace Webserver {
 
+// Upper bound for an event's position on the replay timeline ('t',
+// 'delay_ms' after accumulation, and 'cps'-derived timing). PIC_AddEvent
+// (hardware/pic.h) turns this delay into `CPU_CycleMax * delay_ms` CPU
+// cycles and asserts the result fits an int32_t; an unbounded value from
+// the request body reaches that assert directly (or is undefined
+// behaviour with asserts compiled out). No legitimate automation
+// sequence needs a timeline longer than this.
+constexpr double MaxEventTimeMs = 24.0 * 60 * 60 * 1000; // 24 hours
+
+bool IsValidEventTimeMs(const double t_ms)
+{
+	return t_ms >= 0 && t_ms <= MaxEventTimeMs;
+}
+
+// Generous upper bound for a frame-relative event's target frame (a
+// billion frames is months of continuous playback at any real frame
+// rate). Guards against the same class of "hangs the replay state
+// forever" input as MaxEventTimeMs, for the frame-based scheduler.
+constexpr uint64_t MaxEventFrame = 1'000'000'000;
+
+bool IsValidEventFrame(const int64_t frame)
+{
+	return frame >= 0 && static_cast<uint64_t>(frame) <= MaxEventFrame;
+}
+
+// A cps near zero makes ExpandTextToEvents' step_ms (1000/cps) huge:
+// accumulated across up to InputTypeCommand::Post's max_text characters,
+// that reaches the same PIC_AddEvent overflow MaxEventTimeMs guards
+// against. MinCps is already an unrealistically slow "one keystroke
+// every 10 seconds"; max_text characters at that rate stays comfortably
+// under MaxEventTimeMs.
+constexpr double MinTypingCps = 0.1;
+constexpr double MaxTypingCps = 1000.0;
+
+bool IsValidTypingCps(const double cps)
+{
+	return cps >= MinTypingCps && cps <= MaxTypingCps;
+}
+
 static const std::unordered_map<std::string, KBD_KEYS> key_name_map = {
         {        "KBD_NONE",         KBD_NONE},
         {           "KBD_1",            KBD_1},
@@ -201,8 +240,7 @@ static void pic_input_handler(uint32_t)
 	// Key events need buffer space. A press/release pair uses two
 	// slots. If there's no room, retry after a short delay instead
 	// of dispatching into the overflow latch.
-	if (ev.type == InputEvent::Type::Key &&
-	    KEYBOARD_GetBufferFreeSlots() < 2) {
+	if (ev.type == InputEvent::Type::Key && KEYBOARD_GetBufferFreeSlots() < 2) {
 		PIC_AddEvent(pic_input_handler, backpressure_retry_ms);
 		return;
 	}
@@ -211,11 +249,11 @@ static void pic_input_handler(uint32_t)
 	pending_events.pop();
 	++pending_dispatched;
 
-	const double pic_ms  = PIC_FullIndex() - replay_start_pic_ms;
-	const double wall_ms = std::chrono::duration<double, std::milli>(
-	                               std::chrono::steady_clock::now() -
-	                               replay_start_wall)
-	                               .count();
+	const double pic_ms     = PIC_FullIndex() - replay_start_pic_ms;
+	const double wall_ms    = std::chrono::duration<double, std::milli>(
+	                                  std::chrono::steady_clock::now() -
+	                                  replay_start_wall)
+	                                  .count();
 	const double pic_drift  = pic_ms - dispatched_ev.t_ms;
 	const double wall_drift = wall_ms - dispatched_ev.t_ms;
 
@@ -356,18 +394,19 @@ void InputSequenceCommand::Post(const httplib::Request& req, httplib::Response& 
 	// events and leaves the caller diagnosing ghosts; the first field
 	// test drive lost an hour to exactly that.
 	static const std::unordered_map<std::string, std::vector<std::string>> allowed_fields = {
-	        {         "key",                             {"key", "pressed"}},
+	        {         "key",                   {"key", "pressed"}},
 	        {  "mouse_move", {"x_rel", "y_rel", "x_abs", "y_abs"}},
-	        {"mouse_button",                          {"button", "pressed"}},
-	        { "mouse_wheel",                                      {"delta"}},
+	        {"mouse_button",                {"button", "pressed"}},
+	        { "mouse_wheel",                            {"delta"}},
 	};
-	static const std::vector<std::string> common_fields = {
-	        "type", "t", "delay_ms", "frame"};
+	static const std::vector<std::string> common_fields = {"type",
+	                                                       "t",
+	                                                       "delay_ms",
+	                                                       "frame"};
 
 	auto is_allowed = [](const std::vector<std::string>& fields,
 	                     const std::string& name) {
-		return std::find(fields.begin(), fields.end(), name) !=
-		       fields.end();
+		return std::find(fields.begin(), fields.end(), name) != fields.end();
 	};
 
 	std::vector<InputEvent> events;
@@ -410,38 +449,64 @@ void InputSequenceCommand::Post(const httplib::Request& req, httplib::Response& 
 		if (jev.contains("t") && jev.contains("delay_ms")) {
 			res.status = 400;
 			json err;
-			err["error"] = "Use either 't' (absolute ms) or "
-			               "'delay_ms' (relative ms), not both";
+			err["error"] =
+			        "Use either 't' (absolute ms) or "
+			        "'delay_ms' (relative ms), not both";
 			send_json(res, err);
 			return;
 		}
 		if (jev.contains("t")) {
 			ev.t_ms = jev["t"].get<double>();
-			if (ev.t_ms < 0) {
+			if (!IsValidEventTimeMs(ev.t_ms)) {
 				res.status = 400;
 				json err;
-				err["error"] = "'t' must not be negative";
+				err["error"] = "'t' must be between 0 and " +
+				               std::to_string(MaxEventTimeMs) + " ms";
 				send_json(res, err);
 				return;
 			}
 			cumulative_t_ms = ev.t_ms;
 		} else if (jev.contains("delay_ms")) {
 			const auto delay_ms = jev["delay_ms"].get<double>();
-			if (delay_ms < 0) {
+			if (!IsValidEventTimeMs(delay_ms)) {
 				res.status = 400;
 				json err;
-				err["error"] = "'delay_ms' must not be negative";
+				err["error"] = "'delay_ms' must be between 0 and " +
+				               std::to_string(MaxEventTimeMs) + " ms";
 				send_json(res, err);
 				return;
 			}
 			cumulative_t_ms += delay_ms;
+			// Bounds the accumulated position, not just this one
+			// delay: many individually-valid delays can still sum
+			// past the limit.
+			if (!IsValidEventTimeMs(cumulative_t_ms)) {
+				res.status = 400;
+				json err;
+				err["error"] = "Accumulated event timeline exceeds " +
+				               std::to_string(MaxEventTimeMs) + " ms";
+				send_json(res, err);
+				return;
+			}
 			ev.t_ms = cumulative_t_ms;
 		} else {
 			// No timing given: fire at the current timeline position
 			ev.t_ms = cumulative_t_ms;
 		}
 		if (jev.contains("frame")) {
-			ev.frame = jev["frame"].get<uint64_t>();
+			// nlohmann silently reinterprets a negative literal as
+			// its unsigned bit pattern on a direct get<uint64_t>(),
+			// so the sign has to be checked before that conversion.
+			const auto frame_val = jev["frame"].get<int64_t>();
+			if (!IsValidEventFrame(frame_val)) {
+				res.status = 400;
+				json err;
+				err["error"] = "'frame' must be between 0 and " +
+				               std::to_string(MaxEventFrame);
+				send_json(res, err);
+				return;
+			}
+			ev.frame = static_cast<uint64_t>(frame_val);
 		}
 
 		if (type_str == "key") {
@@ -858,10 +923,9 @@ void ReplayDispatchFrame(uint64_t current_frame)
 			}
 		} else if (dispatched_ev.type == InputEvent::Type::MouseButton) {
 			std::string label = dispatched_ev.pressed
-			                            ? "replay: click "
-			                            : "replay: release ";
-			OSD_ShowCommand(label + dispatched_ev.button,
-			                current_frame);
+			                          ? "replay: click "
+			                          : "replay: release ";
+			OSD_ShowCommand(label + dispatched_ev.button, current_frame);
 		}
 	}
 
@@ -872,7 +936,7 @@ void ReplayDispatchFrame(uint64_t current_frame)
 		                               .count();
 		const double expected_ms = last_dispatched_t_ms -
 		                           frame_replay_first_t_ms;
-		const double wall_drift = wall_ms - expected_ms;
+		const double wall_drift  = wall_ms - expected_ms;
 
 		if (frame_pending_dispatched % 100 == 0 ||
 		    dispatched_this_frame >= 10) {
@@ -903,7 +967,7 @@ void ReplayDispatchFrame(uint64_t current_frame)
 		                               .count();
 		const double expected_ms = last_dispatched_t_ms -
 		                           frame_replay_first_t_ms;
-		const double wall_drift = wall_ms - expected_ms;
+		const double wall_drift  = wall_ms - expected_ms;
 		LOG_MSG("REPLAY (frame) complete: %zu/%zu events, %llu frames, "
 		        "wall=%.1fms expected=%.1fms drift=%+.1fms",
 		        frame_pending_dispatched,
@@ -981,6 +1045,16 @@ void InputTypeCommand::Post(const httplib::Request& req, httplib::Response& res)
 	}
 
 	const double cps = body.value("cps", 30.0);
+
+	if (!IsValidTypingCps(cps)) {
+		res.status = 400;
+		json err;
+		err["error"] = "'cps' must be between " +
+		               std::to_string(MinTypingCps) + " and " +
+		               std::to_string(MaxTypingCps);
+		send_json(res, err);
+		return;
+	}
 
 	InputTypeCommand cmd(ExpandTextToEvents(text, cps));
 	cmd.WaitForCompletion(5000);

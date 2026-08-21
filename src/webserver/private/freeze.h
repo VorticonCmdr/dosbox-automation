@@ -33,11 +33,17 @@ public:
 	static FreezeRegistry& Instance();
 
 private:
-	mutable std::mutex mtx  = {};
+	mutable std::mutex mtx           = {};
 	std::vector<FreezeEntry> entries = {};
 };
 
 void ApplyFreezes();
+
+// True if [address, address + width) fits within a mem_total-byte
+// address space. 64-bit math throughout: address and width individually
+// fit uint32_t/int, but address + width computed in 32-bit arithmetic
+// wraps for an address near UINT32_MAX.
+bool ValidateFreezeRange(uint32_t address, int width, uint64_t mem_total);
 
 struct FreezeHandlers {
 	static void Post(const httplib::Request&, httplib::Response&);

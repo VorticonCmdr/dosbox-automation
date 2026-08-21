@@ -2,9 +2,12 @@
 // License: GPL-2.0-or-later. Contact: dosbox-automation-project@trinity2k.net
 //
 
-#include "webserver.h"
-#include "bridge.h"
 #include "private/dos.h"
+#include "bridge.h"
+#include "webserver.h"
+
+#include <limits>
+#include <mutex>
 
 #include "http/http.h"
 #include "json/json.h"
@@ -22,14 +25,13 @@ namespace Webserver {
 constexpr int DosBlockSize = 16;
 
 std::vector<McbBlock> WalkMcbChain(const uint16_t start_segment,
-                                   const McbReader& reader,
-                                   const int max_blocks)
+                                   const McbReader& reader, const int max_blocks)
 {
 	std::vector<McbBlock> chain;
 	uint16_t seg = start_segment;
 
 	for (int i = 0; i < max_blocks; ++i) {
-		auto block = reader(seg);
+		auto block    = reader(seg);
 		block.segment = seg;
 
 		if (block.type == 0x5A) {
@@ -50,7 +52,7 @@ std::vector<McbBlock> WalkMcbChain(const uint16_t start_segment,
 static McbBlock ReadMcbFromGuest(const uint16_t segment)
 {
 	DOS_MCB mcb(segment);
-	McbBlock block = {};
+	McbBlock block    = {};
 	block.segment     = segment;
 	block.type        = mcb.GetType();
 	block.psp_segment = mcb.GetPSPSeg();
@@ -98,6 +100,30 @@ void DosInternalsCommand::Get(const httplib::Request&, httplib::Response& res)
 	j["memoryMap"] = map;
 
 	send_json(res, j);
+}
+
+AllocationRegistry& AllocationRegistry::Instance()
+{
+	static AllocationRegistry instance;
+	return instance;
+}
+
+bool AllocationRegistry::IsFull() const
+{
+	std::lock_guard<std::mutex> lock(mtx);
+	return live_addrs.size() >= MaxEntries;
+}
+
+void AllocationRegistry::Add(const uint32_t addr)
+{
+	std::lock_guard<std::mutex> lock(mtx);
+	live_addrs.insert(addr);
+}
+
+bool AllocationRegistry::Remove(const uint32_t addr)
+{
+	std::lock_guard<std::mutex> lock(mtx);
+	return live_addrs.erase(addr) > 0;
 }
 
 void AllocMemoryCommand::AllocDos()
@@ -178,10 +204,21 @@ void AllocMemoryCommand::AllocXms()
 
 void AllocMemoryCommand::Execute()
 {
+	if (AllocationRegistry::Instance().IsFull()) {
+		// Refuse rather than mint an address the registry cannot
+		// track: FreeMemoryCommand would never be able to free it.
+		addr = 0;
+		return;
+	}
+
 	if (area < MemoryArea::Xms) {
 		AllocDos();
 	} else {
 		AllocXms();
+	}
+
+	if (addr) {
+		AllocationRegistry::Instance().Add(addr);
 	}
 }
 
@@ -189,6 +226,18 @@ void AllocMemoryCommand::Post(const httplib::Request& req, httplib::Response& re
 {
 	auto j        = json::parse(req.body);
 	uint32_t size = j.at("size");
+
+	// AllocMemoryCommand's constructor takes a uint16_t byte count, as
+	// does every allocator underneath it (DOS memory blocks are
+	// paragraph-counted with a uint16_t block count). Without this
+	// check, a size above 65535 narrows silently at the constructor
+	// call: a request for 65536 truncates to 0 and allocates nothing
+	// while still reporting a "valid" address.
+	constexpr uint32_t MaxAllocBytes = std::numeric_limits<uint16_t>::max();
+	if (size == 0 || size > MaxAllocBytes) {
+		throw std::invalid_argument("'size' must be between 1 and " +
+		                            std::to_string(MaxAllocBytes) + " bytes");
+	}
 
 	const auto area = [&]() {
 		using enum MemoryArea;
@@ -252,6 +301,15 @@ void AllocMemoryCommand::Post(const httplib::Request& req, httplib::Response& re
 
 void FreeMemoryCommand::Execute()
 {
+	if (!AllocationRegistry::Instance().Remove(addr)) {
+		// Never allocated through this API (or already freed): never
+		// reach DOS_FreeMemory/MEM_ReleasePages with an address the
+		// API did not mint, whether that address is simply wrong,
+		// out of range, or a double free.
+		success = false;
+		return;
+	}
+
 	if (addr < XMS_START * MEM_PAGE_SIZE) {
 		success = DOS_FreeMemory(addr / DosBlockSize);
 		LOG_DEBUG("API: FreeMemoryCommand(%p): success=%d (DOS allocator)",

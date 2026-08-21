@@ -8,6 +8,7 @@
 #include "bridge.h"
 #include "libs/http/http.h"
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,6 +39,20 @@ struct InputEvent {
 	// Mouse wheel params
 	float wheel_delta = 0;
 };
+
+// Bounds for an event's position on the replay timeline and a
+// frame-relative event's target frame. PIC_AddEvent (hardware/pic.h)
+// turns an event's time into CPU cycles and asserts the result fits an
+// int32_t; these reject anything that would reach that assert (or be
+// undefined behaviour with asserts compiled out) before it does.
+// Exposed for testing.
+bool IsValidEventTimeMs(double t_ms);
+bool IsValidEventFrame(int64_t frame);
+
+// Typing rate bounds for InputTypeCommand::Post's 'cps'. A rate near
+// zero derives event timing far past IsValidEventTimeMs' bound just as
+// surely as an out-of-range 't' or 'delay_ms' does. Exposed for testing.
+bool IsValidTypingCps(double cps);
 
 class InputSequenceCommand : public Command {
 public:
