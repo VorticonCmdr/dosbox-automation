@@ -17,6 +17,7 @@
 #include "private/memory.h"
 #include "private/shutdown.h"
 #include "video.h"
+#include "wait.h"
 
 #include "lua/lua_bridge_commands.h"
 
@@ -109,6 +110,13 @@ ErrorInfo ClassifyException(std::exception_ptr ep)
 		info.status    = httplib::StatusCode::TooManyRequests_429;
 		info.message   = e.what();
 		info.code      = "queue_full";
+		info.retryable = true;
+	} catch (const TooManyWaiters& e) {
+		// Same shape as queue_full but a distinct resource: the wait
+		// registry's own 4-waiter cap, unrelated to the Bridge queue.
+		info.status    = httplib::StatusCode::TooManyRequests_429;
+		info.message   = e.what();
+		info.code      = "too_many_waiters";
 		info.retryable = true;
 	} catch (const std::invalid_argument& e) {
 		// Safe to echo: num_param()/handler messages here are
@@ -213,6 +221,8 @@ static void setup_api_handlers()
 	server.Get("/api/v1/program/state", ControlHandlers::GetProgramState);
 	server.Get("/api/v1/status", ControlHandlers::GetStatus);
 	server.Post("/api/v1/control/shutdown", ShutdownCommand::Post);
+
+	server.Post("/api/v1/wait", WaitHandlers::Post);
 
 	server.Post("/api/v1/drive/swap", DriveSwapCommand::Post);
 
@@ -665,6 +675,12 @@ void WEBSERVER_Init()
 
 void WEBSERVER_Destroy()
 {
+	// Wake any in-flight POST /api/v1/wait requests first: they block
+	// an httplib worker thread on a condvar that only the frame hook,
+	// DEBUG_Loop or an SDL pause loop would otherwise notify, none of
+	// which run once shutdown starts - server.stop() would hang
+	// waiting for that worker to join.
+	Webserver::WaitRegistry::Instance().DrainAll();
 	OSDPORT_Destroy();
 	Webserver::server.stop();
 	Webserver::remove_token_file();

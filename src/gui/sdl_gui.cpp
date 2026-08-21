@@ -60,6 +60,7 @@ void ReplayDispatchFrame(uint64_t);
 void ApplyFreezes();
 bool RenderedFrameRequested();
 void DeliverRenderedFrame(const RenderedImage&);
+void EvaluateWaits(bool frames_flowing);
 }
 
 void LuaDispatchFrame(uint64_t);
@@ -373,6 +374,7 @@ static bool is_unpause_event(const SDL_Event event, const KeyPressState unpause_
 		if (WEBSERVER_IsEnabled()) {
 			Webserver::Bridge::Instance().ProcessRequests();
 			LuaReapStalledWaits();
+			Webserver::EvaluateWaits(false);
 		}
 
 		if (!got_event) {
@@ -1266,6 +1268,7 @@ void GFX_EndUpdate()
 	Webserver::ReplayDispatchFrame(rendered_frame_count);
 	Webserver::ApplyFreezes();
 	LuaDispatchFrame(rendered_frame_count);
+	Webserver::EvaluateWaits(true);
 }
 
 uint32_t GFX_MakePixel(const uint8_t red, const uint8_t green, const uint8_t blue)
@@ -2269,6 +2272,7 @@ static void handle_pause_when_inactive(const SDL_Event& event)
 			if (WEBSERVER_IsEnabled()) {
 				Webserver::Bridge::Instance().ProcessRequests();
 				LuaReapStalledWaits();
+				Webserver::EvaluateWaits(false);
 			}
 
 			if (!got_event) {

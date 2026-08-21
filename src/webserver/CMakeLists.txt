@@ -12,6 +12,7 @@ target_sources(dosboxcommon PRIVATE
   io_port.cpp
   memory.cpp
   video.cpp
+  wait.cpp
   webserver.cpp)
 
 # find_package instead of pkg-config: works with both system libjpeg

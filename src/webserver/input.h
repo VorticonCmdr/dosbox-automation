@@ -135,6 +135,13 @@ struct RecordingHandlers {
 
 void ReplayDispatchFrame(uint64_t current_frame);
 
+namespace InputReplay {
+// True while either the PIC-timed or frame-timed replay chain still has
+// events left to dispatch. Safe to call from any thread - locks the
+// same mutexes the dispatch paths already use.
+bool IsActive();
+} // namespace InputReplay
+
 } // namespace Webserver
 
 #endif // DOSBOX_WEBSERVER_INPUT_H

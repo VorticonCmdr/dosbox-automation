@@ -30,15 +30,16 @@
 #include "hardware/pic.h"
 #include "hardware/port.h"
 #include "hardware/timer.h"
+#include "lua/lua_bridge_commands.h"
 #include "misc/cross.h" //snprintf
 #include "misc/std_filesystem.h"
 #include "misc/support.h"
 #include "misc/video.h"
-#include "lua/lua_bridge_commands.h"
 #include "shell/shell.h"
 #include "utils/checks.h"
 #include "utils/string_utils.h"
 #include "webserver/bridge.h"
+#include "webserver/wait.h"
 #include "webserver/webserver.h"
 
 #include <imgui.h>
@@ -2955,6 +2956,7 @@ Bitu DEBUG_Loop(void)
 	if (WEBSERVER_IsEnabled()) {
 		Webserver::Bridge::Instance().ProcessRequests();
 		LuaReapStalledWaits();
+		Webserver::EvaluateWaits(false);
 	}
 
 	// TODO Disable sound

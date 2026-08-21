@@ -902,6 +902,18 @@ void RecordingHandlers::GetStatus(const httplib::Request&, httplib::Response& re
 	send_json(res, j);
 }
 
+bool InputReplay::IsActive()
+{
+	{
+		std::lock_guard<std::mutex> lock(pending_mutex);
+		if (!pending_events.empty()) {
+			return true;
+		}
+	}
+	std::lock_guard<std::mutex> lock(frame_replay_mutex);
+	return frame_replay_active;
+}
+
 void ReplayDispatchFrame(uint64_t current_frame)
 {
 	if (!frame_replay_active) {

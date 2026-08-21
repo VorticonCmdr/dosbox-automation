@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.7 done. 1.8-4.7 outstanding.**
+**Progress: 1.1-1.8 done. Tiers 2-4 outstanding.**
 
 ---
 
@@ -170,7 +170,7 @@ Verified end-to-end against the real binary: `GET /api/v1/status` reports `emula
 Verified end-to-end against the real binary and through the real MCP tool dispatch path: `video/text` first request returns cursor position and hash with a full grid; a repeat with matching `If-None-Match` returns a true `304`/`Content-Length: 0`; `video/frame` and `video/frame/info` do the same and share the identical hash (same underlying frame); `video/frame/info?mode=rendered` now reports the actual rendered geometry (758x569) distinctly from the raw framebuffer's (720x400), where before it silently reported the wrong one regardless of `mode=`. The bridge's `screen_text` tool renders a real numbered grid instead of an escaped JSON blob, with the blank-row count now exactly matching the visible screen.
 
 ### 1.8 Server-side wait
-**Engine + bridge. Effort: L.**
+**Engine + bridge. Effort: L. Status: done.**
 
 The single largest token and turn saving available. There is no wait-for-condition anywhere in the API: no long-poll, no SSE, no streaming (verified by grep for `set_chunked_content_provider`). Every "has it finished" is a poll, and a 60-second wait at 1 Hz is 60 model turns. The engine's own `dosbox.wait_for_text` (`lua_api.cpp:513-585`) exists only inside Lua, behind a script upload and a 2-second load rate limiter.
 
@@ -193,7 +193,21 @@ Bridge: one `wait_for` tool, and a per-call timeout override, because `DosboxCli
 
 **Depends on:** 1.5 (timeout exceptions are unhandled today and would surface as `timed out` with a dead client attached), 1.7 (hashes for `screen_change`), 1.6 (the paused case must return a clean timeout, not a 500).
 
-**Optional generalization:** a `PolledCommand` subclass on the Bridge (`Poll()` evaluated outside the mutex from both existing pump sites) would make deferred execution reusable beyond waits. Not required for 1.8; consider it only if a second deferred consumer appears.
+**Optional generalization:** a `PolledCommand` subclass on the Bridge (`Poll()` evaluated outside the mutex from both existing pump sites) would make deferred execution reusable beyond waits. Not required for 1.8; consider it only if a second deferred consumer appears - skipped, as proposed, since nothing else needs it yet.
+
+**Shipped, as proposed, with a few discoveries and one deliberate extension:**
+
+- New `src/webserver/wait.h`/`wait.cpp`: a `WaitRegistry` singleton mirroring `RenderedFrameTap`'s mutex+condvar shape (not a Bridge Command - the wait itself blocks the web thread on a condvar, never the emulation thread). `WaitFor()` registers a waiter and blocks up to `timeout_ms`; `Tick(frames_flowing)` runs on the emulation thread and is the only thing that ever reads emulator-core state for this feature.
+- All 8 conditions implemented: `text`, `screen_change`, `frames`, `replay_done`, `memory`, `stopped`, `script_done`, `program`. `screen_change` takes an explicit `baseline_hash` (reusing the `text_hash`/`frame_hash` a caller already has from 1.7, per `source: "text"|"frame"`) rather than capturing a baseline at registration time, so a caller never needs a throwaway read first. `program` supports both a `pattern` substring match and, when `pattern` is omitted, an edge-triggered "wait until the program name changes" form.
+- `Tick()` is called from **three** places, not two: the frame hook (`GFX_EndUpdate`, `frames_flowing=true`), `DEBUG_Loop` (`frames_flowing=false`), and - per the plan's own "same for the SDL pause loops after 1.6" - both SDL pause loops added in 1.6 (`frames_flowing=false`). `ReadScreenText()` is memoized once per `Tick()` call via a lazy local, shared by both `text` and `screen_change(source=text)` regardless of how many waiters need it.
+- **Extended** the plan's "text and frames waits are unsatisfiable while stopped" rule to `screen_change` and `replay_done` too - both are exactly as frame-hook-dependent as the two the plan named (replay dispatch only advances from the frame hook; a text/frame hash cannot change if no frame renders). All four resolve as `emulator_stopped` immediately on the first `frames_flowing=false` tick rather than waiting out the timeout; `memory`, `stopped`, `script_done` and `program` still progress normally while stopped or paused, since none of them depend on a frame being presented.
+- **Discovery that changed scope:** the plan assumed `DosboxClient` needed a per-call timeout override added (`client.py:20` pins `timeout=30.0`). It's already there - every verb method already accepts an optional `timeout=` kwarg and forwards it, just unused by any existing tool. `wait_for` is the first caller; no bridge client change was needed, only using what was already plumbed through.
+- **Addition beyond the plan's text:** `stopped` returns a `501` ("debugger capability not built in this binary") immediately when `C_DEBUGGER` is off, matching the existing convention in `debug.cpp`'s other debugger-gated routes, rather than silently timing out on every call for a condition that can never be satisfied in that build.
+- Concurrent waiters capped at `MaxWaiters = 4`, refused with a new `TooManyWaiters` (429, `too_many_waiters`) distinct from `BridgeQueueFull` - this registry never touches the Bridge queue at all. `WaitRegistry::DrainAll()` is called first thing in `WEBSERVER_Destroy()`, ahead of `OSDPORT_Destroy()`/`server.stop()`, so an in-flight wait doesn't block shutdown from joining.
+- A real validation bug caught during testing, not review: checking `is_number_unsigned()` on `addr`/`value` rejected values built from a plain C++ integer literal (nlohmann only tags the unsigned representation when JSON *text* had no leading `-`; a literal like `0x1000` is always the signed representation regardless of value). Fixed by validating via the inclusive `is_number_integer()` plus an explicit non-negative check, which is also more robust for real requests than depending on that representation detail.
+- Bridge: new `dosbox_mcp/tools/wait.py`, one `wait_for` tool taking the same flat `{for, timeout_ms, ...}` shape as the engine route (extra fields the chosen condition ignores are harmless), registered read-only (so it needs no mode gating) in `server.py`'s tool-registration loop. Passes `args` straight through as the JSON body and sets the httpx per-call timeout to `timeout_ms/1000 + 5.0` so the engine's own deadline always fires first.
+
+40 new engine-side tests (parsing/validation plus `WaitRegistry` mechanics - deliberately scoped to conditions that don't need a booted DOS session, since the unit-test binary never runs one; documented in the test file) and 4 bridge-side tests, all passing. Verified end-to-end against the real binary and through the real MCP tool dispatch path: `text`/`frames`/`replay_done` resolve correctly (including a real off-by-one caught live - `Z:\>` not `C:\>`, since the default drive is `Z:`, not a code bug); `screen_change`/`program` correctly time out when nothing changes; `memory` distinguishes a real timeout (address in range, value never matches) from an out-of-range address; the 5th concurrent waiter gets a real `429` while the other 4 resolve normally; a wait in flight during `/api/v1/control/shutdown` resolves with `reason: "shutting_down"` almost immediately instead of blocking; and the bridge's `wait_for` tool correctly reports `isError: false` for a legitimate timeout but `isError: true` for a bad condition (caught by the tool schema's own enum before the handler even runs) and for the `stopped`-without-debugger case.
 
 ---
 
