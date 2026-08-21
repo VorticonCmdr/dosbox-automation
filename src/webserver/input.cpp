@@ -628,6 +628,24 @@ void StartRecordingCommand::Execute()
 	InputRecording::StartOnEmulationThread();
 }
 
+void PauseRecordingCommand::Execute()
+{
+	// Re-check on the emulation thread rather than trusting a
+	// pre-check made on the httplib worker: recording could stop
+	// between that check and this Command actually running.
+	was_recording = InputRecording::IsRecording();
+	if (!was_recording) {
+		return;
+	}
+	InputRecording::Pause();
+	is_paused = InputRecording::IsPaused();
+}
+
+void StopRecordingCommand::Execute()
+{
+	was_recording = InputRecording::Stop(events);
+}
+
 void InputRecording::Pause()
 {
 	std::lock_guard<std::mutex> lock(rec_mutex);
@@ -834,23 +852,25 @@ void RecordingHandlers::PostStart(const httplib::Request&, httplib::Response& re
 
 void RecordingHandlers::PostPause(const httplib::Request&, httplib::Response& res)
 {
-	if (!InputRecording::IsRecording()) {
+	PauseRecordingCommand cmd;
+	cmd.WaitForCompletion(1000);
+	if (!cmd.was_recording) {
 		res.status = 409;
 		json err;
 		err["error"] = "Not recording";
 		send_json(res, err);
 		return;
 	}
-	InputRecording::Pause();
 	json j;
-	j["status"] = InputRecording::IsPaused() ? "paused" : "recording";
+	j["status"] = cmd.is_paused ? "paused" : "recording";
 	send_json(res, j);
 }
 
 void RecordingHandlers::PostStop(const httplib::Request&, httplib::Response& res)
 {
-	std::vector<InputEvent> events;
-	if (!InputRecording::Stop(events)) {
+	StopRecordingCommand cmd;
+	cmd.WaitForCompletion(1000);
+	if (!cmd.was_recording) {
 		res.status = 409;
 		json err;
 		err["error"] = "Not recording";
@@ -859,10 +879,10 @@ void RecordingHandlers::PostStop(const httplib::Request&, httplib::Response& res
 	}
 
 	json j;
-	j["event_count"] = events.size();
+	j["event_count"] = cmd.events.size();
 	j["events"]      = json::array();
 	double duration  = 0;
-	for (const auto& ev : events) {
+	for (const auto& ev : cmd.events) {
 		j["events"].push_back(event_to_json(ev));
 		if (ev.t_ms > duration) {
 			duration = ev.t_ms;

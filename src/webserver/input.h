@@ -90,6 +90,25 @@ public:
 	void Execute() override;
 };
 
+// InputRecording::Pause/Stop must run on the emulation thread: Stop
+// touches OsdManager (no mutex, read by Render on the emulation thread),
+// so calling it directly from the httplib worker thread is a data race.
+class PauseRecordingCommand : public Command {
+public:
+	void Execute() override;
+
+	bool was_recording = false;
+	bool is_paused     = false;
+};
+
+class StopRecordingCommand : public Command {
+public:
+	void Execute() override;
+
+	bool was_recording             = false;
+	std::vector<InputEvent> events = {};
+};
+
 namespace InputRecording {
 void StartOnEmulationThread();
 void Pause();
