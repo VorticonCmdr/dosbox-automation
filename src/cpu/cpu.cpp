@@ -4,6 +4,7 @@
 
 #include "cpu/cpu.h"
 
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <memory>
@@ -87,6 +88,14 @@ static bool should_hlt_on_idle = false;
 int64_t CPU_IODelayRemoved = 0;
 
 CPU_Decoder* cpudecoder;
+
+// See the CoreKind comment in cpu.h for what this does and doesn't track.
+static std::atomic<CoreKind> active_core_kind{CoreKind::Normal};
+
+CoreKind CPU_GetActiveCoreKind()
+{
+	return active_core_kind;
+}
 
 bool CPU_CycleAutoAdjust = false;
 
@@ -277,7 +286,8 @@ void CPU_RestoreRealModeCyclesConfig()
 	}
 #if C_DYNAMIC_X86 || C_DYNREC
 	if (auto_determine_mode.auto_core) {
-		cpudecoder = &CPU_Core_Normal_Run;
+		cpudecoder       = &CPU_Core_Normal_Run;
+		active_core_kind = CoreKind::Normal;
 
 		CPU_CycleLeft = 0;
 		CPU_Cycles    = 0;
@@ -2185,12 +2195,14 @@ void CPU_SET_CRX(Bitu cr, Bitu value)
 #if C_DYNAMIC_X86
 			if (auto_determine_mode.auto_core) {
 				CPU_Core_Dyn_X86_Cache_Init(true);
-				cpudecoder = &CPU_Core_Dyn_X86_Run;
+				cpudecoder       = &CPU_Core_Dyn_X86_Run;
+				active_core_kind = CoreKind::Dynamic;
 			}
 #elif C_DYNREC
 			if (auto_determine_mode.auto_core) {
 				CPU_Core_Dynrec_Cache_Init(true);
-				cpudecoder = &CPU_Core_Dynrec_Run;
+				cpudecoder       = &CPU_Core_Dynrec_Run;
+				active_core_kind = CoreKind::Dynamic;
 			}
 #endif
 			if (legacy_cycles_mode) {
@@ -3545,35 +3557,43 @@ public:
 
 	void ConfigureCpuCore(const std::string& cpu_core)
 	{
-		cpudecoder = &CPU_Core_Normal_Run;
+		cpudecoder       = &CPU_Core_Normal_Run;
+		active_core_kind = CoreKind::Normal;
 
 		if (cpu_core == "normal") {
-			cpudecoder = &CPU_Core_Normal_Run;
+			cpudecoder       = &CPU_Core_Normal_Run;
+			active_core_kind = CoreKind::Normal;
 
 		} else if (cpu_core == "simple") {
-			cpudecoder = &CPU_Core_Simple_Run;
+			cpudecoder       = &CPU_Core_Simple_Run;
+			active_core_kind = CoreKind::Simple;
 
 		} else if (cpu_core == "full") {
-			cpudecoder = &CPU_Core_Full_Run;
+			cpudecoder       = &CPU_Core_Full_Run;
+			active_core_kind = CoreKind::Full;
 
 		} else if (cpu_core == "auto") {
-			cpudecoder = &CPU_Core_Normal_Run;
+			cpudecoder       = &CPU_Core_Normal_Run;
+			active_core_kind = CoreKind::Normal;
 
 #if C_DYNAMIC_X86
 			auto_determine_mode.auto_core = true;
 
 		} else if (cpu_core == "dynamic") {
-			cpudecoder = &CPU_Core_Dyn_X86_Run;
+			cpudecoder       = &CPU_Core_Dyn_X86_Run;
+			active_core_kind = CoreKind::Dynamic;
 			CPU_Core_Dyn_X86_SetFPUMode(true);
 
 		} else if (cpu_core == "dynamic_nodhfpu") {
-			cpudecoder = &CPU_Core_Dyn_X86_Run;
+			cpudecoder       = &CPU_Core_Dyn_X86_Run;
+			active_core_kind = CoreKind::Dynamic;
 			CPU_Core_Dyn_X86_SetFPUMode(false);
 #elif C_DYNREC
 			auto_determine_mode.auto_core = true;
 
 		} else if (cpu_core == "dynamic") {
-			cpudecoder = &CPU_Core_Dynrec_Run;
+			cpudecoder       = &CPU_Core_Dynrec_Run;
+			active_core_kind = CoreKind::Dynamic;
 #else
 #endif
 		}

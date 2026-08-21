@@ -40,6 +40,35 @@ struct InputEvent {
 	float wheel_delta = 0;
 };
 
+// Upper bound for an event's position on the replay timeline ('t',
+// 'delay_ms' after accumulation, and 'cps'-derived timing). PIC_AddEvent
+// (hardware/pic.h) turns this delay into `CPU_CycleMax * delay_ms` CPU
+// cycles and asserts the result fits an int32_t; an unbounded value from
+// the request body reaches that assert directly (or is undefined
+// behaviour with asserts compiled out). No legitimate automation
+// sequence needs a timeline longer than this.
+inline constexpr double MaxEventTimeMs = 24.0 * 60 * 60 * 1000; // 24 hours
+
+// Generous upper bound for a frame-relative event's target frame (a
+// billion frames is months of continuous playback at any real frame
+// rate). Guards against the same class of "hangs the replay state
+// forever" input as MaxEventTimeMs, for the frame-based scheduler.
+inline constexpr uint64_t MaxEventFrame = 1'000'000'000;
+
+// A cps near zero makes ExpandTextToEvents' step_ms (1000/cps) huge:
+// accumulated across up to MaxTypedTextChars characters, that reaches the
+// same PIC_AddEvent overflow MaxEventTimeMs guards against. MinTypingCps
+// is already an unrealistically slow "one keystroke every 10 seconds";
+// MaxTypedTextChars characters at that rate stays comfortably under
+// MaxEventTimeMs.
+inline constexpr double MinTypingCps = 0.1;
+inline constexpr double MaxTypingCps = 1000.0;
+
+// Max events in one /api/v1/input/sequence body, and max characters in
+// one /api/v1/input/type body.
+inline constexpr size_t MaxInputEvents    = 32000;
+inline constexpr size_t MaxTypedTextChars = 4096;
+
 // Bounds for an event's position on the replay timeline and a
 // frame-relative event's target frame. PIC_AddEvent (hardware/pic.h)
 // turns an event's time into CPU cycles and asserts the result fits an

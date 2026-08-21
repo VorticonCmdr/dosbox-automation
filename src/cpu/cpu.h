@@ -95,6 +95,20 @@ typedef Bits(CPU_Decoder)();
 
 extern CPU_Decoder* cpudecoder;
 
+// The operator/config-visible core selection, kept separately from
+// cpudecoder because cpudecoder is a plain function pointer written only
+// on the emulation thread - unsafe to read from the webserver's info
+// route, which must answer without crossing the Bridge. Tracks only
+// ConfigureCpuCore and the runtime auto-switch in CPU_SET_CRX (and its
+// reverse in CPU_RestoreRealModeCyclesConfig); transient trap/HLT/fault
+// decoder swaps and the 386_prefetch/486_prefetch cputype override are
+// not reflected here, since all of them share the same breakpoint check
+// site as Normal and so don't change the answer a capability query cares
+// about.
+enum class CoreKind { Normal, Simple, Full, Dynamic };
+
+CoreKind CPU_GetActiveCoreKind();
+
 constexpr bool CPU_ReuseCodepages = true;
 #if defined(WIN32)
 constexpr bool CPU_UseRwxMemProtect = true;

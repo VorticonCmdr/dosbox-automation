@@ -28,39 +28,15 @@ using json = nlohmann::json;
 
 namespace Webserver {
 
-// Upper bound for an event's position on the replay timeline ('t',
-// 'delay_ms' after accumulation, and 'cps'-derived timing). PIC_AddEvent
-// (hardware/pic.h) turns this delay into `CPU_CycleMax * delay_ms` CPU
-// cycles and asserts the result fits an int32_t; an unbounded value from
-// the request body reaches that assert directly (or is undefined
-// behaviour with asserts compiled out). No legitimate automation
-// sequence needs a timeline longer than this.
-constexpr double MaxEventTimeMs = 24.0 * 60 * 60 * 1000; // 24 hours
-
 bool IsValidEventTimeMs(const double t_ms)
 {
 	return t_ms >= 0 && t_ms <= MaxEventTimeMs;
 }
 
-// Generous upper bound for a frame-relative event's target frame (a
-// billion frames is months of continuous playback at any real frame
-// rate). Guards against the same class of "hangs the replay state
-// forever" input as MaxEventTimeMs, for the frame-based scheduler.
-constexpr uint64_t MaxEventFrame = 1'000'000'000;
-
 bool IsValidEventFrame(const int64_t frame)
 {
 	return frame >= 0 && static_cast<uint64_t>(frame) <= MaxEventFrame;
 }
-
-// A cps near zero makes ExpandTextToEvents' step_ms (1000/cps) huge:
-// accumulated across up to InputTypeCommand::Post's max_text characters,
-// that reaches the same PIC_AddEvent overflow MaxEventTimeMs guards
-// against. MinCps is already an unrealistically slow "one keystroke
-// every 10 seconds"; max_text characters at that rate stays comfortably
-// under MaxEventTimeMs.
-constexpr double MinTypingCps = 0.1;
-constexpr double MaxTypingCps = 1000.0;
 
 bool IsValidTypingCps(const double cps)
 {
@@ -379,12 +355,11 @@ void InputSequenceCommand::Post(const httplib::Request& req, httplib::Response& 
 		return;
 	}
 
-	constexpr size_t max_events = 32000;
-	if (body["events"].size() > max_events) {
+	if (body["events"].size() > MaxInputEvents) {
 		res.status = 400;
 		json err;
 		err["error"] = "Too many events (max " +
-		               std::to_string(max_events) + ")";
+		               std::to_string(MaxInputEvents) + ")";
 		send_json(res, err);
 		return;
 	}
@@ -1066,12 +1041,11 @@ void InputTypeCommand::Post(const httplib::Request& req, httplib::Response& res)
 
 	const auto text = body["text"].get<std::string>();
 
-	constexpr size_t max_text = 4096;
-	if (text.size() > max_text) {
+	if (text.size() > MaxTypedTextChars) {
 		res.status = 400;
 		json err;
 		err["error"] = "Text too long (max " +
-		               std::to_string(max_text) + " chars)";
+		               std::to_string(MaxTypedTextChars) + " chars)";
 		send_json(res, err);
 		return;
 	}

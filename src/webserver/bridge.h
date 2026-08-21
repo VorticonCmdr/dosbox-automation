@@ -49,6 +49,11 @@ public:
 
 constexpr size_t MaxQueueDepth = 64;
 
+// Command::WaitForCompletion's default deadline. Many call sites override
+// this for a specific command that's known to run long (e.g. a 2000ms
+// memory search); this is the number a caller sees when it doesn't.
+constexpr uint32_t DefaultBridgeTimeoutMs = 250;
+
 // How long the pump can go unserviced before ExecuteCommand refuses new
 // commands outright. normal_loop() calls ProcessRequests() once per
 // PIC_RunQueue() tick (sub-millisecond in practice), and the SDL pause
@@ -61,7 +66,7 @@ public:
 	virtual ~Command() {}
 	virtual void Execute() = 0;
 
-	void WaitForCompletion(const uint32_t timeout_ms = 250);
+	void WaitForCompletion(const uint32_t timeout_ms = DefaultBridgeTimeoutMs);
 
 	// Set by Execute() to report errors without throwing on the
 	// emulation thread, or by ProcessRequests() when Execute() itself

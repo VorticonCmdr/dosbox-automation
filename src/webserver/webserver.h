@@ -6,6 +6,7 @@
 #define DOSBOX_WEBSERVER_H
 
 #include <charconv>
+#include <cstddef>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -20,6 +21,11 @@ namespace Webserver {
 
 constexpr auto TypeJson   = "application/json";
 constexpr auto TypeBinary = "application/octet-stream";
+
+// httplib::Server::set_payload_max_length's cap, applied to every request
+// body regardless of route. Named so the capability descriptor
+// (capabilities.cpp) can report the same number it enforces.
+constexpr size_t MaxRequestBodyBytes = 10 * 1024 * 1024;
 
 enum class Source {
 	Param, // get_param_value

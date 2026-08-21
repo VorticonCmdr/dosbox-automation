@@ -99,10 +99,15 @@ void ReadMemoryCommand::Execute()
 
 void ReadMemoryCommand::Get(const Request& req, Response& res)
 {
-	// 128 MiB per request ought to be enough for everyone.
+	// MaxMemoryTransferBytes per request ought to be enough for everyone.
 	// This limit just prevents bad things when accidentally requesting an
 	// unreasonably large size.
-	auto num_bytes = num_param<uint32_t>(req, Source::Path, "len", 1, 128 * 1024 * 1024);
+	auto num_bytes = num_param<uint32_t>(req,
+	                                     Source::Path,
+	                                     "len",
+	                                     1,
+	                                     static_cast<uint32_t>(
+	                                             MaxMemoryTransferBytes));
 
 	Segment segment;
 	uint32_t offset;
@@ -175,8 +180,6 @@ void WriteMemoryCommand::Put(const httplib::Request& req, httplib::Response& res
 	uint32_t offset;
 	parse_mem_addr(req, segment, offset);
 
-	constexpr size_t MaxWriteBytes = 128 * 1024 * 1024; // 128 MiB
-
 	std::string data;
 
 	if (req.get_header_value("Content-Type") == TypeJson) {
@@ -192,7 +195,7 @@ void WriteMemoryCommand::Put(const httplib::Request& req, httplib::Response& res
 		                            std::string(TypeBinary));
 	}
 
-	if (data.size() > MaxWriteBytes) {
+	if (data.size() > MaxMemoryTransferBytes) {
 		throw std::invalid_argument(
 		        "Write data exceeds maximum size of 128 MiB");
 	}
@@ -282,10 +285,10 @@ void SearchMemoryCommand::Post(const Request& req, Response& res)
 		throw std::invalid_argument("width must be 1, 2, or 4");
 	}
 
-	constexpr uint32_t MaxSpan = 16 * 1024 * 1024;
-	if (end <= start || end - start > MaxSpan) {
+	if (end <= start || end - start > MaxSearchSpanBytes) {
 		throw std::invalid_argument("search span must be 1.." +
-		                            std::to_string(MaxSpan) + " bytes");
+		                            std::to_string(MaxSearchSpanBytes) +
+		                            " bytes");
 	}
 
 	SearchMemoryCommand cmd(start, end, value, width);

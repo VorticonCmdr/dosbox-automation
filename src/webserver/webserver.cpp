@@ -4,6 +4,7 @@
 
 #include "webserver.h"
 #include "bridge.h"
+#include "capabilities.h"
 #include "capture.h"
 #include "control.h"
 #include "drive.h"
@@ -470,7 +471,7 @@ static void setup_security(const std::string& addr, int port,
 		res.status = httplib::StatusCode::Forbidden_403;
 	});
 
-	server.set_payload_max_length(10 * 1024 * 1024);
+	server.set_payload_max_length(MaxRequestBodyBytes);
 }
 
 static void run(const std::string addr, const int port,
@@ -510,17 +511,13 @@ static void run(const std::string addr, const int port,
 
 	server.Get("/api/v1/dosbox/info",
 	           [](const httplib::Request&, httplib::Response& res) {
+		           const auto capabilities = BuildCapabilitiesBlock();
+
 		           json j;
-		           j["version"]  = DOSBOX_GetDetailedVersion();
-		           j["features"] = {
-		                   {       "memory",                          true},
-		                   {        "input",                          true},
-		                   {"cpu_registers",                          true},
-		                   {  "cpu_control",                          true},
-		                   {      "port_io",                          true},
-		                   {       "freeze",                          true},
-		                   {     "debugger", static_cast<bool>(C_DEBUGGER)},
-		           };
+		           j["version"]      = DOSBOX_GetDetailedVersion();
+		           j["features"]     = FeaturesProjection(capabilities);
+		           j["capabilities"] = capabilities;
+		           j["limits"]       = BuildServerLimits();
 		           send_json(res, j);
 	           });
 

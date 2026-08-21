@@ -18,6 +18,15 @@ namespace Webserver {
 
 enum class Segment { None, CS, SS, DS, ES, FS, GS };
 
+// Shared by ReadMemoryCommand::Get's 'len' bound and
+// WriteMemoryCommand::Put's body-size check, so the two directions can't
+// silently drift apart, and by the capability descriptor
+// (capabilities.cpp) so it reports the same number it enforces.
+constexpr size_t MaxMemoryTransferBytes = 128 * 1024 * 1024; // 128 MiB
+
+// SearchMemoryCommand::Post's [start, end) span bound.
+constexpr uint32_t MaxSearchSpanBytes = 16 * 1024 * 1024; // 16 MiB
+
 class ReadMemoryCommand : public Command {
 public:
 	ReadMemoryCommand(const Segment base, const uint32_t offset, const uint32_t len)
