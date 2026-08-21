@@ -18,15 +18,29 @@
 
 #include "libs/json/json.h"
 
-#include <png.h>
 #include <jpeglib.h>
+#include <png.h>
 
+#include <csetjmp>
 #include <cstring>
 #include <vector>
 
 using json = nlohmann::json;
 
 namespace Webserver {
+
+// Frees a RenderedImage's deep-copied framebuffer on every exit from the
+// scope it guards, including an exception thrown while encoding it.
+// RenderedImage itself exposes free() rather than a destructor, since
+// it is passed and copied by value elsewhere without always owning a
+// deep copy; this file does own one, so it wraps it in RAII locally.
+struct FrameGuard {
+	RenderedImage& frame;
+	~FrameGuard()
+	{
+		frame.free();
+	}
+};
 
 static std::vector<uint8_t> convert_to_rgb888(const RenderedImage& image)
 {
@@ -36,12 +50,12 @@ static std::vector<uint8_t> convert_to_rgb888(const RenderedImage& image)
 
 	for (int y = 0; y < h; y++) {
 		const auto* src_row = image.image_data + y * image.pitch;
-		auto* dst_row = rgb.data() + y * w * 3;
+		auto* dst_row       = rgb.data() + y * w * 3;
 
 		switch (image.params.pixel_format) {
 		case PixelFormat::Indexed8:
 			for (int x = 0; x < w; x++) {
-				const auto idx = src_row[x];
+				const auto idx     = src_row[x];
 				dst_row[x * 3 + 0] = image.palette[idx].red;
 				dst_row[x * 3 + 1] = image.palette[idx].green;
 				dst_row[x * 3 + 2] = image.palette[idx].blue;
@@ -63,47 +77,85 @@ static std::vector<uint8_t> convert_to_rgb888(const RenderedImage& image)
 			break;
 		case PixelFormat::RGB555_Packed16:
 			for (int x = 0; x < w; x++) {
-				const auto px = reinterpret_cast<const uint16_t*>(src_row)[x];
-				dst_row[x * 3 + 0] = static_cast<uint8_t>(((px >> 10) & 0x1F) * 255 / 31);
-				dst_row[x * 3 + 1] = static_cast<uint8_t>(((px >> 5) & 0x1F) * 255 / 31);
-				dst_row[x * 3 + 2] = static_cast<uint8_t>((px & 0x1F) * 255 / 31);
+				const auto px = reinterpret_cast<const uint16_t*>(
+				        src_row)[x];
+				dst_row[x * 3 + 0] = static_cast<uint8_t>(
+				        ((px >> 10) & 0x1F) * 255 / 31);
+				dst_row[x * 3 + 1] = static_cast<uint8_t>(
+				        ((px >> 5) & 0x1F) * 255 / 31);
+				dst_row[x * 3 + 2] = static_cast<uint8_t>(
+				        (px & 0x1F) * 255 / 31);
 			}
 			break;
 		case PixelFormat::RGB565_Packed16:
 			for (int x = 0; x < w; x++) {
-				const auto px = reinterpret_cast<const uint16_t*>(src_row)[x];
-				dst_row[x * 3 + 0] = static_cast<uint8_t>(((px >> 11) & 0x1F) * 255 / 31);
-				dst_row[x * 3 + 1] = static_cast<uint8_t>(((px >> 5) & 0x3F) * 255 / 63);
-				dst_row[x * 3 + 2] = static_cast<uint8_t>((px & 0x1F) * 255 / 31);
+				const auto px = reinterpret_cast<const uint16_t*>(
+				        src_row)[x];
+				dst_row[x * 3 + 0] = static_cast<uint8_t>(
+				        ((px >> 11) & 0x1F) * 255 / 31);
+				dst_row[x * 3 + 1] = static_cast<uint8_t>(
+				        ((px >> 5) & 0x3F) * 255 / 63);
+				dst_row[x * 3 + 2] = static_cast<uint8_t>(
+				        (px & 0x1F) * 255 / 31);
 			}
 			break;
-		default:
-			std::memset(dst_row, 0, w * 3);
-			break;
+		default: std::memset(dst_row, 0, w * 3); break;
 		}
 	}
 	return rgb;
 }
 
+namespace {
+struct JpegErrorMgr {
+	struct jpeg_error_mgr pub  = {};
+	std::jmp_buf setjmp_buffer = {};
+};
+} // namespace
+
+// libjpeg's default error_exit prints a message and calls exit(),
+// terminating the whole process on any fatal libjpeg error - reachable
+// from a single malformed request. Longjmp back into encode_jpeg
+// instead so it becomes an ordinary C++ exception.
+static void jpeg_error_exit(j_common_ptr cinfo)
+{
+	auto* err = reinterpret_cast<JpegErrorMgr*>(cinfo->err);
+	std::longjmp(err->setjmp_buffer, 1);
+}
+
 static std::string encode_jpeg(const RenderedImage& image, int quality = 98)
 {
-	auto rgb = convert_to_rgb888(image);
+	auto rgb     = convert_to_rgb888(image);
 	const auto w = image.params.width;
 	const auto h = image.params.height;
 
 	struct jpeg_compress_struct cinfo = {};
-	struct jpeg_error_mgr jerr = {};
-	cinfo.err = jpeg_std_error(&jerr);
-	jpeg_create_compress(&cinfo);
+	JpegErrorMgr jerr                 = {};
+	cinfo.err                         = jpeg_std_error(&jerr.pub);
+	jerr.pub.error_exit               = jpeg_error_exit;
 
-	unsigned char* buf = nullptr;
+	// Declared (and zero-initialised) before setjmp so the error branch
+	// below can always safely free() them - free(nullptr) is a no-op -
+	// regardless of how far encoding got before failing.
+	unsigned char* buf     = nullptr;
 	unsigned long buf_size = 0;
+
+	// setjmp/longjmp is confined to this function's single scope: rgb
+	// (the only local with a non-trivial destructor) is constructed
+	// above this point and destroyed by encode_jpeg's normal return or
+	// unwind, never skipped by the jump target below.
+	if (setjmp(jerr.setjmp_buffer)) {
+		jpeg_destroy_compress(&cinfo);
+		free(buf);
+		throw std::runtime_error("JPEG encoding failed");
+	}
+
+	jpeg_create_compress(&cinfo);
 	jpeg_mem_dest(&cinfo, &buf, &buf_size);
 
-	cinfo.image_width = w;
-	cinfo.image_height = h;
+	cinfo.image_width      = w;
+	cinfo.image_height     = h;
 	cinfo.input_components = 3;
-	cinfo.in_color_space = JCS_RGB;
+	cinfo.in_color_space   = JCS_RGB;
 	jpeg_set_defaults(&cinfo);
 	jpeg_set_quality(&cinfo, quality, TRUE);
 	jpeg_start_compress(&cinfo, TRUE);
@@ -129,21 +181,29 @@ static void write_png_to_buffer(png_structp png_ptr, png_bytep data, png_size_t 
 
 static std::string encode_png(const RenderedImage& image)
 {
-	auto rgb = convert_to_rgb888(image);
+	auto rgb     = convert_to_rgb888(image);
 	const auto w = image.params.width;
 	const auto h = image.params.height;
 
 	std::string result;
 
-	auto* png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING,
-	                                         nullptr, nullptr, nullptr);
+	auto* png_ptr  = png_create_write_struct(PNG_LIBPNG_VER_STRING,
+	                                         nullptr,
+	                                         nullptr,
+	                                         nullptr);
 	auto* info_ptr = png_create_info_struct(png_ptr);
 
 	png_set_write_fn(png_ptr, &result, write_png_to_buffer, nullptr);
 
-	png_set_IHDR(png_ptr, info_ptr, w, h, 8,
-	             PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
-	             PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+	png_set_IHDR(png_ptr,
+	             info_ptr,
+	             w,
+	             h,
+	             8,
+	             PNG_COLOR_TYPE_RGB,
+	             PNG_INTERLACE_NONE,
+	             PNG_COMPRESSION_TYPE_DEFAULT,
+	             PNG_FILTER_TYPE_DEFAULT);
 
 	png_set_compression_level(png_ptr, 1);
 	png_write_info(png_ptr, info_ptr);
@@ -161,27 +221,32 @@ static std::string encode_png(const RenderedImage& image)
 
 static std::string encode_raw(const RenderedImage& image)
 {
-	const auto w = static_cast<uint32_t>(image.params.width);
-	const auto h = static_cast<uint32_t>(image.params.height);
-	const auto pitch = static_cast<int32_t>(image.pitch);
-	const auto pf = static_cast<uint8_t>(image.params.pixel_format);
+	const auto w      = static_cast<uint32_t>(image.params.width);
+	const auto h      = static_cast<uint32_t>(image.params.height);
+	const auto pitch  = static_cast<int32_t>(image.pitch);
+	const auto pf     = static_cast<uint8_t>(image.params.pixel_format);
 	const auto is_pal = image.is_paletted();
 	const uint16_t pal_count = is_pal ? 256 : 0;
 
-	const auto data_size = static_cast<size_t>(h * std::abs(pitch));
-	const auto header_size = sizeof(w) + sizeof(h) + sizeof(pitch) +
-	                         sizeof(pf) + sizeof(pal_count);
+	const auto data_size    = static_cast<size_t>(h * std::abs(pitch));
+	const auto header_size  = sizeof(w) + sizeof(h) + sizeof(pitch) +
+	                          sizeof(pf) + sizeof(pal_count);
 	const auto palette_size = static_cast<size_t>(pal_count * 3);
 
 	std::string result;
 	result.resize(header_size + palette_size + data_size);
 	auto* p = result.data();
 
-	std::memcpy(p, &w, sizeof(w)); p += sizeof(w);
-	std::memcpy(p, &h, sizeof(h)); p += sizeof(h);
-	std::memcpy(p, &pitch, sizeof(pitch)); p += sizeof(pitch);
-	std::memcpy(p, &pf, sizeof(pf)); p += sizeof(pf);
-	std::memcpy(p, &pal_count, sizeof(pal_count)); p += sizeof(pal_count);
+	std::memcpy(p, &w, sizeof(w));
+	p += sizeof(w);
+	std::memcpy(p, &h, sizeof(h));
+	p += sizeof(h);
+	std::memcpy(p, &pitch, sizeof(pitch));
+	p += sizeof(pitch);
+	std::memcpy(p, &pf, sizeof(pf));
+	p += sizeof(pf);
+	std::memcpy(p, &pal_count, sizeof(pal_count));
+	p += sizeof(pal_count);
 
 	if (is_pal) {
 		for (int i = 0; i < pal_count; i++) {
@@ -210,7 +275,31 @@ static const char* pixel_format_name(PixelFormat pf)
 
 void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res)
 {
+	// Parse every parameter that can throw before acquiring the frame:
+	// acquisition below deep-copies the framebuffer, and RenderedImage
+	// frees through an explicit free() call, not a destructor, so an
+	// exception between acquiring and that call would otherwise leak it
+	// (num_param() on a malformed 'quality' being the likely case, and
+	// the most likely request to carry a typo given how often this
+	// route is polled).
 	const auto source = ParseFrameSource(req.get_param_value("mode"));
+
+	auto format = req.get_param_value("format");
+
+	if (format.empty()) {
+		const auto accept = req.get_header_value("Accept");
+		if (accept.find("image/png") != std::string::npos) {
+			format = "png";
+		} else if (accept.find("application/octet-stream") !=
+		           std::string::npos) {
+			format = "raw";
+		}
+	}
+
+	int quality = 98;
+	if (format != "png" && format != "raw" && req.has_param("quality")) {
+		quality = num_param<int>(req, Source::Param, "quality", 1, 100);
+	}
 
 	RenderedImage frame = {};
 
@@ -240,16 +329,7 @@ void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res
 		frame = RENDER_GetSharedFrame();
 	}
 
-	auto format = req.get_param_value("format");
-
-	if (format.empty()) {
-		const auto accept = req.get_header_value("Accept");
-		if (accept.find("image/png") != std::string::npos) {
-			format = "png";
-		} else if (accept.find("application/octet-stream") != std::string::npos) {
-			format = "raw";
-		}
-	}
+	FrameGuard guard{frame};
 
 	if (format == "png") {
 		auto data = encode_png(frame);
@@ -258,15 +338,9 @@ void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res
 		auto data = encode_raw(frame);
 		res.set_content(std::move(data), "application/octet-stream");
 	} else {
-		int quality = 98;
-		if (req.has_param("quality")) {
-			quality = num_param<int>(req, Source::Param, "quality", 1, 100);
-		}
 		auto data = encode_jpeg(frame, quality);
 		res.set_content(std::move(data), "image/jpeg");
 	}
-
-	frame.free();
 }
 
 void VideoHandlers::GetFrameInfo(const httplib::Request&, httplib::Response& res)
@@ -280,15 +354,16 @@ void VideoHandlers::GetFrameInfo(const httplib::Request&, httplib::Response& res
 	}
 
 	auto frame = RENDER_GetSharedFrame();
+	FrameGuard guard{frame};
 
 	const auto& vm = frame.params.video_mode;
 
 	json j;
-	j["width"] = frame.params.width;
-	j["height"] = frame.params.height;
+	j["width"]        = frame.params.width;
+	j["height"]       = frame.params.height;
 	j["pixel_format"] = pixel_format_name(frame.params.pixel_format);
-	j["pitch"] = frame.pitch;
-	j["is_paletted"] = frame.is_paletted();
+	j["pitch"]        = frame.pitch;
+	j["is_paletted"]  = frame.is_paletted();
 
 	j["video_mode"]["width"]             = vm.width;
 	j["video_mode"]["height"]            = vm.height;
@@ -301,8 +376,6 @@ void VideoHandlers::GetFrameInfo(const httplib::Request&, httplib::Response& res
 	j["rendered_double_scan"] = frame.params.rendered_double_scan;
 	j["double_width"]         = frame.params.double_width;
 	j["double_height"]        = frame.params.double_height;
-
-	frame.free();
 
 	send_json(res, j);
 }
@@ -338,8 +411,7 @@ void ScreenTextCommand::Get(const httplib::Request&, httplib::Response& res)
 	// CP437 screen codes to UTF-8 so box-drawing and shade glyphs survive
 	// the JSON round-trip instead of being dropped as invalid bytes.
 	// WithControlCodes keeps the row-separating newlines as line breaks.
-	j["text"] = dos_to_utf8(cmd.text_dos,
-	                        DosStringConvertMode::WithControlCodes);
+	j["text"] = dos_to_utf8(cmd.text_dos, DosStringConvertMode::WithControlCodes);
 
 	send_json(res, j);
 }
