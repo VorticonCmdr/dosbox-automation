@@ -15,6 +15,8 @@
 #include "hardware/memory.h"
 #include "ints/int10.h"
 #include "lua/lua_api.h"
+#include "utils/fnv_hash.h"
+#include "utils/string_utils.h"
 
 #include "libs/json/json.h"
 
@@ -23,6 +25,7 @@
 
 #include <csetjmp>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 using json = nlohmann::json;
@@ -273,6 +276,117 @@ static const char* pixel_format_name(PixelFormat pf)
 	}
 }
 
+// --- ETags (video/frame, video/frame/info, video/text) ---
+
+std::string FormatEtag(const uint64_t hash)
+{
+	return format_str("%016llx", static_cast<unsigned long long>(hash));
+}
+
+bool EtagMatches(std::string_view raw_if_none_match, const uint64_t hash)
+{
+	if (raw_if_none_match.empty()) {
+		return false;
+	}
+	// RFC 7232 requires ETags to be quoted; accepted unquoted too,
+	// matching the If-Match precedent already in
+	// WriteMemoryCommand::Put (memory.cpp).
+	if (raw_if_none_match.size() >= 2 && raw_if_none_match.starts_with('"') &&
+	    raw_if_none_match.ends_with('"')) {
+		raw_if_none_match.remove_prefix(1);
+		raw_if_none_match.remove_suffix(1);
+	}
+	return raw_if_none_match == FormatEtag(hash);
+}
+
+static std::string quote_etag(const uint64_t hash)
+{
+	return "\"" + FormatEtag(hash) + "\"";
+}
+
+static std::string get_if_none_match(const httplib::Request& req)
+{
+	if (!req.has_header("If-None-Match")) {
+		return {};
+	}
+	return std::string(req.get_header_value("If-None-Match"));
+}
+
+struct AcquiredFrame {
+	RenderedImage image = {};
+	uint64_t hash       = 0;
+};
+
+// Acquires the frame matching req's 'mode', or returns nullopt having
+// already written the full response itself: a 503 when no frame is
+// available, or a 304 when If-None-Match already matches.
+//
+// For the default (raw/shared) source the hash is a pre-computed atomic
+// (RENDER_GetSharedFrameHash(), set by RENDER_UpdateSharedFrame on the
+// emulation thread) checked *before* RENDER_GetSharedFrame()'s deep
+// copy, so a match skips that copy entirely rather than paying for it
+// only to discard the result. mode=rendered has no such precomputed
+// hash - the frame has to be captured and hashed before it's known
+// whether anything changed, so a 304 there still pays the up-to-2s
+// forced-present wait; it only saves the encode and transfer.
+static std::optional<AcquiredFrame> AcquireFrame(const httplib::Request& req,
+                                                 httplib::Response& res)
+{
+	const auto source = ParseFrameSource(req.get_param_value("mode"));
+	const auto if_none_match = get_if_none_match(req);
+
+	if (source == FrameSource::Rendered) {
+		// Long enough for the forced present to come around even at
+		// low frame rates; a paused or minimized emulator times out.
+		constexpr auto RenderedFrameTimeout = std::chrono::milliseconds(2000);
+
+		auto rendered = GetRenderedFrameTap().RequestAndWait(
+		        RenderedFrameTimeout);
+		if (!rendered) {
+			res.status = 503;
+			json err;
+			err["error"] = "No rendered frame available (nothing is being presented)";
+			send_json(res, err);
+			return std::nullopt;
+		}
+
+		AcquiredFrame result;
+		result.image = *rendered;
+		const auto data_size = static_cast<size_t>(
+		                               std::abs(result.image.pitch)) *
+		                       static_cast<size_t>(result.image.params.height);
+		result.hash = Fnv1aHash(result.image.image_data, data_size);
+
+		if (EtagMatches(if_none_match, result.hash)) {
+			result.image.free();
+			res.status = httplib::StatusCode::NotModified_304;
+			res.set_header("ETag", quote_etag(result.hash));
+			return std::nullopt;
+		}
+		return result;
+	}
+
+	if (!RENDER_HasSharedFrame()) {
+		res.status = 503;
+		json err;
+		err["error"] = "No frame available yet";
+		send_json(res, err);
+		return std::nullopt;
+	}
+
+	const auto hash = RENDER_GetSharedFrameHash();
+	if (EtagMatches(if_none_match, hash)) {
+		res.status = httplib::StatusCode::NotModified_304;
+		res.set_header("ETag", quote_etag(hash));
+		return std::nullopt;
+	}
+
+	AcquiredFrame result;
+	result.hash  = hash;
+	result.image = RENDER_GetSharedFrame();
+	return result;
+}
+
 void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res)
 {
 	// Parse every parameter that can throw before acquiring the frame:
@@ -281,9 +395,9 @@ void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res
 	// exception between acquiring and that call would otherwise leak it
 	// (num_param() on a malformed 'quality' being the likely case, and
 	// the most likely request to carry a typo given how often this
-	// route is polled).
-	const auto source = ParseFrameSource(req.get_param_value("mode"));
-
+	// route is polled). Validated regardless of whether the request
+	// ends up a 304: a malformed quality is the caller's mistake either
+	// way.
 	auto format = req.get_param_value("format");
 
 	if (format.empty()) {
@@ -301,35 +415,14 @@ void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res
 		quality = num_param<int>(req, Source::Param, "quality", 1, 100);
 	}
 
-	RenderedImage frame = {};
-
-	if (source == FrameSource::Rendered) {
-		// Long enough for the forced present to come around even at
-		// low frame rates; a paused or minimized emulator times out.
-		constexpr auto RenderedFrameTimeout = std::chrono::milliseconds(2000);
-
-		auto rendered = GetRenderedFrameTap().RequestAndWait(
-		        RenderedFrameTimeout);
-		if (!rendered) {
-			res.status = 503;
-			json err;
-			err["error"] = "No rendered frame available (nothing is being presented)";
-			send_json(res, err);
-			return;
-		}
-		frame = *rendered;
-	} else {
-		if (!RENDER_HasSharedFrame()) {
-			res.status = 503;
-			json err;
-			err["error"] = "No frame available yet";
-			send_json(res, err);
-			return;
-		}
-		frame = RENDER_GetSharedFrame();
+	auto acquired = AcquireFrame(req, res);
+	if (!acquired) {
+		return;
 	}
 
-	FrameGuard guard{frame};
+	FrameGuard guard{acquired->image};
+	res.set_header("ETag", quote_etag(acquired->hash));
+	const auto& frame = acquired->image;
 
 	if (format == "png") {
 		auto data = encode_png(frame);
@@ -343,18 +436,16 @@ void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res
 	}
 }
 
-void VideoHandlers::GetFrameInfo(const httplib::Request&, httplib::Response& res)
+void VideoHandlers::GetFrameInfo(const httplib::Request& req, httplib::Response& res)
 {
-	if (!RENDER_HasSharedFrame()) {
-		res.status = 503;
-		json err;
-		err["error"] = "No frame available yet";
-		send_json(res, err);
+	auto acquired = AcquireFrame(req, res);
+	if (!acquired) {
 		return;
 	}
 
-	auto frame = RENDER_GetSharedFrame();
-	FrameGuard guard{frame};
+	FrameGuard guard{acquired->image};
+	res.set_header("ETag", quote_etag(acquired->hash));
+	const auto& frame = acquired->image;
 
 	const auto& vm = frame.params.video_mode;
 
@@ -364,6 +455,7 @@ void VideoHandlers::GetFrameInfo(const httplib::Request&, httplib::Response& res
 	j["pixel_format"] = pixel_format_name(frame.params.pixel_format);
 	j["pitch"]        = frame.pitch;
 	j["is_paletted"]  = frame.is_paletted();
+	j["frame_hash"]   = FormatEtag(acquired->hash);
 
 	j["video_mode"]["width"]             = vm.width;
 	j["video_mode"]["height"]            = vm.height;
@@ -384,6 +476,15 @@ void ScreenTextCommand::Execute()
 {
 	bios_mode    = CurMode->mode;
 	is_text_mode = INT10_IsTextMode(*CurMode);
+
+	// Cursor position is a BIOS-level concept independent of the current
+	// video mode, and moves independently of the character grid - read
+	// it unconditionally so it's available even when text_dos otherwise
+	// stays empty below.
+	page       = real_readb(BIOSMEM_SEG, BIOSMEM_CURRENT_PAGE);
+	cursor_row = CURSOR_POS_ROW(static_cast<uint8_t>(page));
+	cursor_col = CURSOR_POS_COL(static_cast<uint8_t>(page));
+
 	if (!is_text_mode) {
 		return;
 	}
@@ -392,14 +493,24 @@ void ScreenTextCommand::Execute()
 	// reported geometry matches the buffer it actually walked.
 	columns  = real_readw(BIOSMEM_SEG, BIOSMEM_NB_COLS);
 	rows     = CurMode->theight;
-	page     = real_readb(BIOSMEM_SEG, BIOSMEM_CURRENT_PAGE);
 	text_dos = Lua::ReadScreenText();
 }
 
-void ScreenTextCommand::Get(const httplib::Request&, httplib::Response& res)
+void ScreenTextCommand::Get(const httplib::Request& req, httplib::Response& res)
 {
 	ScreenTextCommand cmd;
 	cmd.WaitForCompletion();
+
+	// Hashed on the web thread over the raw CP437 bytes, before UTF-8
+	// conversion: cheap (a screen's worth of text), and keeps the hash
+	// stable regardless of how the conversion step evolves.
+	const auto hash = Fnv1aHash(cmd.text_dos);
+	res.set_header("ETag", quote_etag(hash));
+
+	if (EtagMatches(get_if_none_match(req), hash)) {
+		res.status = httplib::StatusCode::NotModified_304;
+		return;
+	}
 
 	json j;
 	j["is_text_mode"] = cmd.is_text_mode;
@@ -407,6 +518,9 @@ void ScreenTextCommand::Get(const httplib::Request&, httplib::Response& res)
 	j["columns"]      = cmd.columns;
 	j["rows"]         = cmd.rows;
 	j["page"]         = cmd.page;
+	j["cursor_row"]   = cmd.cursor_row;
+	j["cursor_col"]   = cmd.cursor_col;
+	j["text_hash"]    = FormatEtag(hash);
 
 	// CP437 screen codes to UTF-8 so box-drawing and shade glyphs survive
 	// the JSON round-trip instead of being dropped as invalid bytes.

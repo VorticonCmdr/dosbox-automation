@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.5 done (working tree, not yet committed). 1.6-4.7 outstanding.**
+**Progress: 1.1-1.5 and 1.7 done. 1.6, 1.8-4.7 outstanding.**
 
 ---
 
@@ -133,7 +133,7 @@ Wrap `Execute` in try/catch, recording the message into the command and setting 
 **Depends on:** 1.5 for the error codes it returns.
 
 ### 1.7 Change detection for screen text and frames
-**Engine + bridge. Effort: M.**
+**Engine + bridge. Effort: M. Status: done.**
 
 `video/text` returns the full padded grid and nothing else. An 80x25 DOS prompt arrives as one ~2050-character line of escaped `\n` that is 98% trailing spaces, re-paid on every poll. `video/frame` always returns a full image. There is no ETag anywhere in `src/webserver/` (the only conditional-request support is `If-Match` on memory PUT). There is also no cursor position, though `ScreenTextCommand::Execute` already reads the adjacent BIOS fields.
 
@@ -146,6 +146,17 @@ Wrap `Execute` in try/catch, recording the message into the command and setting 
 **Be honest:** the Bridge round trip still happens. The saving is payload, not latency. On `mode=rendered` the 304 saves the encode and transfer, not the 2000 ms forced-present wait.
 
 **Feeds:** 1.8's `screen_change` condition.
+
+**Shipped, with real HTTP semantics resolved in favor of the more clearly-stated instruction where the two Text/Frames bullets disagreed:**
+
+- The plan's Text bullet wanted a JSON-bearing "unchanged" response (`{is_text_mode, text_hash, cursor_row, cursor_col, unchanged:true}`) via a query-param `if_none_match`; the Frames bullet wanted a real `304` with an *empty* body via the real `If-None-Match` header, for all three routes. A `304` with a body is a spec violation (RFC 7232) that both httplib (server) and httpx (the bridge's own client) can silently mishandle - shipped as a true, empty-body `304` with the real header, uniformly across `video/frame`, `video/frame/info` and `video/text`. `text_hash`/`frame_hash` still ride in the normal `200` JSON body (`video/text`, `video/frame/info`) so the bridge can read them without needing header access it doesn't have today - `video/frame`'s binary response can only carry it via the `ETag` header.
+- **Frames get an extra optimization the plan didn't fully spell out**: the shared-frame hash is checked *before* calling `RENDER_GetSharedFrame()`, so a match skips its mutex-locked deep copy entirely instead of paying for it and discarding the result. `mode=rendered` has no equivalent precomputed hash - it still pays the up-to-2s forced-present wait, matching the plan's own "be honest" note.
+- `RENDER_UpdateSharedFrame`'s hash covers `height * abs(pitch)` bytes, matching `encode_raw`'s existing size computation for the same buffer (a flipped image is addressed via a negative pitch from its last row).
+- New `src/utils/fnv_hash.h` (FNV-1a 64-bit, verified against the official reference test vectors, not just self-consistency) shared by both the frame and text hashing paths.
+- `EtagMatches`/`FormatEtag` extracted as pure, header-exposed functions rather than kept as file-local `httplib::Request`-taking helpers - a first draft of the `If-None-Match` parsing hit a real dangling-`string_view` bug (caught by `-Wdangling-gsl`, not by review) from binding a view directly to a temporary; the pure-function form is both safer and directly unit-testable.
+- Bridge: found and fixed a discrepancy in the same pass - `dos_to_utf8`'s row-separating newlines include one after the *last* row, so splitting `text` on `\n` yields one more element than the engine's own `rows` count, which was double-counted as a phantom extra blank row. Bounded to `rows` before counting.
+
+Verified end-to-end against the real binary and through the real MCP tool dispatch path: `video/text` first request returns cursor position and hash with a full grid; a repeat with matching `If-None-Match` returns a true `304`/`Content-Length: 0`; `video/frame` and `video/frame/info` do the same and share the identical hash (same underlying frame); `video/frame/info?mode=rendered` now reports the actual rendered geometry (758x569) distinctly from the raw framebuffer's (720x400), where before it silently reported the wrong one regardless of `mode=`. The bridge's `screen_text` tool renders a real numbered grid instead of an escaped JSON blob, with the blank-row count now exactly matching the visible screen.
 
 ### 1.8 Server-side wait
 **Engine + bridge. Effort: L.**

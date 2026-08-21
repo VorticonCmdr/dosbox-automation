@@ -49,6 +49,8 @@ add_executable(dosbox_tests
     webserver_io_port_tests.cpp
     webserver_cpu_write_tests.cpp
     webserver_frame_tap_tests.cpp
+    webserver_video_etag_tests.cpp
+    fnv_hash_tests.cpp
     multi_prefix_tests.cpp
 )
 

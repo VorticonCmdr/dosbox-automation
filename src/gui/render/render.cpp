@@ -28,6 +28,7 @@
 #include "misc/video.h"
 #include "shell/shell.h"
 #include "utils/checks.h"
+#include "utils/fnv_hash.h"
 #include "utils/fraction.h"
 #include "utils/math_utils.h"
 #include "utils/string_utils.h"
@@ -44,12 +45,23 @@ ScalerLineHandler RENDER_DrawLine;
 static std::mutex shared_frame_mutex;
 static RenderedImage shared_frame = {};
 static std::atomic<bool> shared_frame_available{false};
+static std::atomic<uint64_t> shared_frame_hash{0};
 
 void RENDER_UpdateSharedFrame(const RenderedImage& image)
 {
 	std::lock_guard<std::mutex> lock(shared_frame_mutex);
 	shared_frame.free();
 	shared_frame = image.deep_copy();
+
+	// abs(): a flipped image (is_flipped_vertically) is walked via a
+	// negative pitch from a pointer to its last row; the allocation
+	// itself (and the buffer we're hashing here) is always
+	// height * abs(pitch) bytes, matching how video.cpp's encode_raw
+	// computes the same size for the same buffer.
+	const auto data_size = static_cast<size_t>(std::abs(image.pitch)) *
+	                       static_cast<size_t>(image.params.height);
+	shared_frame_hash.store(Fnv1aHash(image.image_data, data_size));
+
 	shared_frame_available.store(true);
 }
 
@@ -62,6 +74,11 @@ RenderedImage RENDER_GetSharedFrame()
 bool RENDER_HasSharedFrame()
 {
 	return shared_frame_available.load();
+}
+
+uint64_t RENDER_GetSharedFrameHash()
+{
+	return shared_frame_hash.load();
 }
 
 static void render_callback(GFX_CallbackFunctions_t function);
@@ -390,10 +407,11 @@ void RENDER_EndUpdate([[maybe_unused]] bool abort)
 
 	{
 		RenderedImage image = {};
-		image.params     = render.src;
-		image.image_data = reinterpret_cast<uint8_t*>(render.scale.cache.data());
-		image.palette    = render.palette.rgb;
-		image.pitch      = render.scale.cache_pitch;
+		image.params        = render.src;
+		image.image_data    = reinterpret_cast<uint8_t*>(
+		        render.scale.cache.data());
+		image.palette = render.palette.rgb;
+		image.pitch   = render.scale.cache_pitch;
 
 		if (render.src.rendered_double_scan) {
 			image.params.height = render.src.video_mode.height;

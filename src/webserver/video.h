@@ -9,9 +9,16 @@
 
 #include "webserver/bridge.h"
 
+#include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace Webserver {
+
+// ETag helpers shared by video/frame, video/frame/info and video/text.
+// Exposed for testing.
+std::string FormatEtag(uint64_t hash);
+bool EtagMatches(std::string_view raw_if_none_match, uint64_t hash);
 
 struct VideoHandlers {
 	static void GetFrame(const httplib::Request& req, httplib::Response& res);
@@ -20,11 +27,13 @@ struct VideoHandlers {
 
 // Text-mode character buffer read (emulation thread via Bridge).
 class ScreenTextCommand : public Command {
-	bool is_text_mode = false;
-	int columns       = 0;
-	int rows          = 0;
-	int page          = 0;
-	int bios_mode     = 0;
+	bool is_text_mode    = false;
+	int columns          = 0;
+	int rows             = 0;
+	int page             = 0;
+	int bios_mode        = 0;
+	int cursor_row       = 0;
+	int cursor_col       = 0;
 	std::string text_dos = {};
 
 public:
