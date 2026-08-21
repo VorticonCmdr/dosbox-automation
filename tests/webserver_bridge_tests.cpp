@@ -123,6 +123,15 @@ TEST(BridgeTest, QueueFullIsRefusedWithoutDroppingQueuedCommands)
 
 TEST(BridgeTest, StalePumpIsRefusedFastWithoutQueuing)
 {
+	// Establish a known-fresh baseline before measuring staleness from
+	// it. Without this, a test runner that isolates this test in its
+	// own process (ctest's default, one gtest_filter invocation per
+	// test) never constructs the Bridge singleton until the sleep
+	// below has already elapsed, and the constructor's own
+	// last_pump_ms = now() reads as fresh regardless of how long the
+	// sleep was - the sleep was never measured against anything.
+	RefreshPump();
+
 	// Let the pump go quiet long enough to cross the staleness
 	// threshold, then confirm ExecuteCommand refuses immediately -
 	// never enqueues, never waits out the command's own timeout -
