@@ -5,8 +5,11 @@
 #ifndef DOSBOX_WEBSERVER_BRIDGE_H
 #define DOSBOX_WEBSERVER_BRIDGE_H
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -24,6 +27,35 @@ public:
 	using std::runtime_error::runtime_error;
 };
 
+// Thrown by Bridge::ExecuteCommand when the pump is already known stale
+// (PumpAgeMs() past StalePumpThresholdMs) before a command is even
+// queued - a fast, distinguishable failure instead of queuing a command
+// that would just time out the same way, tying up an httplib worker
+// thread for the full deadline to learn what was already known.
+class BridgeNotPumping : public std::runtime_error {
+public:
+	using std::runtime_error::runtime_error;
+};
+
+// Thrown by Bridge::ExecuteCommand when MaxQueueDepth commands are
+// already queued. In steady state, depth never exceeds httplib's worker
+// pool size (one Command in flight per blocked worker thread) - this is
+// a backstop against a pathological caller flood, not a cap reachable
+// under normal load.
+class BridgeQueueFull : public std::runtime_error {
+public:
+	using std::runtime_error::runtime_error;
+};
+
+constexpr size_t MaxQueueDepth = 64;
+
+// How long the pump can go unserviced before ExecuteCommand refuses new
+// commands outright. normal_loop() calls ProcessRequests() once per
+// PIC_RunQueue() tick (sub-millisecond in practice), and the SDL pause
+// loops poll it every PausePumpIntervalMs (sdl_gui.cpp) - a full second
+// of silence only happens when nothing is pumping at all.
+constexpr uint64_t StalePumpThresholdMs = 1000;
+
 class Command {
 public:
 	virtual ~Command() {}
@@ -32,8 +64,9 @@ public:
 	void WaitForCompletion(const uint32_t timeout_ms = 250);
 
 	// Set by Execute() to report errors without throwing on the
-	// emulation thread. Handlers should check this after
-	// WaitForCompletion() and throw on the webserver thread.
+	// emulation thread, or by ProcessRequests() when Execute() itself
+	// threw. Handlers should check this after WaitForCompletion() and
+	// throw on the webserver thread.
 	std::string error = {};
 
 private:
@@ -52,14 +85,23 @@ public:
 	// Called by the main thread running the CPU emulation
 	void ProcessRequests();
 
+	// Milliseconds since the last ProcessRequests() call, regardless of
+	// whether it had work to do. Backs both ExecuteCommand's fast-fail
+	// check and GET /api/v1/status's last_tick_ms_ago.
+	uint64_t PumpAgeMs() const;
+
+	// Commands currently queued, waiting for a pump. Exposed for testing.
+	size_t QueueDepth() const;
+
 private:
-	std::mutex mtx              = {};
-	std::condition_variable cv  = {};
-	std::vector<Command*> queue = {};
+	mutable std::mutex mtx             = {};
+	std::condition_variable cv         = {};
+	std::vector<Command*> queue        = {};
+	std::atomic<uint64_t> last_pump_ms = {0};
 
 	Bridge(const Bridge&)            = delete;
 	Bridge& operator=(const Bridge&) = delete;
-	Bridge()                         = default;
+	Bridge();
 };
 
 } // namespace Webserver

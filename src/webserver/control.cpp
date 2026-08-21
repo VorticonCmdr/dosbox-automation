@@ -7,6 +7,7 @@
 #include "webserver.h"
 
 #include "dosbox.h"
+#include "gui/private/common.h"
 #include "gui/titlebar.h"
 #include "shell/shell.h"
 
@@ -34,22 +35,32 @@ void ShutdownCommand::Post(const httplib::Request&, httplib::Response& res)
 void ControlHandlers::GetProgramState(const httplib::Request&, httplib::Response& res)
 {
 	json j;
-	j["segment_name"] = TITLEBAR_GetSegmentName();
+	j["segment_name"]   = TITLEBAR_GetSegmentName();
 	j["canonical_name"] = TITLEBAR_GetCanonicalName();
-	j["is_shell"] = SHELL_IsRunning();
-	j["is_booted"] = TITLEBAR_IsBooted();
+	j["is_shell"]       = SHELL_IsRunning();
+	j["is_booted"]      = TITLEBAR_IsBooted();
 	send_json(res, j);
 }
 
 void ControlHandlers::GetStatus(const httplib::Request&, httplib::Response& res)
 {
 	json j;
-	j["running"] = true;
+	j["running"]            = true;
 	j["shutdown_requested"] = DOSBOX_IsShutdownRequested();
-	j["is_booted"] = TITLEBAR_IsBooted();
-	j["program"] = TITLEBAR_GetSegmentName();
-	j["canonical_name"] = TITLEBAR_GetCanonicalName();
-	j["is_shell"] = SHELL_IsRunning();
+	j["is_booted"]          = TITLEBAR_IsBooted();
+	j["program"]            = TITLEBAR_GetSegmentName();
+	j["canonical_name"]     = TITLEBAR_GetCanonicalName();
+	j["is_shell"]           = SHELL_IsRunning();
+
+	// Reads the emulation thread's state without crossing the Bridge -
+	// a Command here would block or time out in exactly the "stalled"
+	// case this is meant to report.
+	const uint64_t pump_age_ms = Bridge::Instance().PumpAgeMs();
+	j["last_tick_ms_ago"]      = pump_age_ms;
+	j["frame"]                 = GFX_GetRenderedFrameCount();
+	j["emulation"] = pump_age_ms > StalePumpThresholdMs ? "stalled"
+	               : GFX_IsPaused()                     ? "paused"
+	                                                    : "running";
 	send_json(res, j);
 }
 

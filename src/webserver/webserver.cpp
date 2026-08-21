@@ -85,14 +85,30 @@ ErrorInfo ClassifyException(std::exception_ptr ep)
 			std::rethrow_exception(ep);
 		}
 	} catch (const BridgeTimeout& e) {
-		// The routine failure, not a crash: neither SDL pause loop
-		// pumps the Bridge queue, so a paused or minimized emulator
-		// times out every bridge-backed route. Retryable - once the
-		// window regains focus, or the queue drains, the same
-		// request can succeed.
+		// The routine failure, not a crash: a paused or minimized
+		// emulator times out every bridge-backed route until the
+		// window regains focus, or the queue drains. Retryable - the
+		// same request can succeed once the emulation thread ticks.
 		info.status    = httplib::StatusCode::ServiceUnavailable_503;
 		info.message   = e.what();
 		info.code      = "bridge_timeout";
+		info.retryable = true;
+	} catch (const BridgeNotPumping& e) {
+		// Distinguished from bridge_timeout: the pump is already
+		// known stale before this command was even queued, so the
+		// caller learns that immediately instead of burning the full
+		// request deadline finding out.
+		info.status    = httplib::StatusCode::ServiceUnavailable_503;
+		info.message   = e.what();
+		info.code      = "not_pumping";
+		info.retryable = true;
+	} catch (const BridgeQueueFull& e) {
+		// Too many callers are already blocked waiting on the
+		// emulation thread; refusing outright beats queuing behind
+		// an unbounded backlog.
+		info.status    = httplib::StatusCode::TooManyRequests_429;
+		info.message   = e.what();
+		info.code      = "queue_full";
 		info.retryable = true;
 	} catch (const std::invalid_argument& e) {
 		// Safe to echo: num_param()/handler messages here are

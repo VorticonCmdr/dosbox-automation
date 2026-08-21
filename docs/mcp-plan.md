@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.5 and 1.7 done. 1.6, 1.8-4.7 outstanding.**
+**Progress: 1.1-1.7 done. 1.8-4.7 outstanding.**
 
 ---
 
@@ -114,7 +114,7 @@ Bridge: a `DosboxError` hierarchy carrying `.status` and `.code`; replace the `"
 Verified end-to-end through the **real MCP SDK dispatch path** (`server.request_handlers[types.CallToolRequest]`, not a mock) against the real engine binary: a `port_write` with an out-of-range port returns `isError: True` with text `"[port_write PUT /api/v1/io/port] port must be 0x0000..0xFFFF"`; a valid `mem_read` returns `isError: False` with the normal JSON payload. 46 new tests total (7 engine-side `ClassifyExceptionTest`, the rest bridge-side across `test_client.py`/`test_connection.py`/`test_bridge_tools.py`).
 
 ### 1.6 Bridge hardening: never wedge, pump while paused, report liveness
-**Engine. Effort: M.**
+**Engine. Effort: M. Status: done.**
 
 Three gaps in the trust boundary itself.
 
@@ -131,6 +131,17 @@ Wrap `Execute` in try/catch, recording the message into the command and setting 
 **Risk:** API-driven state changes now happen while the user believes the machine is paused. That is the correct trade for automation, but document it and keep the OSD indicators showing activity. Add `tests/webserver_bridge_tests.cpp` (the first ever): throwing Execute still drains the batch, a timed-out command is erased and never executed afterwards, queue-full is refused without dropping.
 
 **Depends on:** 1.5 for the error codes it returns.
+
+**Shipped, with one deviation from the literal "two lines each" for the SDL pause loops:**
+
+- `ProcessRequests()` now try/catches each command's `Execute()` individually, records `e.what()` into `cmd->error`, and always sets `done = true` - so a throw mid-batch (bad_alloc, whatever) can no longer strand every command queued after it. Also dropped the `queue.empty()` early return so `last_pump_ms` refreshes on every pump, even an empty one - that refresh is the whole basis for `PumpAgeMs()`/`not_pumping`/`/status`, and normal_loop pumps constantly whether or not anything is queued.
+- `Bridge::ExecuteCommand` checks `PumpAgeMs() > StalePumpThresholdMs` (1000ms) *before* acquiring the lock or enqueueing, throwing the new `BridgeNotPumping` - a stalled emulator is now diagnosed in microseconds instead of after the command's own timeout (up to 15000ms once 1.8 lands). A `MaxQueueDepth` (64) cap throws `BridgeQueueFull` on overflow; both new exception types get their own `ClassifyException` branches (`not_pumping`/503, `queue_full`/429, both retryable).
+- **Deviation:** the plan's "two lines each" for the SDL pause loops (`sdl_gui.cpp`) undersold what "never wedge" requires. Both loops previously called plain `SDL_WaitEvent`, which blocks *indefinitely* with no OS event - inserting a pump call next to it would only pump once per actual event, and a backgrounded/minimized window can go arbitrarily long with none. Switched both to `SDL_WaitEventTimeout(..., PausePumpIntervalMs)` (50ms) so the loop pumps on a real cadence regardless of event traffic, well under the 1000ms staleness threshold so a paused window never reads as `stalled` to the API.
+- `GET /api/v1/status` gained `emulation` (`running`/`paused`/`stalled`), `last_tick_ms_ago` (`Bridge::PumpAgeMs()`), and `frame` (`GFX_GetRenderedFrameCount()`). This handler deliberately does not cross the Bridge - a Command here would block or time out in exactly the `stalled` case it exists to report. `rendered_frame_count` (`sdl_gui.cpp`) became `std::atomic<uint64_t>` first, since this is now a genuine unsynchronized cross-thread read otherwise.
+- **Landed as its own commit, ahead of the rest:** `RecordingHandlers::PostPause`/`PostStop` called `InputRecording::Pause`/`Stop` directly on the httplib worker thread; `Stop` touches `OsdManager::SetIcon`, which has no mutex and is read by `Render` on the emulation thread - a real data race, not a hypothetical one. Added `PauseRecordingCommand`/`StopRecordingCommand` alongside the existing `StartRecordingCommand`, both routed through the Bridge. `PauseRecordingCommand::Execute()` re-checks `IsRecording()` on the emulation thread rather than trusting the httplib thread's own pre-check, closing a TOCTOU the original code had (recording could stop between a worker-thread check and the actual pause).
+- `tests/webserver_bridge_tests.cpp` (new): throwing `Execute()` still drains the batch, a timed-out command is erased and never executed by a later pump, `queue_full` is refused without dropping the commands already queued, and a genuinely stale pump refuses fast (sub-second) rather than waiting out the command's own timeout. `webserver_error_tests.cpp` gained `ClassifyException` coverage for both new exception types.
+
+Verified end-to-end against the real binary: `GET /api/v1/status` reports `emulation: "running"`, a live `frame` count, and `last_tick_ms_ago` near zero; the full record start/pause/resume/stop/stop-again(409)/pause-again(409) lifecycle works correctly through the new Command-routed handlers; normal Bridge-backed routes (`cpu/state`) stay unaffected. Manufacturing a genuine `stalled`/`not_pumping` state against the live binary isn't practical to script safely (it requires the emulation thread to actually stop ticking), so that mechanism is covered by the deterministic unit tests instead; likewise the two SDL pause loops themselves need a real window/OS event source neither the `offscreen` nor `dummy` headless SDL video drivers provide, so their bodies are verified by code review plus the shared pump logic's unit tests rather than a live pause.
 
 ### 1.7 Change detection for screen text and frames
 **Engine + bridge. Effort: M. Status: done.**

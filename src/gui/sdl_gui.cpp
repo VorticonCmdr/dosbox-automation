@@ -5,6 +5,7 @@
 
 #include "private/sdl_gui.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +39,8 @@
 #include "misc/cross.h"
 #include "misc/notifications.h"
 #include "misc/support.h"
+#include "webserver/bridge.h"
+#include "webserver/webserver.h"
 
 #include <SDL3_image/SDL_image.h>
 #include "misc/video.h"
@@ -60,6 +63,17 @@ void DeliverRenderedFrame(const RenderedImage&);
 }
 
 void LuaDispatchFrame(uint64_t);
+
+// Times out a yielded Lua wait/type on its wall clock off the frame
+// path, kept serviced by the pause loops below when frames stall. In
+// lua_bridge_commands.cpp.
+void LuaReapStalledWaits();
+
+// How often the SDL pause loops below wake up on their own, with no OS
+// event, to pump the Bridge and Lua wait registry. Well under
+// Webserver::StalePumpThresholdMs so a paused or backgrounded window
+// never looks stalled to the API.
+constexpr int PausePumpIntervalMs = 50;
 
 // #define DEBUG_WINDOW_EVENTS
 
@@ -348,8 +362,22 @@ static bool is_unpause_event(const SDL_Event event, const KeyPressState unpause_
 	// NOTE: This is one of the few places where we use SDL key codes with
 	// SDL 2.0, rather than scan codes. Is that the correct behavior?
 	while (sdl.is_paused && !DOSBOX_IsShutdownRequested()) {
-		// since we're not polling, CPU usage drops to 0.
-		SDL_WaitEvent(&event);
+		// Bounded, not indefinite: an unbounded SDL_WaitEvent would
+		// only pump the Bridge and Lua wait registry when the window
+		// happens to receive an OS event, wedging every bridge-backed
+		// API route for as long as the user leaves the emulator
+		// paused with the window otherwise idle.
+		const bool got_event = SDL_WaitEventTimeout(&event,
+		                                            PausePumpIntervalMs);
+
+		if (WEBSERVER_IsEnabled()) {
+			Webserver::Bridge::Instance().ProcessRequests();
+			LuaReapStalledWaits();
+		}
+
+		if (!got_event) {
+			continue;
+		}
 
 		switch (event.type) {
 		case SDL_EVENT_QUIT: GFX_RequestExit(true); break;
@@ -1161,7 +1189,12 @@ bool GFX_StartUpdate(uint32_t*& pixels, int& pitch)
 	return true;
 }
 
-static uint64_t rendered_frame_count = 0;
+// Atomic because GET /api/v1/status reads it without crossing the
+// Bridge (control.cpp) - a plain uint64_t would be an unsynchronized
+// cross-thread read, and the whole point of that endpoint is to stay
+// readable even when the emulation thread is stalled and the Bridge
+// itself is unresponsive.
+static std::atomic<uint64_t> rendered_frame_count{0};
 
 uint64_t GFX_GetRenderedFrameCount()
 {
@@ -2227,9 +2260,20 @@ static void handle_pause_when_inactive(const SDL_Event& event)
 		SDL_Event ev;
 
 		while (sdl.is_paused && !DOSBOX_IsShutdownRequested()) {
-			// WaitEvent() waits for an event rather than
-			// polling, so CPU usage drops to zero.
-			SDL_WaitEvent(&ev);
+			// Bounded, not indefinite - see pause_emulation()
+			// above for why: an unfocused/minimized window can
+			// sit with no OS events far longer than a
+			// user-initiated pause.
+			const bool got_event = SDL_WaitEventTimeout(&ev, PausePumpIntervalMs);
+
+			if (WEBSERVER_IsEnabled()) {
+				Webserver::Bridge::Instance().ProcessRequests();
+				LuaReapStalledWaits();
+			}
+
+			if (!got_event) {
+				continue;
+			}
 
 			switch (ev.type) {
 			case SDL_EVENT_QUIT: GFX_RequestExit(true); break;

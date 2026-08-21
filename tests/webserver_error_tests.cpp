@@ -10,6 +10,8 @@
 
 #include "libs/json/json.h"
 
+using Webserver::BridgeNotPumping;
+using Webserver::BridgeQueueFull;
 using Webserver::BridgeTimeout;
 using Webserver::ClassifyException;
 
@@ -75,6 +77,28 @@ TEST(ClassifyExceptionTest, BridgeTimeoutIsRetryableServiceUnavailable)
 	EXPECT_EQ(info.code, "bridge_timeout");
 	EXPECT_TRUE(info.retryable);
 	EXPECT_NE(info.message.find("paused"), std::string::npos);
+}
+
+TEST(ClassifyExceptionTest, NotPumpingIsRetryableServiceUnavailable)
+{
+	auto ep         = std::make_exception_ptr(BridgeNotPumping(
+	        "The emulation thread has not processed requests recently - "
+	        "it may be paused, minimized, or unresponsive"));
+	const auto info = ClassifyException(ep);
+	EXPECT_EQ(info.status, httplib::StatusCode::ServiceUnavailable_503);
+	EXPECT_EQ(info.code, "not_pumping");
+	EXPECT_TRUE(info.retryable);
+	EXPECT_NE(info.message.find("paused"), std::string::npos);
+}
+
+TEST(ClassifyExceptionTest, QueueFullIsRetryableTooManyRequests)
+{
+	auto ep         = std::make_exception_ptr(BridgeQueueFull(
+	        "Too many commands are already queued for the emulation thread"));
+	const auto info = ClassifyException(ep);
+	EXPECT_EQ(info.status, httplib::StatusCode::TooManyRequests_429);
+	EXPECT_EQ(info.code, "queue_full");
+	EXPECT_TRUE(info.retryable);
 }
 
 TEST(ClassifyExceptionTest, GenericStdExceptionStaysGenericNotEchoed)
