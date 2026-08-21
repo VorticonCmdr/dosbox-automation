@@ -6,6 +6,7 @@
 #define DOSBOX_WEBSERVER_H
 
 #include <charconv>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <string>
@@ -73,6 +74,22 @@ void send_json(httplib::Response& res, const nlohmann::json& j);
 // the fixed documentation assets (landing page, API explorer, openapi spec,
 // vendored Swagger UI). Exact-match only, so no traversal or token file leaks.
 bool IsPublicDocPath(const std::string& method, const std::string& path);
+
+// The JSON error shape and HTTP status a caught exception maps to.
+// `message` stays a plain, caller-facing string; `code` and `retryable`
+// are additive fields a caller can key logic off without parsing it.
+struct ErrorInfo {
+	httplib::StatusCode status = httplib::StatusCode::InternalServerError_500;
+	std::string message = "Internal server error";
+	std::string code    = "internal_error";
+	bool retryable      = false;
+};
+
+// Classifies an exception (from std::current_exception() in a catch-all
+// handler, or std::make_exception_ptr() in a test) into the response
+// shape error_handler sends. A null ep classifies as the generic
+// internal_error default. Exposed for testing.
+ErrorInfo ClassifyException(std::exception_ptr ep);
 
 } // namespace Webserver
 

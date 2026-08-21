@@ -8,9 +8,21 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace Webserver {
+
+// Thrown by Bridge::ExecuteCommand when the emulation thread does not
+// pump the queue within the deadline. This is the *routine* failure -
+// a paused or minimized emulator never calls ProcessRequests() - not a
+// crash, so error_handler (webserver.cpp) maps it to a distinct,
+// retryable response instead of a generic 500.
+class BridgeTimeout : public std::runtime_error {
+public:
+	using std::runtime_error::runtime_error;
+};
 
 class Command {
 public:
@@ -41,9 +53,9 @@ public:
 	void ProcessRequests();
 
 private:
-	std::mutex mtx                   = {};
-	std::condition_variable cv       = {};
-	std::vector<Command*> queue      = {};
+	std::mutex mtx              = {};
+	std::condition_variable cv  = {};
+	std::vector<Command*> queue = {};
 
 	Bridge(const Bridge&)            = delete;
 	Bridge& operator=(const Bridge&) = delete;

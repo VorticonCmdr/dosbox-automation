@@ -12,10 +12,10 @@
 #include "private/cpu.h"
 #include "private/debug.h"
 #include "private/dos.h"
-#include "private/shutdown.h"
 #include "private/freeze.h"
 #include "private/io_port.h"
 #include "private/memory.h"
+#include "private/shutdown.h"
 #include "video.h"
 
 #include "lua/lua_bridge_commands.h"
@@ -59,34 +59,76 @@ void send_json(httplib::Response& res, const nlohmann::json& j)
 	                "application/json");
 }
 
-static void error_handler(const httplib::Request&, httplib::Response& res,
-                          std::exception_ptr ep)
+// Shared JSON error shape for the exception handler and the two
+// pre-routing rejections below. `error` stays a plain string (the
+// pre-1.5 shape callers already parse); `error_code` and `retryable`
+// are new, additive fields a caller can key logic off without parsing
+// the message text.
+static void send_error(httplib::Response& res, const httplib::StatusCode status,
+                       const std::string& message, const std::string& code,
+                       const bool retryable = false)
 {
+	res.status = status;
 	json j;
-	std::string msg;
-	res.status = httplib::StatusCode::InternalServerError_500;
+	j["error"]      = message;
+	j["error_code"] = code;
+	j["retryable"]  = retryable;
+	send_json(res, j);
+}
+
+ErrorInfo ClassifyException(std::exception_ptr ep)
+{
+	ErrorInfo info;
 
 	try {
 		if (ep) {
 			std::rethrow_exception(ep);
 		}
-	} catch (const std::invalid_argument&) {
-		msg        = "Invalid request parameter";
-		res.status = httplib::StatusCode::BadRequest_400;
-	} catch (const std::out_of_range&) {
-		msg        = "Address out of range";
-		res.status = httplib::StatusCode::BadRequest_400;
-	} catch (const nlohmann::json::exception&) {
-		msg        = "Malformed request body";
-		res.status = httplib::StatusCode::BadRequest_400;
+	} catch (const BridgeTimeout& e) {
+		// The routine failure, not a crash: neither SDL pause loop
+		// pumps the Bridge queue, so a paused or minimized emulator
+		// times out every bridge-backed route. Retryable - once the
+		// window regains focus, or the queue drains, the same
+		// request can succeed.
+		info.status    = httplib::StatusCode::ServiceUnavailable_503;
+		info.message   = e.what();
+		info.code      = "bridge_timeout";
+		info.retryable = true;
+	} catch (const std::invalid_argument& e) {
+		// Safe to echo: num_param()/handler messages here are
+		// parameter names and the caller's own values, never
+		// anything from deeper in the emulator.
+		info.status  = httplib::StatusCode::BadRequest_400;
+		info.message = e.what();
+		info.code    = "invalid_argument";
+	} catch (const std::out_of_range& e) {
+		info.status  = httplib::StatusCode::BadRequest_400;
+		info.message = e.what();
+		info.code    = "out_of_range";
+	} catch (const nlohmann::json::exception& e) {
+		// Also safe to echo: the message describes the caller's own
+		// malformed body, not server state.
+		info.status  = httplib::StatusCode::BadRequest_400;
+		info.message = e.what();
+		info.code    = "malformed_body";
 	} catch (const std::exception&) {
-		msg = "Internal server error";
+		// Deliberately generic (the ErrorInfo default): an exception
+		// from deeper in the emulator may carry a filesystem path or
+		// other detail that should not reach an HTTP caller.
 	} catch (...) {
-		msg = "Internal server error";
 	}
 
-	j["error"] = msg;
-	send_json(res, j);
+	return info;
+}
+
+static void error_handler(const httplib::Request&, httplib::Response& res,
+                          std::exception_ptr ep)
+{
+	const auto info = ClassifyException(ep);
+	if (info.retryable) {
+		res.set_header("Retry-After", "1");
+	}
+	send_error(res, info.status, info.message, info.code, info.retryable);
 }
 
 bool IsPublicDocPath(const std::string& method, const std::string& path)
@@ -142,7 +184,8 @@ static void setup_api_handlers()
 
 	server.Get("/api/v1/debug/breakpoints", DebugListBreakpointsCommand::Get);
 	server.Post("/api/v1/debug/breakpoints", DebugAddBreakpointCommand::Post);
-	server.Delete("/api/v1/debug/breakpoints", DebugDeleteBreakpointCommand::Delete);
+	server.Delete("/api/v1/debug/breakpoints",
+	              DebugDeleteBreakpointCommand::Delete);
 
 	server.Post("/api/v1/input/sequence", InputSequenceCommand::Post);
 	server.Post("/api/v1/input/type", InputTypeCommand::Post);
@@ -184,8 +227,10 @@ static void setup_api_handlers()
 	server.Post("/api/v1/capture/video/start", CaptureStartCommand::Post);
 	server.Post("/api/v1/capture/video/stop", CaptureStopCommand::Post);
 	server.Get("/api/v1/capture/video/status", CaptureStatusCommand::Get);
-	server.Get("/api/v1/capture/video/compression", CaptureCompressionGetCommand::Get);
-	server.Put("/api/v1/capture/video/compression", CaptureCompressionSetCommand::Put);
+	server.Get("/api/v1/capture/video/compression",
+	           CaptureCompressionGetCommand::Get);
+	server.Put("/api/v1/capture/video/compression",
+	           CaptureCompressionSetCommand::Put);
 }
 
 static std::string strip_port(const std::string& host)
@@ -363,8 +408,10 @@ static void setup_security(const std::string& addr, int port,
 		if (allowed_hosts.find(host) == allowed_hosts.end()) {
 			LOG_WARNING("WEBSERVER: Rejected request with Host header '%s'",
 			            req.get_header_value("Host").c_str());
-			res.status = httplib::StatusCode::Forbidden_403;
-			res.set_content("Forbidden", "text/plain");
+			send_error(res,
+			           httplib::StatusCode::Forbidden_403,
+			           "Forbidden",
+			           "forbidden_host");
 			return httplib::Server::HandlerResponse::Handled;
 		}
 
@@ -379,8 +426,10 @@ static void setup_security(const std::string& addr, int port,
 
 		if (!ConstantTimeEquals(token, api_token)) {
 			LOG_WARNING("WEBSERVER: Rejected request with invalid token");
-			res.status = httplib::StatusCode::Unauthorized_401;
-			res.set_content("Unauthorized", "text/plain");
+			send_error(res,
+			           httplib::StatusCode::Unauthorized_401,
+			           "Unauthorized",
+			           "unauthorized");
 			return httplib::Server::HandlerResponse::Handled;
 		}
 
@@ -436,15 +485,15 @@ static void run(const std::string addr, const int port,
 	server.Get("/api/v1/dosbox/info",
 	           [](const httplib::Request&, httplib::Response& res) {
 		           json j;
-		           j["version"] = DOSBOX_GetDetailedVersion();
+		           j["version"]  = DOSBOX_GetDetailedVersion();
 		           j["features"] = {
-		                   {"memory", true},
-		                   {"input", true},
-		                   {"cpu_registers", true},
-		                   {"cpu_control", true},
-		                   {"port_io", true},
-		                   {"freeze", true},
-		                   {"debugger", static_cast<bool>(C_DEBUGGER)},
+		                   {       "memory",                          true},
+		                   {        "input",                          true},
+		                   {"cpu_registers",                          true},
+		                   {  "cpu_control",                          true},
+		                   {      "port_io",                          true},
+		                   {       "freeze",                          true},
+		                   {     "debugger", static_cast<bool>(C_DEBUGGER)},
 		           };
 		           send_json(res, j);
 	           });

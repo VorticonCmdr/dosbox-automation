@@ -38,7 +38,9 @@ void Bridge::ExecuteCommand(Command& cmd, const uint32_t timeout_ms)
 		if (it != queue.end()) {
 			queue.erase(it);
 		}
-		throw std::runtime_error("Failed to execute command: timeout");
+		throw BridgeTimeout(
+		        "Command execution timed out - the emulator may be "
+		        "paused, minimized, or unresponsive");
 	}
 }
 
