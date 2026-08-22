@@ -24,6 +24,7 @@
 #include "cpu/lazyflags.h"
 #include "cpu/paging.h"
 #include "debugger.h"
+#include "debugger_backtrace.h"
 #include "debugger_inc.h"
 #include "dos/programs.h"
 #include "gui/common.h"
@@ -2980,6 +2981,21 @@ bool DEBUG_RunToAddress(const uint16_t seg, const uint32_t off)
 	DispatchDebugRunCallback(DEBUG_Run(1, false));
 	pending_breakpoint_hit = std::nullopt;
 	return true;
+}
+
+bool DEBUG_StepOut()
+{
+	if (!debugging) {
+		return false;
+	}
+	// Only need the caller's frame (index 1) - DEBUG_Backtrace(2) is the
+	// cheapest call that can produce it.
+	const auto backtrace = DEBUG_Backtrace(2);
+	if (backtrace.frames.size() < 2 || !backtrace.frames[1].high_confidence) {
+		return false;
+	}
+	const auto& caller = backtrace.frames[1];
+	return DEBUG_RunToAddress(caller.segment, caller.offset);
 }
 
 // Breakpoints added here aren't armed immediately (matching the BP/BPINT

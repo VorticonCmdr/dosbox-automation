@@ -123,6 +123,22 @@ private:
 	[[maybe_unused]] uint32_t offset  = 0;
 };
 
+// Steps out of the current frame: backtraces (2.7) to the caller's return
+// address and delegates to DEBUG_RunToAddress - same "actual stop happens
+// later" shape as DebugRunToCommand. Declining (started stays false while
+// paused) isn't an error: it means the backtrace couldn't resolve the
+// caller's frame with high confidence, so there's nowhere trustworthy to
+// aim the planted breakpoint.
+class DebugStepOutCommand : public Command {
+public:
+	void Execute() override;
+	static void Post(const httplib::Request&, httplib::Response& res);
+
+	bool paused                   = false;
+	bool started                  = false;
+	uint64_t resumed_from_stop_id = 0;
+};
+
 #if C_DEBUGGER
 
 class DebugAddBreakpointCommand : public Command {

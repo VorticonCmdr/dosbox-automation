@@ -1,4 +1,5 @@
 target_sources(dosboxcommon PRIVATE
+  debugger_backtrace.cpp
   debugger_disasm.cpp)
 
 if (OPT_DEBUGGER)

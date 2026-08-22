@@ -50,6 +50,15 @@ bool DEBUG_StepOver();
 // detection. Same "actual stop happens later" caveat as DEBUG_StepOver.
 bool DEBUG_RunToAddress(uint16_t seg, uint32_t off);
 
+// Runs until the current frame returns, by backtracing (debugger_backtrace.h)
+// to the caller's return address and delegating to DEBUG_RunToAddress.
+// Only proceeds when that frame resolves with high confidence - the same
+// shaky-frame-pointer heuristics that make the walk uncertain would make
+// the planted breakpoint just as likely to land somewhere nonsensical, so
+// returns false instead of guessing. Same "actual stop happens later"
+// caveat as DEBUG_StepOver/DEBUG_RunToAddress.
+bool DEBUG_StepOut();
+
 void DEBUG_RefreshPage(int scroll);
 Bitu DEBUG_EnableDebugger();
 

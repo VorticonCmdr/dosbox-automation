@@ -6,6 +6,7 @@
 
 #include "bridge.h"
 #include "input.h"
+#include "private/backtrace.h"
 #include "private/disassemble.h"
 #include "private/dos.h"
 #include "private/freeze.h"
@@ -160,6 +161,17 @@ json BuildCapabilitiesBlock()
 	j["disassemble"] = ToJson(
 	        AlwaysOn("always available, regardless of the debugger capability",
 	                 disassemble_limits));
+	json backtrace_limits;
+	backtrace_limits["max_frames"]     = MaxBacktraceFrames;
+	backtrace_limits["default_frames"] = DefaultBacktraceFrames;
+	// Same reasoning as disassemble: walking SS:BP and decoding bytes to
+	// confirm a call site doesn't need C_DEBUGGER either. debug_step_out
+	// is a different story - it plants a breakpoint, so it stays behind
+	// the debugger capability above like every other execution-control
+	// tool.
+	j["backtrace"] = ToJson(
+	        AlwaysOn("always available, regardless of the debugger capability",
+	                 backtrace_limits));
 	j["drive"]   = ToJson(AlwaysOn("always available"));
 	j["capture"] = ToJson(AlwaysOn("always available"));
 	j["wait"]    = ToJson(AlwaysOn("always available", wait_limits));

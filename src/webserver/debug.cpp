@@ -525,6 +525,35 @@ void DebugRunToCommand::Post(const Request& req, Response& res)
 	send_json(res, j2);
 }
 
+void DebugStepOutCommand::Execute()
+{
+	resumed_from_stop_id = DebugEvents::Instance().Current().stop_id;
+	paused               = DEBUG_IsDebugging();
+	if (paused) {
+		started = DEBUG_StepOut();
+	}
+}
+
+void DebugStepOutCommand::Post(const Request&, Response& res)
+{
+	DebugStepOutCommand cmd;
+	// DEBUG_StepOut backtraces just 2 frames (debugger_backtrace.cpp) -
+	// far cheaper than the general backtrace route's worst case, so the
+	// Bridge's own default deadline is enough.
+	cmd.WaitForCompletion();
+
+	json j;
+	if (!cmd.paused) {
+		j["status"] = "not_paused";
+	} else if (!cmd.started) {
+		j["status"] = "no_confident_caller_frame";
+	} else {
+		j["status"] = "ok";
+	}
+	j["resumed_from_stop_id"] = cmd.resumed_from_stop_id;
+	send_json(res, j);
+}
+
 void DebugAddBreakpointCommand::Execute()
 {
 	// CheckBreakpoint/CheckIntBreakpoint act on the first match in list
@@ -802,6 +831,12 @@ void DebugRunToCommand::Execute() {}
 void DebugRunToCommand::Post(const Request&, Response& res)
 {
 	NotBuilt("debug_run_to", res);
+}
+
+void DebugStepOutCommand::Execute() {}
+void DebugStepOutCommand::Post(const Request&, Response& res)
+{
+	NotBuilt("debug_step_out", res);
 }
 
 void DebugAddBreakpointCommand::Execute() {}
