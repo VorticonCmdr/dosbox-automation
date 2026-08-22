@@ -64,7 +64,10 @@ public:
 	DebugStopInfo stop = {};
 
 private:
-	int32_t count = 1;
+	// Only read by Execute()'s #if C_DEBUGGER body (debug.cpp) - the
+	// #else stub Execute() is a no-op, so a non-debugger build never
+	// reads this field.
+	[[maybe_unused]] int32_t count = 1;
 };
 
 // A step-over/run-to-address doesn't return a new stop record the way
@@ -115,8 +118,9 @@ public:
 	uint64_t resumed_from_stop_id = 0;
 
 private:
-	uint16_t segment = 0;
-	uint32_t offset  = 0;
+	// Same reasoning as DebugStepCommand::count above.
+	[[maybe_unused]] uint16_t segment = 0;
+	[[maybe_unused]] uint32_t offset  = 0;
 };
 
 #if C_DEBUGGER

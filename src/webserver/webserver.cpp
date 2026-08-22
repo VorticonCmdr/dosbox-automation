@@ -12,6 +12,7 @@
 #include "private/auth.h"
 #include "private/cpu.h"
 #include "private/debug.h"
+#include "private/disassemble.h"
 #include "private/dos.h"
 #include "private/freeze.h"
 #include "private/io_port.h"
@@ -209,6 +210,9 @@ static void setup_api_handlers()
 	server.Post("/api/v1/debug/step_over", DebugStepOverCommand::Post);
 	server.Post("/api/v1/debug/run_to", DebugRunToCommand::Post);
 	server.Get("/api/v1/debug/wait", DebugWaitHandlers::Get);
+
+	server.Get("/api/v1/debug/disassemble/:segment/:offset/:count",
+	           DisassembleCommand::Get);
 
 	server.Get("/api/v1/debug/breakpoints", DebugListBreakpointsCommand::Get);
 	server.Post("/api/v1/debug/breakpoints", DebugAddBreakpointCommand::Post);

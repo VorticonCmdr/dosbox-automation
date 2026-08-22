@@ -62,8 +62,8 @@ Any comments/updates/bug reports to:
    Thanks and enjoy!
 
 */
+#include "debugger_disasm.h"
 #include "dosbox.h"
-#if C_DEBUGGER
 #include "hardware/memory.h"
 #include <cstdarg>
 #include <cstdio>
@@ -111,8 +111,14 @@ static int instruction_offset;
 
 static char* ubufs;           /* start of buffer */
 static char* ubufp;           /* last position of buffer */
+static char* ubufend; /* last writable byte, reserved for the null terminator */
 static int invalid_opcode = 0;
 static int first_space = 1;
+
+// Set by the 'J' case in percent() when the decoded instruction is a
+// relative branch with a computable absolute target - see DasmHasRelativeTarget().
+static bool has_relative_target  = false;
+static Bitu last_relative_target = 0;
 
 static int prefix;            /* segment override prefix byte */
 static int modrmv;            /* flag for getting modrm byte */
@@ -471,8 +477,19 @@ static char *addr_to_hex(UINT32 addr, int splitup) {
 static PhysPt getbyte_mac;
 static PhysPt startPtr;
 
+// Real x86 caps an instruction at 15 bytes; this table-driven decoder has
+// no hard limit of its own. Now reachable from untrusted HTTP input (2.5),
+// not just the interactive debugger's own trusted use, a crafted or
+// malformed byte sequence could otherwise chain enough prefix/two-byte-
+// opcode dispatches to keep pulling bytes indefinitely. Generous headroom
+// over the real limit, then stop reading rather than run unbounded.
+constexpr PhysPt MaxInstructionBytes = 32;
+
 static UINT8 getbyte()
 {
+	if (getbyte_mac - startPtr >= MaxInstructionBytes) {
+		return 0;
+	}
 	return mem_readb<MemOpMode::SkipBreakpoints>(getbyte_mac++);
 }
 
@@ -497,20 +514,32 @@ static int sib(void)
 
 /*------------------------------------------------------------------------*/
 
+// Bounds-checked against ubufend (2.5): buffer, now attacker-addressable
+// via segment:offset from the REST API, is no longer guaranteed large
+// enough for whatever text a crafted/malformed byte sequence renders as.
+// Truncates rather than overflows; always leaves the buffer null-terminated.
 static void uprintf(char const *s, ...)
 {
+	if (ubufp >= ubufend) {
+		return;
+	}
 	va_list	arg_ptr;
 	va_start (arg_ptr, s);
-	vsprintf(ubufp, s, arg_ptr);
+	// vsnprintf's size includes room for the terminator; ubufend already
+	// reserves one byte for it, so capacity here is (ubufend - ubufp) + 1.
+	vsnprintf(ubufp, static_cast<size_t>(ubufend - ubufp) + 1, s, arg_ptr);
 	va_end(arg_ptr);
-	while (*ubufp)
+	while (*ubufp && ubufp < ubufend) {
 		ubufp++;
+	}
 }
 
 static void uputchar(char c)
 {
-  *ubufp++ = c;
-  *ubufp = 0;
+	if (ubufp < ubufend) {
+		*ubufp++ = c;
+	}
+	*ubufp = 0;
 }
 
 /*------------------------------------------------------------------------*/
@@ -892,10 +921,14 @@ static void percent(char type, char subtype)
 			name = addr_to_hex(vofs+instruction_offset+INSTRUCTION_SIZE,(addrsize == 32)?0:1);
             break;
        }
-	   if (vofs<0)
-		   uprintf("%s ($-%x)", name, -vofs);
-	   else
-		   uprintf("%s ($+%x)", name, vofs);
+       has_relative_target  = true;
+       last_relative_target = static_cast<Bitu>(
+	       static_cast<UINT32>(vofs + instruction_offset + INSTRUCTION_SIZE));
+       if (vofs < 0) {
+	       uprintf("%s ($-%x)", name, -vofs);
+       } else {
+	       uprintf("%s ($+%x)", name, vofs);
+       }
        break;
 
   case 'K':
@@ -1065,10 +1098,14 @@ static void ua_str(char const *str)
 	if (c == ' ' && first_space)
 	{
 		first_space = 0;
+		// ubufp < ubufend guards against buffer_size <= 5: uputchar
+		// (2.5) stops advancing ubufp once the buffer is full, so
+		// without this the loop's own advancement assumption never
+		// holds and it spins forever instead of just padding less.
 		do
 		{
 			uputchar(' ');
-		} while ( (int)(ubufp - ubufs) < 5 );
+		} while (ubufp < ubufend && (int)(ubufp - ubufs) < 5);
 	}
 	else
     if (c == '%') {
@@ -1080,8 +1117,7 @@ static void ua_str(char const *str)
   }
 }
 
-
-Bitu DasmI386(char* buffer, PhysPt pc, Bitu cur_ip, bool bit32)
+Bitu DasmI386(char* buffer, size_t buffer_size, PhysPt pc, Bitu cur_ip, bool bit32)
 {
   	Bitu c;
 
@@ -1094,7 +1130,10 @@ Bitu DasmI386(char* buffer, PhysPt pc, Bitu cur_ip, bool bit32)
 	/* output buffer */
 	ubufs = buffer;
 	ubufp = buffer;
+	ubufend     = buffer_size > 0 ? buffer + (buffer_size - 1) : buffer;
 	first_space = 1;
+
+	has_relative_target = false;
 
 	addr32bit=1;
 
@@ -1125,4 +1164,12 @@ int DasmLastOperandSize()
 	return opsize;
 }
 
-#endif
+bool DasmHasRelativeTarget()
+{
+	return has_relative_target;
+}
+
+Bitu DasmLastRelativeTarget()
+{
+	return last_relative_target;
+}

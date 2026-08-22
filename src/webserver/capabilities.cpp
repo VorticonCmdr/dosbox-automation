@@ -6,6 +6,7 @@
 
 #include "bridge.h"
 #include "input.h"
+#include "private/disassemble.h"
 #include "private/dos.h"
 #include "private/freeze.h"
 #include "private/memory.h"
@@ -151,6 +152,14 @@ json BuildCapabilitiesBlock()
 	                                  static_cast<bool>(C_HEAVY_DEBUGGER),
 	                                  CPU_GetActiveCoreKind()));
 	j["script"]  = ToJson(AlwaysOn("always available", script_limits));
+	json disassemble_limits;
+	disassemble_limits["max_count"] = MaxDisassembleCount;
+	// Unlike every other debugger.* facility, decoding instruction bytes
+	// into text doesn't need C_DEBUGGER (2.5) - the interactive debugger
+	// UI and the disassembler underneath it are separate concerns.
+	j["disassemble"] = ToJson(
+	        AlwaysOn("always available, regardless of the debugger capability",
+	                 disassemble_limits));
 	j["drive"]   = ToJson(AlwaysOn("always available"));
 	j["capture"] = ToJson(AlwaysOn("always available"));
 	j["wait"]    = ToJson(AlwaysOn("always available", wait_limits));

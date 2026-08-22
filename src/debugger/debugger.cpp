@@ -1246,7 +1246,7 @@ static bool StepOver()
 	PhysPt start = GetAddress(SegValue(cs), reg_eip);
 	char dline[200];
 	Bitu size;
-	size = DasmI386(dline, start, reg_eip, cpu.code.big);
+	size = DasmI386(dline, sizeof(dline), start, reg_eip, cpu.code.big);
 
 	if (strstr(dline, "call") || strstr(dline, "int") ||
 	    strstr(dline, "loop") || strstr(dline, "rep")) {
@@ -1816,8 +1816,8 @@ static void DrawCode(void)
 			char* ptr = line;
 			ptr += sprintf(ptr, "%04X:%04X  ", codeViewData.useCS, disEIP);
 
-			Bitu drawsize = size =
-			        DasmI386(dline, start, disEIP, cpu.code.big);
+			Bitu drawsize = size = DasmI386(
+			        dline, sizeof(dline), start, disEIP, cpu.code.big);
 			bool toolarge = false;
 
 			if (drawsize > check_cast<uint32_t>(dbg.rows_code - 1)) {
@@ -3124,6 +3124,7 @@ uint32_t DEBUG_CheckKeys(void)
 						PhysPt start = GetAddress(
 						        codeViewData.useCS, newEIP);
 						size = DasmI386(dline,
+						                sizeof(dline),
 						                start,
 						                newEIP,
 						                cpu.code.big);
@@ -3774,7 +3775,7 @@ static void LogInstruction(uint16_t segValue, uint32_t eipValue, std::ofstream& 
 	PhysPt start = GetAddress(segValue, eipValue);
 	char dline[200];
 	Bitu size;
-	size      = DasmI386(dline, start, reg_eip, cpu.code.big);
+	size = DasmI386(dline, sizeof(dline), start, reg_eip, cpu.code.big);
 	char* res = empty;
 	if (showExtend && (cpuLogType > 0)) {
 		res = AnalyzeInstruction(dline, false);
@@ -4276,7 +4277,7 @@ void DEBUG_HeavyLogInstruction()
 
 	PhysPt start = GetAddress(SegValue(cs), reg_eip);
 	char dline[200];
-	DasmI386(dline, start, reg_eip, cpu.code.big);
+	DasmI386(dline, sizeof(dline), start, reg_eip, cpu.code.big);
 	char* res = empty;
 	if (showExtend) {
 		res = AnalyzeInstruction(dline, false);

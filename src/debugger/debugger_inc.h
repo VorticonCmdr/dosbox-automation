@@ -6,6 +6,7 @@
 #ifndef DOSBOX_DEBUGGER_INC_H
 #define DOSBOX_DEBUGGER_INC_H
 
+#include "debugger_disasm.h"
 #include "hardware/memory.h"
 #include <SDL3/SDL.h>
 #include <queue>
@@ -129,7 +130,9 @@ struct DebuggerInputEvent {
 extern std::queue<DebuggerInputEvent> debugger_event_queue;
 
 /* Local Debug Stuff */
-Bitu DasmI386(char* buffer, PhysPt pc, Bitu cur_ip, bool bit32);
-int DasmLastOperandSize();
+// DasmI386/DasmLastOperandSize/DasmHasRelativeTarget/DasmLastRelativeTarget
+// now declared in debugger_disasm.h (included above) - that header stays
+// includable without C_DEBUGGER; this one still isn't (it drags in SDL3
+// and the interactive debugger's own GUI state).
 
 #endif // DOSBOX_DEBUGGER_INC_H
