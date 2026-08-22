@@ -9,7 +9,9 @@
 #include "dosbox.h"
 
 #if C_DEBUGGER
+#include "cpu/cpu.h"
 #include "debugger/debugger.h"
+#include "hardware/memory.h"
 #endif
 
 #include "base64/base64.h"
@@ -236,6 +238,30 @@ uint64_t RequireU64(const json& j, const char* key)
 		throw std::invalid_argument(std::string(key) + " must not be negative");
 	}
 	return static_cast<uint64_t>(raw);
+}
+
+// 64-bit arithmetic deliberately: seg/off reach here from breakpoint-add
+// and run_to requests (untrusted HTTP input, and debug_map_to_live in the
+// bridge is another indirect source), and a uint32_t (seg<<4)+off can
+// overflow and wrap into a small, in-range-looking address instead of
+// correctly failing this check (e.g. seg=0xFFFF, off=0xFFFFFFFF wraps to a
+// valid low address in 32-bit math) - same reasoning as
+// DisassembleCommand::Execute (disassemble.cpp).
+//
+// This validates the flat real-mode formula only. debugger.cpp's
+// GetAddress() - what CBreakpoint::SetAddress/DEBUG_RunToAddress
+// actually resolve seg:off through - takes this same flat path only
+// when the CPU isn't in protected mode; a live GDT selector resolves
+// through PhysMakeProt (desc.GetBase()+offset) instead, a different
+// formula this check knows nothing about. Call sites gate on
+// !cpu.pmode for exactly that reason - see their own comments.
+bool SegOffsetWithinMemory(uint16_t seg, uint32_t off)
+{
+	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
+	                           MemPageSize;
+	const uint64_t addr      = (static_cast<uint64_t>(seg) << 4) +
+	                           static_cast<uint64_t>(off);
+	return addr < mem_total;
 }
 
 int32_t RequireIgnoreCount(const json& j)
@@ -506,6 +532,16 @@ void DebugWaitHandlers::Get(const Request& req, Response& res)
 
 void DebugRunToCommand::Execute()
 {
+	// See SegOffsetWithinMemory's own comment: only valid against the
+	// flat real-mode formula DEBUG_RunToAddress -> GetAddress actually
+	// uses when the CPU isn't in protected mode. Skipping the check in
+	// protected mode avoids wrongly rejecting a legitimate GDT-selector
+	// target - the pre-existing (unchecked) behavior for that case,
+	// left as-is rather than half-fixed.
+	if (!cpu.pmode && !SegOffsetWithinMemory(segment, offset)) {
+		error = "segment:offset is outside emulated memory";
+		return;
+	}
 	resumed_from_stop_id = DebugEvents::Instance().Current().stop_id;
 	started              = DEBUG_RunToAddress(segment, offset);
 }
@@ -518,6 +554,9 @@ void DebugRunToCommand::Post(const Request& req, Response& res)
 
 	DebugRunToCommand cmd(req_segment, req_offset);
 	cmd.WaitForCompletion();
+	if (!cmd.error.empty()) {
+		throw std::invalid_argument(cmd.error);
+	}
 
 	json j2;
 	j2["status"]               = cmd.started ? "ok" : "not_paused";
@@ -556,6 +595,31 @@ void DebugStepOutCommand::Post(const Request&, Response& res)
 
 void DebugAddBreakpointCommand::Execute()
 {
+	// See SegOffsetWithinMemory's own comment: only valid against the
+	// flat real-mode formula CBreakpoint::SetAddress -> GetAddress
+	// actually uses when the CPU isn't in protected mode. Skipping in
+	// protected mode avoids wrongly rejecting a legitimate GDT-selector
+	// target - the pre-existing (unchecked) behavior for that case,
+	// left as-is rather than half-fixed.
+	if (!cpu.pmode) {
+		if ((type == DebugBreakpointType::Execute ||
+		     type == DebugBreakpointType::Memory) &&
+		    !SegOffsetWithinMemory(segment, offset)) {
+			error = "segment:offset is outside emulated memory";
+			return;
+		}
+		// The condition's own segment:offset (memory-kind condition,
+		// any breakpoint type) resolves through the identical
+		// GetAddress() call at evaluation time - CBreakpoint::
+		// EvaluateCondition, debugger.cpp - and is just as reachable
+		// from untrusted HTTP input as the breakpoint's own location.
+		if (condition.kind == DebugBreakpointCondition::Kind::Memory &&
+		    !SegOffsetWithinMemory(condition.segment, condition.offset)) {
+			error = "condition segment:offset is outside emulated memory";
+			return;
+		}
+	}
+
 	// CheckBreakpoint/CheckIntBreakpoint act on the first match in list
 	// order and never consider any other breakpoint at the same location
 	// in that same pass - condition/ignore_count only get consulted for
@@ -681,6 +745,9 @@ void DebugAddBreakpointCommand::Post(const Request& req, Response& res)
 	DebugAddBreakpointCommand cmd(
 	        type, segment, offset, int_num, ah, al, once, ignore_count, condition);
 	cmd.WaitForCompletion();
+	if (!cmd.error.empty()) {
+		throw std::invalid_argument(cmd.error);
+	}
 
 	if (cmd.conflict) {
 		res.status = httplib::StatusCode::Conflict_409;
