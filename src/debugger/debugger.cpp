@@ -2676,6 +2676,26 @@ int32_t DEBUG_Run(int32_t amount, bool quickexit)
 	return ret;
 }
 
+// DEBUG_Run's return value, when non-zero, is a callback id - the normal
+// opcode-dispatch loop (dosbox.cpp's normal_loop) and the interactive
+// debugger's own F5/F10/F11 handler (DEBUG_CheckKeys below) both route it
+// through Callback_Handlers, since that's how a breakpoint match reaches
+// debugCallback -> DEBUG_EnableDebugger -> DEBUG_Enable. DEBUG_Resume
+// forces exactly one instruction via DEBUG_Run(1, false); without this
+// dispatch, a match on an already-armed breakpoint during that one
+// instruction would be silently dropped entirely - not just misattributed,
+// but never reported at all, leaving the emulator to run straight past a
+// stop it should have made while the caller is told the call succeeded.
+// This is reachable, not theoretical: a manual pause (DebugPauseCommand's
+// DEBUG_Enable) never deactivates breakpoints the way a real hit does, so
+// one armed by an earlier continue stays armed across it.
+static void DispatchDebugRunCallback(const int32_t ret)
+{
+	if (ret > 0 && ret < CB_MAX) {
+		(*Callback_Handlers[ret])();
+	}
+}
+
 // Resume/step entry points for callers other than the interactive debugger
 // UI (e.g. the automation API). Mirrors the F5/F11 key handlers in
 // DEBUG_CheckKeys() below, minus the ImGui redraw calls those do to show
@@ -2686,16 +2706,13 @@ bool DEBUG_Resume(void)
 		return false;
 	}
 	debugging = false;
-	DEBUG_Run(1, false);
-	// DEBUG_Run's forced instruction can itself match a breakpoint
-	// (CheckBreakpoint/CheckIntBreakpoint set pending_breakpoint_hit from
-	// inside the CPU core's own dispatch), but its return value - which
-	// is how a match would normally reach debugCallback -> DEBUG_Enable -
-	// is discarded here, exactly like the normal opcode-dispatch loop
-	// would consume it. Left alone, that leftover value would survive
-	// undetected until some later, unrelated DEBUG_Enable call (a manual
-	// pause) and get misreported as its reason. Discard it: this
-	// resume's own match, if any, isn't attributable to this call.
+	DispatchDebugRunCallback(DEBUG_Run(1, false));
+	// If the dispatch above matched a breakpoint, DEBUG_Enable already
+	// consumed and cleared pending_breakpoint_hit as part of reporting
+	// that stop - this is then a no-op. If nothing matched, it was
+	// already std::nullopt. Either way, nothing from this call's own
+	// forced instruction can survive to contaminate a later, unrelated
+	// stop.
 	pending_breakpoint_hit = std::nullopt;
 	return true;
 }
