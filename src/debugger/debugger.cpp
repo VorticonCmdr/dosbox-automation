@@ -450,6 +450,47 @@ public:
 	{
 		return id;
 	}
+	void SetIgnoreCount(int32_t count) noexcept
+	{
+		ignore_count = count;
+	}
+	void SetCondition(const DebugBreakpointCondition& cond) noexcept
+	{
+		condition = cond;
+	}
+	uint32_t GetHitCount() const noexcept
+	{
+		return hit_count;
+	}
+	int32_t GetIgnoreCount() const noexcept
+	{
+		return ignore_count;
+	}
+	const DebugBreakpointCondition& GetCondition() const noexcept
+	{
+		return condition;
+	}
+	void IncrementHitCount() noexcept
+	{
+		++hit_count;
+	}
+	// Decrements and returns true only when there was something left to
+	// ignore; a caller that gets false should treat this hit as a real
+	// stop rather than skip it again.
+	bool ConsumeIgnore() noexcept
+	{
+		if (ignore_count > 0) {
+			--ignore_count;
+			return true;
+		}
+		return false;
+	}
+	// Reads condition.reg/segment:offset:width against live CPU state and
+	// compares against condition.value with condition.op. A memory
+	// operand that can't be read (e.g. an unmapped page) evaluates to
+	// true - fail toward stopping, not toward a condition that can never
+	// be observed and so never actually stops the emulator.
+	bool EvaluateCondition() const;
 #if C_HEAVY_DEBUGGER
 	void FlagMemoryAsRead()
 	{
@@ -468,11 +509,17 @@ public:
 #endif
 
 	// statics
-	static CBreakpoint* AddBreakpoint(uint16_t seg, uint32_t off, bool once);
-	static CBreakpoint* AddIntBreakpoint(uint8_t intNum, uint16_t ah,
-	                                     uint16_t al, bool once);
-	static CBreakpoint* AddMemBreakpoint(uint16_t seg, uint32_t off,
-	                                     bool once = false);
+	static CBreakpoint* AddBreakpoint(
+	        uint16_t seg, uint32_t off, bool once, int32_t ignore_count = 0,
+	        const DebugBreakpointCondition& condition = {});
+	static CBreakpoint* AddIntBreakpoint(
+	        uint8_t intNum, uint16_t ah, uint16_t al, bool once,
+	        int32_t ignore_count                      = 0,
+	        const DebugBreakpointCondition& condition = {});
+	static CBreakpoint* AddMemBreakpoint(
+	        uint16_t seg, uint32_t off, bool once = false,
+	        int32_t ignore_count                      = 0,
+	        const DebugBreakpointCondition& condition = {});
 	static void DeactivateBreakpoints();
 	static void ActivateBreakpoints();
 	static void ActivateBreakpointsExceptAt(PhysPt adr);
@@ -486,6 +533,7 @@ public:
 	static bool DeleteBreakpoint(uint16_t seg, uint32_t off);
 	static bool DeleteByIndex(uint16_t index);
 	static bool DeleteById(uint64_t id);
+	static CBreakpoint* FindById(uint64_t id);
 	static void DeleteAll(void);
 	static void ShowList(void);
 
@@ -507,6 +555,9 @@ private:
 	// unlike list position (DEBUG_ListBreakpoints' index), this never
 	// changes as other breakpoints are added or removed.
 	uint64_t id = 0;
+	uint32_t hit_count                 = 0;
+	int32_t ignore_count               = 0;
+	DebugBreakpointCondition condition = {};
 #if C_HEAVY_DEBUGGER
 	bool memory_was_read = false;
 
@@ -525,7 +576,10 @@ CBreakpoint::CBreakpoint(void)
           alValue(0),
           active(false),
           once(false),
-          id(++next_breakpoint_id)
+          id(++next_breakpoint_id),
+          hit_count(0),
+          ignore_count(0),
+          condition{}
 {}
 
 void CBreakpoint::Activate(bool _active)
@@ -608,30 +662,41 @@ template void DEBUG_UpdateMemoryReadBreakpoints<uint32_t>(const PhysPt addr);
 template void DEBUG_UpdateMemoryReadBreakpoints<uint64_t>(const PhysPt addr);
 #endif
 
-CBreakpoint* CBreakpoint::AddBreakpoint(uint16_t seg, uint32_t off, bool once)
+CBreakpoint* CBreakpoint::AddBreakpoint(uint16_t seg, uint32_t off, bool once,
+                                        int32_t ignore_count,
+                                        const DebugBreakpointCondition& condition)
 {
 	auto bp = new CBreakpoint();
 	bp->SetAddress(seg, off);
 	bp->SetOnce(once);
+	bp->SetIgnoreCount(ignore_count);
+	bp->SetCondition(condition);
 	BPoints.push_front(bp);
 	return bp;
 }
 
-CBreakpoint* CBreakpoint::AddIntBreakpoint(uint8_t intNum, uint16_t ah,
-                                           uint16_t al, bool once)
+CBreakpoint* CBreakpoint::AddIntBreakpoint(uint8_t intNum, uint16_t ah, uint16_t al,
+                                           bool once, int32_t ignore_count,
+                                           const DebugBreakpointCondition& condition)
 {
 	auto bp = new CBreakpoint();
 	bp->SetInt(intNum, ah, al);
 	bp->SetOnce(once);
+	bp->SetIgnoreCount(ignore_count);
+	bp->SetCondition(condition);
 	BPoints.push_front(bp);
 	return bp;
 }
 
-CBreakpoint* CBreakpoint::AddMemBreakpoint(uint16_t seg, uint32_t off, bool once)
+CBreakpoint* CBreakpoint::AddMemBreakpoint(uint16_t seg, uint32_t off,
+                                           bool once, int32_t ignore_count,
+                                           const DebugBreakpointCondition& condition)
 {
 	auto bp = new CBreakpoint();
 	bp->SetAddress(seg, off);
 	bp->SetOnce(once);
+	bp->SetIgnoreCount(ignore_count);
+	bp->SetCondition(condition);
 	bp->SetType(BKPNT_MEMORY);
 	BPoints.push_front(bp);
 	return bp;
@@ -677,10 +742,13 @@ void CBreakpoint::ActivateBreakpointsExceptAt(PhysPt adr)
 static DebugBreakpointInfo ToDebugBreakpointInfo(CBreakpoint* bp, uint16_t index)
 {
 	DebugBreakpointInfo info;
-	info.id     = bp->GetId();
-	info.index  = index;
-	info.once   = bp->GetOnce();
-	info.active = bp->IsActive();
+	info.id           = bp->GetId();
+	info.index        = index;
+	info.once         = bp->GetOnce();
+	info.active       = bp->IsActive();
+	info.hit_count    = bp->GetHitCount();
+	info.ignore_count = bp->GetIgnoreCount();
+	info.condition    = bp->GetCondition();
 	switch (bp->GetType()) {
 	case BKPNT_INTERRUPT:
 		info.type    = DebugBreakpointType::Interrupt;
@@ -720,9 +788,10 @@ static Webserver::DebugStopBreakpoint ToDebugStopBreakpoint(const DebugBreakpoin
 	out.int_num = info.int_num;
 	out.ah      = info.ah;
 	out.al      = info.al;
-	out.id      = info.id;
-	out.index   = info.index;
-	out.once    = info.once;
+	out.id        = info.id;
+	out.index     = info.index;
+	out.once      = info.once;
+	out.hit_count = info.hit_count;
 	return out;
 }
 
@@ -762,6 +831,7 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 		    (bp->GetLocation() == GetAddress(seg, off))) {
 			// Found - snapshot before any of the once-only handling
 			// below can delete bp.
+			bp->IncrementHitCount();
 			if (WEBSERVER_IsEnabled()) {
 				pending_breakpoint_hit = ToDebugStopBreakpoint(
 				        ToDebugBreakpointInfo(bp, idx));
@@ -828,6 +898,7 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 					              bp->GetValue(),
 					              value);
 					bp->SetValue(value);
+					bp->IncrementHitCount();
 					if (WEBSERVER_IsEnabled()) {
 						pending_breakpoint_hit = ToDebugStopBreakpoint(
 						        ToDebugBreakpointInfo(bp, idx));
@@ -841,6 +912,7 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 					              bp->GetSegment(),
 					              bp->GetOffset());
 					bp->FlagMemoryAsUnread();
+					bp->IncrementHitCount();
 					if (WEBSERVER_IsEnabled()) {
 						pending_breakpoint_hit = ToDebugStopBreakpoint(
 						        ToDebugBreakpointInfo(bp, idx));
@@ -876,6 +948,7 @@ bool CBreakpoint::CheckIntBreakpoint([[maybe_unused]] PhysPt adr, uint8_t intNr,
 				// Ignore it once ?
 				// Found - snapshot before the once-only
 				// handling below can delete bp.
+				bp->IncrementHitCount();
 				if (WEBSERVER_IsEnabled()) {
 					pending_breakpoint_hit = ToDebugStopBreakpoint(
 					        ToDebugBreakpointInfo(bp, idx));
@@ -935,6 +1008,16 @@ bool CBreakpoint::DeleteById(uint64_t id)
 	return false;
 }
 
+CBreakpoint* CBreakpoint::FindById(uint64_t id)
+{
+	for (auto* bp : BPoints) {
+		if (bp->GetId() == id) {
+			return bp;
+		}
+	}
+	return nullptr;
+}
+
 CBreakpoint* CBreakpoint::FindPhysBreakpoint(uint16_t seg, uint32_t off, bool once)
 {
 	if (BPoints.empty()) {
@@ -971,6 +1054,96 @@ CBreakpoint* CBreakpoint::FindOtherActiveBreakpoint(PhysPt adr, CBreakpoint* ski
 		}
 	}
 	return nullptr;
+}
+
+static uint32_t ReadConditionRegister(ConditionRegister reg)
+{
+	switch (reg) {
+	case ConditionRegister::Eax: return reg_eax;
+	case ConditionRegister::Ebx: return reg_ebx;
+	case ConditionRegister::Ecx: return reg_ecx;
+	case ConditionRegister::Edx: return reg_edx;
+	case ConditionRegister::Esi: return reg_esi;
+	case ConditionRegister::Edi: return reg_edi;
+	case ConditionRegister::Esp: return reg_esp;
+	case ConditionRegister::Ebp: return reg_ebp;
+	case ConditionRegister::Ax: return reg_ax;
+	case ConditionRegister::Bx: return reg_bx;
+	case ConditionRegister::Cx: return reg_cx;
+	case ConditionRegister::Dx: return reg_dx;
+	case ConditionRegister::Si: return reg_si;
+	case ConditionRegister::Di: return reg_di;
+	case ConditionRegister::Sp: return reg_sp;
+	case ConditionRegister::Bp: return reg_bp;
+	case ConditionRegister::Al: return reg_al;
+	case ConditionRegister::Bl: return reg_bl;
+	case ConditionRegister::Cl: return reg_cl;
+	case ConditionRegister::Dl: return reg_dl;
+	case ConditionRegister::Ah: return reg_ah;
+	case ConditionRegister::Bh: return reg_bh;
+	case ConditionRegister::Ch: return reg_ch;
+	case ConditionRegister::Dh: return reg_dh;
+	case ConditionRegister::Cs: return SegValue(cs);
+	case ConditionRegister::Ds: return SegValue(ds);
+	case ConditionRegister::Es: return SegValue(es);
+	case ConditionRegister::Ss: return SegValue(ss);
+	case ConditionRegister::Fs: return SegValue(fs);
+	case ConditionRegister::Gs: return SegValue(gs);
+	}
+	return 0;
+}
+
+static bool EvaluateConditionOp(ConditionOp op, uint32_t observed, uint32_t value)
+{
+	switch (op) {
+	case ConditionOp::Eq: return observed == value;
+	case ConditionOp::Ne: return observed != value;
+	case ConditionOp::Lt: return observed < value;
+	case ConditionOp::Le: return observed <= value;
+	case ConditionOp::Gt: return observed > value;
+	case ConditionOp::Ge: return observed >= value;
+	}
+	return true;
+}
+
+bool CBreakpoint::EvaluateCondition() const
+{
+	if (condition.kind == DebugBreakpointCondition::Kind::None) {
+		return true;
+	}
+	if (condition.kind == DebugBreakpointCondition::Kind::Register) {
+		return EvaluateConditionOp(condition.op,
+		                           ReadConditionRegister(condition.reg),
+		                           condition.value);
+	}
+
+	const PhysPt address = GetAddress(condition.segment, condition.offset);
+	uint32_t observed    = 0;
+	bool failed          = false;
+	switch (condition.width) {
+	case 2: {
+		uint16_t v = 0;
+		failed     = mem_readw_checked(address, &v);
+		observed   = v;
+		break;
+	}
+	case 4: {
+		uint32_t v = 0;
+		failed     = mem_readd_checked(address, &v);
+		observed   = v;
+		break;
+	}
+	default: {
+		uint8_t v = 0;
+		failed    = mem_readb_checked(address, &v);
+		observed  = v;
+		break;
+	}
+	}
+	if (failed) {
+		return true;
+	}
+	return EvaluateConditionOp(condition.op, observed, condition.value);
 }
 
 // is there a permanent breakpoint at address ?
@@ -2812,19 +2985,25 @@ bool DEBUG_RunToAddress(const uint16_t seg, const uint32_t off)
 // Breakpoints added here aren't armed immediately (matching the BP/BPINT
 // interactive commands): CBreakpoint::ActivateBreakpoints() only runs when
 // execution is resumed via DEBUG_Run(), i.e. on the next DEBUG_Resume().
-void DEBUG_AddExecuteBreakpoint(uint16_t seg, uint32_t off, bool once)
+void DEBUG_AddExecuteBreakpoint(uint16_t seg, uint32_t off, bool once,
+                                int32_t ignore_count,
+                                const DebugBreakpointCondition& condition)
 {
-	CBreakpoint::AddBreakpoint(seg, off, once);
+	CBreakpoint::AddBreakpoint(seg, off, once, ignore_count, condition);
 }
 
-void DEBUG_AddIntBreakpoint(uint8_t int_num, uint16_t ah, uint16_t al, bool once)
+void DEBUG_AddIntBreakpoint(uint8_t int_num, uint16_t ah, uint16_t al,
+                            bool once, int32_t ignore_count,
+                            const DebugBreakpointCondition& condition)
 {
-	CBreakpoint::AddIntBreakpoint(int_num, ah, al, once);
+	CBreakpoint::AddIntBreakpoint(int_num, ah, al, once, ignore_count, condition);
 }
 
-void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off, bool once)
+void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off, bool once,
+                            int32_t ignore_count,
+                            const DebugBreakpointCondition& condition)
 {
-	CBreakpoint::AddMemBreakpoint(seg, off, once);
+	CBreakpoint::AddMemBreakpoint(seg, off, once, ignore_count, condition);
 }
 
 bool DEBUG_DeleteBreakpointByIndex(uint16_t index)
@@ -3181,9 +3360,51 @@ Bitu DEBUG_Loop(void)
 	return DEBUG_CheckKeys();
 }
 
+// Consulted only for a genuine breakpoint hit (pending_breakpoint_hit set
+// by CheckBreakpoint/CheckIntBreakpoint's match sites) - a manual pause has
+// nothing to skip. hit_count is already incremented at the match site
+// regardless of what this returns: it counts every time execution reached
+// the breakpoint, not every time the debugger actually stopped there.
+static bool ShouldSkipBreakpointHit()
+{
+	if (!pending_breakpoint_hit) {
+		return false;
+	}
+	CBreakpoint* bp = CBreakpoint::FindById(pending_breakpoint_hit->id);
+	if (!bp) {
+		// Most likely a once-only breakpoint that already deleted
+		// itself as part of its own match-site bookkeeping (see
+		// CheckBreakpoint/CheckIntBreakpoint) - once-only breakpoints
+		// always stop on their first and only match, so there's
+		// nothing here to consult even if one somehow carried a
+		// condition or ignore_count (rejected at validation time,
+		// see DebugAddBreakpointCommand::Post).
+		return false;
+	}
+	if (!bp->EvaluateCondition()) {
+		return true;
+	}
+	return bp->ConsumeIgnore();
+}
+
 void DEBUG_Enable(bool pressed)
 {
 	if (!pressed) {
+		return;
+	}
+
+	if (ShouldSkipBreakpointHit()) {
+		// A condition or ignore count says this particular hit isn't a
+		// real stop. Force exactly the trapped instruction to genuinely
+		// execute and hand control back to the normal loop - the same
+		// DEBUG_Run(1, false) mechanism DEBUG_Resume uses for an
+		// external continue, just triggered automatically instead of
+		// by a client request. This still costs a full stop/resume
+		// cycle per skipped hit (documented on the breakpoint condition
+		// API - see debug.cpp), but skips every UI side effect below:
+		// there's nothing to show for a hit nobody will ever see.
+		DispatchDebugRunCallback(DEBUG_Run(1, false));
+		pending_breakpoint_hit = std::nullopt;
 		return;
 	}
 

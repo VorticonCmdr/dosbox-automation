@@ -125,14 +125,18 @@ class DebugAddBreakpointCommand : public Command {
 public:
 	DebugAddBreakpointCommand(DebugBreakpointType type, uint16_t segment,
 	                          uint32_t offset, uint8_t int_num, uint16_t ah,
-	                          uint16_t al, bool once = false)
+	                          uint16_t al, bool once = false,
+	                          int32_t ignore_count = 0,
+	                          const DebugBreakpointCondition& condition = {})
 	        : type(type),
 	          segment(segment),
 	          offset(offset),
 	          int_num(int_num),
 	          ah(ah),
 	          al(al),
-	          once(once)
+	          once(once),
+	          ignore_count(ignore_count),
+	          condition(condition)
 	{}
 
 	void Execute() override;
@@ -141,15 +145,25 @@ public:
 	// Filled by Execute() from the engine after insertion, so index/active
 	// reflect reality rather than being assumed by the caller.
 	DebugBreakpointInfo result = {};
+	// Set instead of adding when this breakpoint's location (address, or
+	// int/ah/al with wildcard overlap) already has another breakpoint
+	// there and either one carries an ignore_count or condition -
+	// CheckBreakpoint/CheckIntBreakpoint only ever act on the first match
+	// in list order, so a second breakpoint at the same location would
+	// silently starve whichever one's ignore_count/condition never gets
+	// consulted.
+	bool conflict = false;
 
 private:
 	DebugBreakpointType type;
-	uint16_t segment = 0;
-	uint32_t offset  = 0;
-	uint8_t int_num  = 0;
-	uint16_t ah      = 0;
-	uint16_t al      = 0;
-	bool once        = false;
+	uint16_t segment                   = 0;
+	uint32_t offset                    = 0;
+	uint8_t int_num                    = 0;
+	uint16_t ah                        = 0;
+	uint16_t al                        = 0;
+	bool once                          = false;
+	int32_t ignore_count               = 0;
+	DebugBreakpointCondition condition = {};
 };
 
 class DebugListBreakpointsCommand : public Command {

@@ -34,6 +34,11 @@ struct DebugStopBreakpoint {
 	// it fired - shifts whenever a breakpoint is added or removed.
 	uint16_t index = 0;
 	bool once      = false;
+	// Counts every genuine match at this breakpoint's location, whether
+	// or not a condition/ignore_count went on to silently skip it - so a
+	// stop record showing "hit_count: 47" means this is the 47th time
+	// execution reached it, not the 47th time it actually stopped here.
+	uint32_t hit_count = 0;
 };
 
 struct DebugStopInfo {

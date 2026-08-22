@@ -15,7 +15,11 @@
 #include "base64/base64.h"
 #include "json/json.h"
 
+#include <array>
 #include <limits>
+#include <optional>
+#include <string_view>
+#include <utility>
 
 using json = nlohmann::json;
 using httplib::Request, httplib::Response;
@@ -50,6 +54,7 @@ json DebugStopToJson(const DebugStopInfo& stop)
 		bp["id"]        = stop.breakpoint->id;
 		bp["index"]     = stop.breakpoint->index;
 		bp["once"]      = stop.breakpoint->once;
+		bp["hit_count"] = stop.breakpoint->hit_count;
 		j["breakpoint"] = bp;
 	} else {
 		j["breakpoint"] = nullptr;
@@ -57,13 +62,101 @@ json DebugStopToJson(const DebugStopInfo& stop)
 	return j;
 }
 
+// Deliberately a self-contained table, not a reuse/extension of
+// Webserver::RegisterKind (cpu.cpp) - see the comment on ConditionRegister
+// in debugger.h for why.
+constexpr std::array<std::pair<std::string_view, ConditionRegister>, 30> ConditionRegisterNames = {
+        {{"eax", ConditionRegister::Eax}, {"ebx", ConditionRegister::Ebx},
+         {"ecx", ConditionRegister::Ecx}, {"edx", ConditionRegister::Edx},
+         {"esi", ConditionRegister::Esi}, {"edi", ConditionRegister::Edi},
+         {"esp", ConditionRegister::Esp}, {"ebp", ConditionRegister::Ebp},
+         {"ax", ConditionRegister::Ax},   {"bx", ConditionRegister::Bx},
+         {"cx", ConditionRegister::Cx},   {"dx", ConditionRegister::Dx},
+         {"si", ConditionRegister::Si},   {"di", ConditionRegister::Di},
+         {"sp", ConditionRegister::Sp},   {"bp", ConditionRegister::Bp},
+         {"al", ConditionRegister::Al},   {"bl", ConditionRegister::Bl},
+         {"cl", ConditionRegister::Cl},   {"dl", ConditionRegister::Dl},
+         {"ah", ConditionRegister::Ah},   {"bh", ConditionRegister::Bh},
+         {"ch", ConditionRegister::Ch},   {"dh", ConditionRegister::Dh},
+         {"cs", ConditionRegister::Cs},   {"ds", ConditionRegister::Ds},
+         {"es", ConditionRegister::Es},   {"ss", ConditionRegister::Ss},
+         {"fs", ConditionRegister::Fs},   {"gs", ConditionRegister::Gs}}
+};
+
+std::optional<ConditionRegister> ParseConditionRegister(const std::string& name)
+{
+	for (const auto& [n, r] : ConditionRegisterNames) {
+		if (n == name) {
+			return r;
+		}
+	}
+	return std::nullopt;
+}
+
+std::string_view ConditionRegisterName(ConditionRegister reg)
+{
+	for (const auto& [n, r] : ConditionRegisterNames) {
+		if (r == reg) {
+			return n;
+		}
+	}
+	return "unknown";
+}
+
+constexpr std::array<std::pair<std::string_view, ConditionOp>, 6> ConditionOpNames = {
+        {{"eq", ConditionOp::Eq},
+         {"ne", ConditionOp::Ne},
+         {"lt", ConditionOp::Lt},
+         {"le", ConditionOp::Le},
+         {"gt", ConditionOp::Gt},
+         {"ge", ConditionOp::Ge}}
+};
+
+std::optional<ConditionOp> ParseConditionOp(const std::string& name)
+{
+	for (const auto& [n, o] : ConditionOpNames) {
+		if (n == name) {
+			return o;
+		}
+	}
+	return std::nullopt;
+}
+
+std::string_view ConditionOpName(ConditionOp op)
+{
+	for (const auto& [n, o] : ConditionOpNames) {
+		if (o == op) {
+			return n;
+		}
+	}
+	return "unknown";
+}
+
 json BreakpointToJson(const DebugBreakpointInfo& bp)
 {
 	json j;
-	j["id"]     = bp.id;
-	j["index"]  = bp.index;
-	j["once"]   = bp.once;
-	j["active"] = bp.active;
+	j["id"]           = bp.id;
+	j["index"]        = bp.index;
+	j["once"]         = bp.once;
+	j["active"]       = bp.active;
+	j["hit_count"]    = bp.hit_count;
+	j["ignore_count"] = bp.ignore_count;
+	if (bp.condition.kind == DebugBreakpointCondition::Kind::None) {
+		j["condition"] = nullptr;
+	} else {
+		json cond;
+		cond["op"]    = std::string(ConditionOpName(bp.condition.op));
+		cond["value"] = bp.condition.value;
+		if (bp.condition.kind == DebugBreakpointCondition::Kind::Register) {
+			cond["register"] = std::string(
+			        ConditionRegisterName(bp.condition.reg));
+		} else {
+			cond["segment"] = bp.condition.segment;
+			cond["offset"]  = bp.condition.offset;
+			cond["width"]   = bp.condition.width;
+		}
+		j["condition"] = cond;
+	}
 	switch (bp.type) {
 	case DebugBreakpointType::Interrupt:
 		j["type"] = "interrupt";
@@ -143,6 +236,86 @@ uint64_t RequireU64(const json& j, const char* key)
 		throw std::invalid_argument(std::string(key) + " must not be negative");
 	}
 	return static_cast<uint64_t>(raw);
+}
+
+int32_t RequireIgnoreCount(const json& j)
+{
+	if (!j.contains("ignore_count")) {
+		return 0;
+	}
+	const int64_t v = RequireInt(j, "ignore_count");
+	if (v < 0 || v > std::numeric_limits<int32_t>::max()) {
+		throw std::invalid_argument(
+		        "ignore_count must be a non-negative 32-bit integer");
+	}
+	return static_cast<int32_t>(v);
+}
+
+// Fixed shape, never an expression parser: either {register, op, value} or
+// {segment, offset, width, op, value}. Absent or null "condition" means no
+// condition at all (Kind::None) - the breakpoint always stops, as before
+// this existed.
+DebugBreakpointCondition ParseCondition(const json& j)
+{
+	DebugBreakpointCondition cond;
+	if (!j.contains("condition") || j.at("condition").is_null()) {
+		return cond;
+	}
+	const auto& c = j.at("condition");
+	if (!c.is_object()) {
+		throw std::invalid_argument("condition must be an object");
+	}
+
+	const bool has_register = c.contains("register");
+	const bool has_memory = c.contains("segment") || c.contains("offset") ||
+	                        c.contains("width");
+	if (has_register && has_memory) {
+		throw std::invalid_argument(
+		        "condition must be either register-based ('register') "
+		        "or memory-based ('segment'/'offset'/'width'), not both");
+	}
+	if (!has_register && !has_memory) {
+		throw std::invalid_argument(
+		        "condition must specify 'register' or "
+		        "'segment'/'offset'/'width'");
+	}
+
+	if (!c.contains("op") || !c.at("op").is_string()) {
+		throw std::invalid_argument("condition.op must be a string");
+	}
+	const auto op = ParseConditionOp(c.at("op").get<std::string>());
+	if (!op) {
+		throw std::invalid_argument(
+		        "condition.op must be one of: eq, ne, lt, le, gt, ge");
+	}
+	cond.op    = *op;
+	cond.value = RequireU32(c, "value");
+
+	if (has_register) {
+		if (!c.at("register").is_string()) {
+			throw std::invalid_argument(
+			        "condition.register must be a string");
+		}
+		const auto reg = ParseConditionRegister(
+		        c.at("register").get<std::string>());
+		if (!reg) {
+			throw std::invalid_argument(
+			        "condition.register must be a valid register name");
+		}
+		cond.kind = DebugBreakpointCondition::Kind::Register;
+		cond.reg  = *reg;
+	} else {
+		cond.segment        = RequireU16(c, "segment");
+		cond.offset         = RequireU32(c, "offset");
+		const int64_t width = RequireInt(c, "width");
+		if (width != 1 && width != 2 && width != 4) {
+			throw std::invalid_argument(
+			        "condition.width must be 1, 2, or 4");
+		}
+		cond.kind  = DebugBreakpointCondition::Kind::Memory;
+		cond.width = static_cast<uint8_t>(width);
+	}
+	return cond;
 }
 
 } // namespace
@@ -354,15 +527,52 @@ void DebugRunToCommand::Post(const Request& req, Response& res)
 
 void DebugAddBreakpointCommand::Execute()
 {
+	// CheckBreakpoint/CheckIntBreakpoint act on the first match in list
+	// order and never consider any other breakpoint at the same location
+	// in that same pass - condition/ignore_count only get consulted for
+	// whichever one that is. Refuse to create a second breakpoint at a
+	// location that already has one, whenever either side carries logic
+	// that could end up silently never firing because the other always
+	// matches first. Two breakpoints with neither is unaffected: every
+	// match behaves identically (stop), so which one matched never
+	// mattered before this feature and still doesn't.
+	const bool new_has_logic = ignore_count > 0 ||
+	                           condition.kind !=
+	                                   DebugBreakpointCondition::Kind::None;
+	for (const auto& existing : DEBUG_ListBreakpoints()) {
+		if (existing.type != type) {
+			continue;
+		}
+		const bool same_location =
+		        (type == DebugBreakpointType::Interrupt)
+		                ? (existing.int_num == int_num &&
+		                   (existing.ah == DEBUG_BPINT_ANY ||
+		                    ah == DEBUG_BPINT_ANY || existing.ah == ah) &&
+		                   (existing.al == DEBUG_BPINT_ANY ||
+		                    al == DEBUG_BPINT_ANY || existing.al == al))
+		                : (existing.segment == segment &&
+		                   existing.offset == offset);
+		if (!same_location) {
+			continue;
+		}
+		const bool existing_has_logic = existing.ignore_count > 0 ||
+		                                existing.condition.kind !=
+		                                        DebugBreakpointCondition::Kind::None;
+		if (new_has_logic || existing_has_logic) {
+			conflict = true;
+			return;
+		}
+	}
+
 	switch (type) {
 	case DebugBreakpointType::Execute:
-		DEBUG_AddExecuteBreakpoint(segment, offset, once);
+		DEBUG_AddExecuteBreakpoint(segment, offset, once, ignore_count, condition);
 		break;
 	case DebugBreakpointType::Interrupt:
-		DEBUG_AddIntBreakpoint(int_num, ah, al, once);
+		DEBUG_AddIntBreakpoint(int_num, ah, al, once, ignore_count, condition);
 		break;
 	case DebugBreakpointType::Memory:
-		DEBUG_AddMemBreakpoint(segment, offset, once);
+		DEBUG_AddMemBreakpoint(segment, offset, once, ignore_count, condition);
 		break;
 	}
 
@@ -387,7 +597,16 @@ void DebugAddBreakpointCommand::Post(const Request& req, Response& res)
 	uint8_t int_num  = 0;
 	uint16_t ah      = 0;
 	uint16_t al      = 0;
-	const bool once          = j.value("once", false);
+	const bool once                          = j.value("once", false);
+	const int32_t ignore_count               = RequireIgnoreCount(j);
+	const DebugBreakpointCondition condition = ParseCondition(j);
+
+	if (once && (ignore_count > 0 ||
+	             condition.kind != DebugBreakpointCondition::Kind::None)) {
+		throw std::invalid_argument(
+		        "once-only breakpoints always stop on their first "
+		        "match and cannot combine with ignore_count or condition");
+	}
 
 	if (type_str == "execute") {
 		type    = DebugBreakpointType::Execute;
@@ -411,8 +630,21 @@ void DebugAddBreakpointCommand::Post(const Request& req, Response& res)
 		        "type must be one of: execute, interrupt, memory");
 	}
 
-	DebugAddBreakpointCommand cmd(type, segment, offset, int_num, ah, al, once);
+	DebugAddBreakpointCommand cmd(
+	        type, segment, offset, int_num, ah, al, once, ignore_count, condition);
 	cmd.WaitForCompletion();
+
+	if (cmd.conflict) {
+		res.status = httplib::StatusCode::Conflict_409;
+		json err;
+		err["error"] =
+		        "a breakpoint already exists at this location and "
+		        "either it or this one has an ignore_count or "
+		        "condition - list existing breakpoints and delete "
+		        "the conflicting one first";
+		send_json(res, err);
+		return;
+	}
 
 	json j2 = BreakpointToJson(cmd.result);
 	j2["status"] = "ok";

@@ -61,6 +61,67 @@ constexpr uint16_t DEBUG_BPINT_ANY = 0x100;
 
 enum class DebugBreakpointType { Execute, Interrupt, Memory };
 
+// Registers a breakpoint condition can compare against. Deliberately a
+// small, self-contained set rather than a reuse/extension of
+// Webserver::RegisterKind (webserver/cpu.cpp): that table backs
+// PUT /api/v1/cpu/register, and widening it with 8/16-bit sub-registers
+// for this read-only purpose risks also widening what that write route
+// silently accepts (it did, when tried - WriteRegisterCommand::Execute has
+// no width handling and would overwrite the whole 32-bit register). Kept
+// separate on purpose; a real sub-register write API is independent work.
+enum class ConditionRegister : uint8_t {
+	Eax,
+	Ebx,
+	Ecx,
+	Edx,
+	Esi,
+	Edi,
+	Esp,
+	Ebp,
+	Ax,
+	Bx,
+	Cx,
+	Dx,
+	Si,
+	Di,
+	Sp,
+	Bp,
+	Al,
+	Bl,
+	Cl,
+	Dl,
+	Ah,
+	Bh,
+	Ch,
+	Dh,
+	Cs,
+	Ds,
+	Es,
+	Ss,
+	Fs,
+	Gs,
+};
+
+enum class ConditionOp : uint8_t { Eq, Ne, Lt, Le, Gt, Ge };
+
+// Fixed-shape breakpoint condition, never an expression parser: either a
+// register comparison or a memory-operand comparison, validated entirely
+// on the web thread before it ever reaches CBreakpoint. Kind::None means
+// no condition - the breakpoint always stops, as before this existed.
+struct DebugBreakpointCondition {
+	enum class Kind { None, Register, Memory };
+	Kind kind = Kind::None;
+	// Register form
+	ConditionRegister reg = ConditionRegister::Eax;
+	// Memory form
+	uint16_t segment = 0;
+	uint32_t offset  = 0;
+	uint8_t width    = 1; // 1, 2, or 4 bytes
+	// Shared
+	ConditionOp op = ConditionOp::Eq;
+	uint32_t value = 0;
+};
+
 struct DebugBreakpointInfo {
 	// Monotonic, assigned once at construction, never reused or
 	// renumbered - the stable identifier index deliberately isn't. Use
@@ -76,12 +137,28 @@ struct DebugBreakpointInfo {
 	uint16_t al               = 0;
 	bool once                 = false;
 	bool active               = false;
+	// Counts every genuine match at this breakpoint's location, whether
+	// or not a condition/ignore_count went on to silently skip it.
+	uint32_t hit_count = 0;
+	// Remaining skips: decremented (not touched by a false condition)
+	// each time the condition holds but this is still being ignored.
+	int32_t ignore_count               = 0;
+	DebugBreakpointCondition condition = {};
 };
 
-void DEBUG_AddExecuteBreakpoint(uint16_t seg, uint32_t off, bool once = false);
+// Once-only breakpoints delete themselves the moment they match, before a
+// condition/ignore_count could ever be consulted - combining once=true
+// with either is rejected at validation time rather than silently
+// ignored (see DebugAddBreakpointCommand::Post).
+void DEBUG_AddExecuteBreakpoint(uint16_t seg, uint32_t off, bool once = false,
+                                int32_t ignore_count                      = 0,
+                                const DebugBreakpointCondition& condition = {});
 void DEBUG_AddIntBreakpoint(uint8_t int_num, uint16_t ah, uint16_t al,
-                            bool once = false);
-void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off, bool once = false);
+                            bool once = false, int32_t ignore_count = 0,
+                            const DebugBreakpointCondition& condition = {});
+void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off, bool once = false,
+                            int32_t ignore_count                      = 0,
+                            const DebugBreakpointCondition& condition = {});
 // Index is the breakpoint's position in DEBUG_ListBreakpoints(), which
 // shifts whenever a breakpoint is added or removed -- it is not a stable
 // identifier across calls that mutate the breakpoint list. Prefer
