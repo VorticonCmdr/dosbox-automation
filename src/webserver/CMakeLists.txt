@@ -15,6 +15,7 @@ target_sources(dosboxcommon PRIVATE
   frame_tap.cpp
   io_port.cpp
   memory.cpp
+  memory_snapshot.cpp
   video.cpp
   wait.cpp
   webserver.cpp)

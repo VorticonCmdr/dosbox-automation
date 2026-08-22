@@ -611,6 +611,107 @@ def test_memory_allocate_xms_non_bestfit(dosbox):
 
 
 # ---------------------------------------------------------------------------
+# Memory snapshot / diff
+# ---------------------------------------------------------------------------
+
+def test_memory_snapshot_returns_handle_and_size(dosbox):
+    r = dosbox.memory_snapshot(0x9020, 0x9024)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["start"] == 0x9020
+    assert data["end"] == 0x9024
+    assert data["bytes"] == 4
+    assert "handle" in data
+
+
+def test_memory_snapshot_span_too_large_rejected(dosbox):
+    r = dosbox.memory_snapshot(0, 16 * 1024 * 1024 + 1)
+    assert r.status_code == 400
+
+
+def test_memory_diff_changed_finds_modified_byte(dosbox):
+    offset = 0x9030
+    dosbox.memory_write(offset, b"\x00\x00\x00\x00")
+    handle = dosbox.memory_snapshot(offset, offset + 4).json()["handle"]
+
+    dosbox.memory_write(offset + 1, b"\x05")
+    r = dosbox.memory_diff(handle, "changed")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] == 1
+    assert data["matches"][0]["addr"] == offset + 1
+    assert data["matches"][0]["value"] == 5
+
+
+def test_memory_diff_equals_is_a_synonym_for_unchanged(dosbox):
+    offset = 0x9040
+    dosbox.memory_write(offset, b"\x07\x07\x07\x07")
+    handle = dosbox.memory_snapshot(offset, offset + 4).json()["handle"]
+
+    r = dosbox.memory_diff(handle, "equals")
+    assert r.status_code == 200
+    assert r.json()["total"] == 4
+
+
+def test_memory_diff_refine_narrows_across_rounds(dosbox):
+    offset = 0x9050
+    dosbox.memory_write(offset, b"\x00\x00\x00\x00")
+    handle = dosbox.memory_snapshot(offset, offset + 4).json()["handle"]
+
+    # Round 1: bytes 0 and 2 change.
+    dosbox.memory_write(offset, b"\x05\x00\x09\x00")
+    round1 = dosbox.memory_diff(handle, "changed").json()
+    assert round1["candidates"] == 2
+
+    # Round 2: only byte 0 increases further.
+    dosbox.memory_write(offset, b"\x0a\x00\x09\x00")
+    round2 = dosbox.memory_diff(handle, "increased").json()
+    assert round2["total"] == 1
+    assert round2["matches"][0]["addr"] == offset
+
+
+def test_memory_diff_width_locks_in_after_first_round(dosbox):
+    offset = 0x9060
+    dosbox.memory_write(offset, b"\x00\x00\x00\x00")
+    handle = dosbox.memory_snapshot(offset, offset + 4).json()["handle"]
+
+    dosbox.memory_diff(handle, "unchanged", width=2)
+    r = dosbox.memory_diff(handle, "unchanged", width=4)
+    assert r.status_code == 400
+
+
+def test_memory_diff_unknown_handle_is_404(dosbox):
+    r = dosbox.memory_diff(999999999, "changed")
+    assert r.status_code == 404
+
+
+def test_memory_diff_bad_op_rejected(dosbox):
+    offset = 0x9070
+    dosbox.memory_write(offset, b"\x00\x00")
+    handle = dosbox.memory_snapshot(offset, offset + 2).json()["handle"]
+    r = dosbox.memory_diff(handle, "bogus")
+    assert r.status_code == 400
+
+
+def test_memory_diff_handle_removed_once_exhausted(dosbox):
+    offset = 0x9080
+    dosbox.memory_write(offset, b"\x00\x00")
+    handle = dosbox.memory_snapshot(offset, offset + 2).json()["handle"]
+
+    dosbox.memory_write(offset, b"\x01\x01")
+    dosbox.memory_diff(handle, "changed")  # narrows to 2 candidates
+
+    # Nothing decreases - the candidate set drops to zero and the
+    # handle is removed.
+    r = dosbox.memory_diff(handle, "decreased")
+    assert r.status_code == 200
+    assert r.json()["candidates"] == 0
+
+    r = dosbox.memory_diff(handle, "changed")
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Host validation
 # ---------------------------------------------------------------------------
 

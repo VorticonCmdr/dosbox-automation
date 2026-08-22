@@ -18,6 +18,7 @@
 #include "private/freeze.h"
 #include "private/io_port.h"
 #include "private/memory.h"
+#include "private/memory_snapshot.h"
 #include "private/shutdown.h"
 #include "video.h"
 #include "wait.h"
@@ -193,6 +194,8 @@ static void setup_api_handlers()
 	server.Post("/api/v1/memory/free", FreeMemoryCommand::Post);
 	server.Post("/api/v1/memory/search", SearchMemoryCommand::Post);
 	server.Post("/api/v1/memory/scan", ScanMemoryCommand::Post);
+	server.Post("/api/v1/memory/snapshot", MemorySnapshotHandlers::Post);
+	server.Post("/api/v1/memory/diff", MemoryDiffHandlers::Post);
 	server.Post("/api/v1/memory/freeze", FreezeHandlers::Post);
 	server.Get("/api/v1/memory/freeze", FreezeHandlers::Get);
 	server.Delete("/api/v1/memory/freeze", FreezeHandlers::Delete);
@@ -690,6 +693,7 @@ void WEBSERVER_Destroy()
 	// server.stop() would hang waiting for that worker to join.
 	Webserver::WaitRegistry::Instance().DrainAll();
 	Webserver::DebugEvents::Instance().DrainAll();
+	Webserver::SnapshotRegistry::Instance().Clear();
 	OSDPORT_Destroy();
 	Webserver::server.stop();
 	Webserver::remove_token_file();

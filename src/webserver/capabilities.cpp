@@ -11,6 +11,7 @@
 #include "private/dos.h"
 #include "private/freeze.h"
 #include "private/memory.h"
+#include "private/memory_snapshot.h"
 #include "wait.h"
 #include "webserver.h"
 
@@ -115,6 +116,9 @@ json BuildCapabilitiesBlock()
 	memory_limits["max_search_limit"]      = MaxSearchLimit;
 	memory_limits["max_scan_pattern_bytes"]  = MaxScanPatternBytes;
 	memory_limits["max_scan_worst_case_ops"] = MaxScanWorstCaseOps;
+	memory_limits["max_snapshot_total_bytes"] = SnapshotRegistry::MaxTotalBytes;
+	memory_limits["max_snapshot_entries"] = SnapshotRegistry::MaxEntries;
+	memory_limits["max_snapshot_candidates"] = SnapshotRegistry::MaxCandidates;
 	memory_limits["max_dos_allocations"] = AllocationRegistry::MaxEntries;
 
 	json input_limits;

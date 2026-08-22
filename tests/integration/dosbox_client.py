@@ -227,6 +227,25 @@ class DosboxClient:
     def memory_free(self, addr: int) -> requests.Response:
         return self._post("/api/v1/memory/free", json={"addr": addr})
 
+    def memory_snapshot(self, start: int, end: int) -> requests.Response:
+        return self._post(
+            "/api/v1/memory/snapshot", json={"start": start, "end": end}
+        )
+
+    def memory_diff(
+        self,
+        handle: int,
+        op: str,
+        width: int | None = None,
+        limit: int | None = None,
+    ) -> requests.Response:
+        body = {"handle": handle, "op": op}
+        if width is not None:
+            body["width"] = width
+        if limit is not None:
+            body["limit"] = limit
+        return self._post("/api/v1/memory/diff", json=body)
+
     # --- Control ---
 
     def shutdown(self) -> requests.Response:

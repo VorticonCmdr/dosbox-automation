@@ -1705,6 +1705,154 @@
         }
       }
     },
+    "/api/v1/memory/snapshot": {
+      "post": {
+        "tags": [
+          "Memory"
+        ],
+        "summary": "Capture a memory range for later comparison",
+        "operationId": "createMemorySnapshot",
+        "description": "Captures [start, end) (max 16 MB) so it can be compared against later with POST /memory/diff - the first step of a snapshot-and-refine workflow for locating an unknown value's address. Returns a handle. Snapshots are capped by total bytes across every live snapshot (32 MB, LRU-evicted, not capped by count), plus a backstop cap on the number of live snapshots.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemorySnapshot"
+              },
+              "example": {
+                "start": 0,
+                "end": 65536
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Snapshot created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "handle": {
+                      "type": "integer",
+                      "description": "Pass this to POST /memory/diff."
+                    },
+                    "start": {
+                      "type": "integer"
+                    },
+                    "end": {
+                      "type": "integer"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "example": {
+                  "handle": 1,
+                  "start": 0,
+                  "end": 65536,
+                  "bytes": 65536
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/diff": {
+      "post": {
+        "tags": [
+          "Memory"
+        ],
+        "summary": "Compare current memory against a snapshot and narrow the candidates",
+        "operationId": "diffMemorySnapshot",
+        "description": "Compares current guest memory against a memory/snapshot handle and narrows it to whatever satisfies 'op'. The first diff call on a handle compares the whole captured range against fresh memory; every call after that re-checks only the addresses that survived the previous call, so repeated calls on the same handle progressively refine - each call re-baselines, so 'increased' means increased since the *previous* diff call, not the original snapshot. 'width' (1, 2, or 4 bytes, default 1) is only settable on a handle's first diff call and locks in from then on; a later call that names a different width is rejected. A handle that narrows to zero candidates is removed - the next diff on it, or on any handle that doesn't currently exist, fails with 404.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryDiff"
+              },
+              "example": {
+                "handle": 1,
+                "op": "changed"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Survivors of this round.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "matches": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "addr": {
+                            "type": "integer"
+                          },
+                          "value": {
+                            "type": "integer"
+                          }
+                        }
+                      },
+                      "description": "Up to 'limit' {addr, value} pairs."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "description": "The real number of survivors this round, which can exceed matches.length."
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "True when total exceeds matches.length."
+                    },
+                    "candidates": {
+                      "type": "integer",
+                      "description": "How many addresses are being tracked for the next diff call on this handle. Can be less than total if there were more true survivors than the registry's per-handle candidate cap (65536) - the ones kept are an arbitrary subset, so treat a heavily-truncated round as a signal to narrow the search and take a new snapshot rather than trusting the survivors."
+                    }
+                  }
+                },
+                "example": {
+                  "matches": [
+                    {
+                      "addr": 36866,
+                      "value": 10
+                    }
+                  ],
+                  "total": 1,
+                  "truncated": false,
+                  "candidates": 1
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "No snapshot with that handle (never existed, evicted, or already narrowed to zero candidates)."
+          }
+        }
+      }
+    },
     "/api/v1/memory/freeze": {
       "post": {
         "tags": [
@@ -2560,6 +2708,62 @@
             "type": "integer",
             "default": 256,
             "description": "Max matches to return, 1-4096. The full match count is still reported in 'total' even when it exceeds this."
+          }
+        }
+      },
+      "MemorySnapshot": {
+        "type": "object",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "start": {
+            "type": "integer",
+            "description": "Physical start address of the range to capture."
+          },
+          "end": {
+            "type": "integer",
+            "description": "Physical end address (exclusive). Max span 16 MB."
+          }
+        }
+      },
+      "MemoryDiff": {
+        "type": "object",
+        "required": [
+          "handle",
+          "op"
+        ],
+        "properties": {
+          "handle": {
+            "type": "integer",
+            "description": "Handle returned by POST /memory/snapshot."
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "changed",
+              "unchanged",
+              "increased",
+              "decreased",
+              "equals"
+            ],
+            "description": "How to compare each candidate's current value to the value recorded for it. 'equals' is a synonym for 'unchanged'."
+          },
+          "width": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              4
+            ],
+            "default": 1,
+            "description": "Comparison width in bytes. Only settable on a handle's first diff call - locked in from then on."
+          },
+          "limit": {
+            "type": "integer",
+            "default": 256,
+            "description": "Max matches to return, 1-4096. The full survivor count is still reported in 'total' even when it exceeds this."
           }
         }
       },
