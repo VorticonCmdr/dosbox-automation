@@ -12,6 +12,7 @@
 #include "utils/string_utils.h"
 
 #include "cpu/registers.h"
+#include "debugger/debugger.h"
 #include "dos/dos_memory.h"
 #include "hardware/memory.h"
 
@@ -355,6 +356,239 @@ void SearchMemoryCommand::Post(const Request& req, Response& res)
 	}
 
 	SearchMemoryCommand cmd(start, end, value, width, limit);
+	cmd.WaitForCompletion(2000);
+	if (!cmd.error.empty()) {
+		throw std::out_of_range(cmd.error);
+	}
+
+	json result;
+	result["matches"]   = cmd.Matches();
+	result["total"]     = cmd.Total();
+	result["truncated"] = cmd.Total() > cmd.Matches().size();
+	send_json(res, result);
+}
+
+// --- Memory masked signature scan ---
+
+ScanPattern ParseScanPattern(const std::string& text)
+{
+	const auto tokens = split(text);
+
+	if (tokens.size() < MinScanPatternBytes ||
+	    tokens.size() > MaxScanPatternBytes) {
+		throw std::invalid_argument(
+		        "pattern must have " + std::to_string(MinScanPatternBytes) +
+		        ".." + std::to_string(MaxScanPatternBytes) +
+		        " space-separated byte tokens");
+	}
+
+	ScanPattern pattern;
+	pattern.reserve(tokens.size());
+
+	for (const auto& token : tokens) {
+		if (token == "??") {
+			pattern.emplace_back(std::nullopt);
+			continue;
+		}
+
+		const auto value = token.size() == 2 && is_hex_digits(token)
+		                         ? parse_int(token, 16)
+		                         : std::nullopt;
+
+		if (!value || *value < 0 || *value > 0xFF) {
+			// Echoing the offending token back is helpful, but the
+			// token is untrusted and unbounded in length (a single
+			// token can't overrun MaxScanPatternBytes, which counts
+			// tokens, not characters) - cap what gets reflected
+			// into the error body.
+			constexpr size_t MaxEchoedTokenChars = 32;
+			const std::string shown =
+			        token.size() > MaxEchoedTokenChars
+			                ? token.substr(0, MaxEchoedTokenChars) + "..."
+			                : token;
+			throw std::invalid_argument("pattern token '" + shown +
+			                            "' must be two hex digits or '?\?'");
+		}
+
+		pattern.push_back(static_cast<uint8_t>(*value));
+	}
+
+	return pattern;
+}
+
+std::vector<uint32_t> ScanBufferForPattern(const std::vector<uint8_t>& buf,
+                                           const ScanPattern& pattern,
+                                           const size_t limit, size_t* total_out)
+{
+	std::vector<uint32_t> hits;
+	size_t total         = 0;
+	const size_t pat_len = pattern.size();
+
+	// Only the fixed bytes ever need comparing - a wildcard matches
+	// unconditionally. Looping the raw pattern including wildcards per
+	// candidate position would still cost one iteration per wildcard
+	// even though nothing gets compared, making the true worst case
+	// per position O(pat_len) rather than O(fixed_count) - and the
+	// caller's CPU budget check (ScanMemoryCommand::Post) assumes
+	// exactly the latter. Precomputing just the fixed (offset, value)
+	// pairs once keeps that assumption honest.
+	std::vector<std::pair<size_t, uint8_t>> fixed_bytes;
+	fixed_bytes.reserve(pat_len);
+	for (size_t j = 0; j < pat_len; ++j) {
+		if (pattern[j]) {
+			fixed_bytes.emplace_back(j, *pattern[j]);
+		}
+	}
+
+	if (pat_len > 0 && buf.size() >= pat_len) {
+		for (uint32_t i = 0; i + pat_len <= buf.size(); ++i) {
+			bool matched = true;
+			for (const auto& [offset, value] : fixed_bytes) {
+				if (buf[i + offset] != value) {
+					matched = false;
+					break;
+				}
+			}
+			if (matched) {
+				++total;
+				if (hits.size() < limit) {
+					hits.push_back(i);
+				}
+			}
+		}
+	}
+
+	if (total_out) {
+		*total_out = total;
+	}
+	return hits;
+}
+
+bool PatternSelectiveEnoughForSpan(const size_t count_fixed, const uint64_t span_len)
+{
+	uint64_t capacity       = 1;
+	const size_t iterations = std::min<size_t>(count_fixed, 4);
+	for (size_t i = 0; i < iterations; ++i) {
+		capacity *= 256;
+	}
+	return capacity >= span_len;
+}
+
+bool PatternWithinScanCpuBudget(const size_t count_fixed, const uint64_t span_len)
+{
+	// Valid only because ScanBufferForPattern's inner loop is now
+	// genuinely O(count_fixed) per candidate position (see the fixed_bytes
+	// precomputation above) - span_len and count_fixed are both bounded
+	// (MaxSearchSpanBytes, MaxScanPatternBytes) well below what could
+	// overflow this multiplication in uint64_t.
+	return span_len * static_cast<uint64_t>(count_fixed) <= MaxScanWorstCaseOps;
+}
+
+void ScanMemoryCommand::Execute()
+{
+	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
+	                           MemPageSize;
+	if (end > mem_total || start >= end) {
+		error = "Invalid scan range";
+		return;
+	}
+
+	const auto len = end - start;
+	std::vector<uint8_t> buf(len);
+
+	// Active execute breakpoints on a non-heavy-debugger build patch a
+	// 0xCC trap byte into guest memory (CBreakpoint::Activate); read
+	// through them so a scan matches the real instruction underneath,
+	// not the trap. SkipBreakpoints only suppresses this read's own
+	// memory-read-watchpoint side effect (a heavy-debugger-only
+	// concept) - it does not see through the 0xCC patch, hence the
+	// separate substitution below. One range lookup up front, bounded
+	// by the number of registered breakpoints rather than the span -
+	// querying per byte would cost span_len * breakpoint_count and
+	// blow straight past the CPU budget below regardless of the
+	// pattern.
+	const auto breakpoint_bytes = DEBUG_GetOriginalBytesInRange(
+	        static_cast<PhysPt>(start), static_cast<PhysPt>(end));
+
+	for (uint32_t i = 0; i < len; ++i) {
+		const auto addr = static_cast<PhysPt>(start + i);
+		if (auto it = breakpoint_bytes.find(addr);
+		    it != breakpoint_bytes.end()) {
+			buf[i] = it->second;
+		} else {
+			buf[i] = mem_readb<MemOpMode::SkipBreakpoints>(addr);
+		}
+	}
+
+	size_t total_count = 0;
+	matches = ScanBufferForPattern(buf, pattern, limit, &total_count);
+	total   = total_count;
+
+	for (auto& m : matches) {
+		m += start;
+	}
+}
+
+void ScanMemoryCommand::Post(const Request& req, Response& res)
+{
+	auto j = json::parse(req.body);
+
+	const std::string pattern_text = j.at("pattern").get<std::string>();
+	const uint32_t start           = j.at("start").get<uint32_t>();
+	const uint32_t end             = j.at("end").get<uint32_t>();
+	const uint32_t limit           = j.value("limit", DefaultSearchLimit);
+
+	auto pattern = ParseScanPattern(pattern_text);
+
+	size_t fixed_count = 0;
+	for (const auto& b : pattern) {
+		if (b.has_value()) {
+			++fixed_count;
+		}
+	}
+
+	if (fixed_count == 0) {
+		throw std::invalid_argument(
+		        "pattern must contain at least one fixed byte, not "
+		        "just wildcards");
+	}
+
+	if (end <= start || end - start > MaxSearchSpanBytes) {
+		throw std::invalid_argument("scan span must be 1.." +
+		                            std::to_string(MaxSearchSpanBytes) +
+		                            " bytes");
+	}
+
+	const uint64_t span_len = static_cast<uint64_t>(end) - start;
+
+	if (pattern.size() > span_len) {
+		throw std::invalid_argument(
+		        "pattern (" + std::to_string(pattern.size()) +
+		        " bytes) does not fit in a " +
+		        std::to_string(span_len) + "-byte span");
+	}
+
+	if (!PatternSelectiveEnoughForSpan(fixed_count, span_len)) {
+		throw std::invalid_argument(
+		        "pattern's " + std::to_string(fixed_count) +
+		        " fixed byte(s) is not selective enough for a " +
+		        std::to_string(span_len) +
+		        "-byte span; add more fixed bytes or narrow the range");
+	}
+
+	if (!PatternWithinScanCpuBudget(fixed_count, span_len)) {
+		throw std::invalid_argument(
+		        "pattern's fixed-byte count is too high for a span "
+		        "this large and would risk exceeding the scan time "
+		        "budget; narrow the range or reduce fixed bytes");
+	}
+
+	if (limit < 1 || limit > MaxSearchLimit) {
+		throw std::invalid_argument("limit must be 1.." +
+		                            std::to_string(MaxSearchLimit));
+	}
+
+	ScanMemoryCommand cmd(start, end, std::move(pattern), limit);
 	cmd.WaitForCompletion(2000);
 	if (!cmd.error.empty()) {
 		throw std::out_of_range(cmd.error);

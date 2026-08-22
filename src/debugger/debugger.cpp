@@ -15,6 +15,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "audio/mixer.h"
@@ -427,6 +428,10 @@ public:
 	{
 		return location;
 	}
+	uint8_t GetOldData() const noexcept
+	{
+		return oldData;
+	}
 	uint16_t GetSegment() const noexcept
 	{
 		return segment;
@@ -633,6 +638,23 @@ void CBreakpoint::Activate(bool _active)
 
 // Statics
 static std::list<CBreakpoint*> BPoints = {};
+
+#if !C_HEAVY_DEBUGGER
+std::unordered_map<PhysPt, uint8_t> DEBUG_GetOriginalBytesInRange(const PhysPt start,
+                                                                  const PhysPt end)
+{
+	std::unordered_map<PhysPt, uint8_t> result;
+	for (CBreakpoint* bp : BPoints) {
+		if (bp->IsActive() && bp->GetType() == BKPNT_PHYSICAL) {
+			const PhysPt location = bp->GetLocation();
+			if (location >= start && location < end) {
+				result[location] = bp->GetOldData();
+			}
+		}
+	}
+	return result;
+}
+#endif
 
 #if C_HEAVY_DEBUGGER
 template <typename T>

@@ -10,6 +10,7 @@
 #include "hardware/memory.h"
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #if C_DEBUGGER
@@ -201,5 +202,28 @@ constexpr void DEBUG_UpdateMemoryReadBreakpoints(const PhysPt)
 	// no-op
 }
 #endif // C_DEBUGGER && C_HEAVY_DEBUGGER
+
+#if C_DEBUGGER && !C_HEAVY_DEBUGGER
+// Returns the original byte for every active execute breakpoint whose
+// location falls in [start, end), as address -> byte
+// (CBreakpoint::Activate patches 0xCC into guest memory for each one).
+// One pass over the breakpoint list regardless of the range size, so a
+// caller reading a large span (e.g. a memory pattern scan) can
+// substitute bytes with an O(1) lookup per address instead of
+// re-scanning the whole breakpoint list once per byte - the latter
+// costs range_size * breakpoint_count, which no per-request CPU budget
+// aimed at the read itself would anticipate. Only meaningful on this
+// build: the heavy debugger checks breakpoints without patching guest
+// memory, so there is nothing to substitute there.
+std::unordered_map<PhysPt, uint8_t> DEBUG_GetOriginalBytesInRange(PhysPt start,
+                                                                  PhysPt end);
+
+#else
+
+inline std::unordered_map<PhysPt, uint8_t> DEBUG_GetOriginalBytesInRange(PhysPt, PhysPt)
+{
+	return {};
+}
+#endif // C_DEBUGGER && !C_HEAVY_DEBUGGER
 
 #endif // DOSBOX_DEBUG_H

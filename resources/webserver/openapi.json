@@ -1638,6 +1638,73 @@
         }
       }
     },
+    "/api/v1/memory/scan": {
+      "post": {
+        "tags": [
+          "Memory"
+        ],
+        "summary": "Scan memory for a masked byte signature",
+        "operationId": "scanMemory",
+        "description": "Scans a memory range for a masked byte signature, e.g. Ghidra's copyable byte string '8B 46 ?? 50 E8': space-separated hex-pair bytes and '??' wildcards, 1-256 tokens, at least one fixed byte. Maximum scan span is 16 MB. Rejected with 400 when the pattern isn't selective enough for the requested span (too many wildcards would make it match almost everywhere) or when its fixed-byte count is too high for the span (would risk exceeding the scan time budget). 'matches' is capped at 'limit' (default 256, max 4096); 'total' reports the real match count even when it exceeds that, and 'truncated' says whether it did. If an execute breakpoint is active inside the range, the scan reads through its 0xCC trap byte to the real instruction underneath.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryScan"
+              },
+              "example": {
+                "pattern": "8B 46 ?? 50 E8",
+                "start": 0,
+                "end": 655360
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Matching addresses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "matches": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      },
+                      "description": "Physical addresses where the pattern's first byte matched, up to 'limit' entries."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "description": "The real number of matches, which can exceed matches.length."
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "True when total exceeds matches.length."
+                    }
+                  }
+                },
+                "example": {
+                  "matches": [
+                    36864
+                  ],
+                  "total": 1,
+                  "truncated": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/api/v1/memory/freeze": {
       "post": {
         "tags": [
@@ -2453,6 +2520,33 @@
             ],
             "default": 1,
             "description": "Match width: 1 byte, 2 word, 4 dword."
+          },
+          "start": {
+            "type": "integer",
+            "description": "Physical start address of the scan range."
+          },
+          "end": {
+            "type": "integer",
+            "description": "Physical end address (exclusive). Max span 16 MB."
+          },
+          "limit": {
+            "type": "integer",
+            "default": 256,
+            "description": "Max matches to return, 1-4096. The full match count is still reported in 'total' even when it exceeds this."
+          }
+        }
+      },
+      "MemoryScan": {
+        "type": "object",
+        "required": [
+          "pattern",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Space-separated hex-pair bytes and '??' wildcards, e.g. '8B 46 ?? 50 E8'. 1-256 tokens, at least one fixed byte."
           },
           "start": {
             "type": "integer",
