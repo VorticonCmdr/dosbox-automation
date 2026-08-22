@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1, 2.2, 2.4 and 2.6 done. Rest of tiers 2-4 outstanding.**
+**Progress: 1.1-1.8, 2.1, 2.2, 2.3, 2.4 and 2.6 done. Rest of tiers 2-4 outstanding.**
 
 ---
 
@@ -290,7 +290,7 @@ Bridge: `debug_status`/`debug_pause`/`debug_continue`/`debug_step` already relay
 Live-verified end-to-end against the real `build-debugger` binary: pause/status/continue/step all report correct `stop` records; 30 consecutive single-steps tracked real EIP/register changes exactly; a background `debug/wait` call correctly blocked and then resolved the instant a concurrent request published a new stop, proving the push path (not just polling) works. One live surprise, run down before concluding anything: an execute breakpoint planted on the address the emulator was paused at (freshly-booted BIOS POST code, segment `F000`) never fired even across multiple retries. Traced to the root cause rather than assumed: `CBreakpoint::Activate()` plants a breakpoint by writing `0xCC` directly into guest memory, and a direct `PUT /api/v1/memory` write to that same BIOS ROM address silently no-ops (read-back still shows the original byte) - the ROM segment is write-protected in this emulator's memory model, exactly like real BIOS ROM. Confirmed this is pre-existing and unrelated to this change by reverting `debugger.cpp` alone (`git stash push` on that one file) and reproducing the identical non-firing behavior against the original, unmodified code. Real guest DOS programs load into ordinary conventional RAM, not ROM, so this doesn't affect the feature's actual use case; a true positive-path confirmation (breakpoint fired, `stop.reason == "breakpoint"`, correct `stop.breakpoint` payload) needs a booted DOS environment with a mounted image and was out of scope for this pass.
 
 #### 2.3 Watchpoint honesty
-**Engine. Effort: S, plus M if watchpoints are actually wanted.**
+**Engine. Effort: S, plus M if watchpoints are actually wanted. Status: done, scoped to the S half exactly as instructed.**
 
 `POST /debug/breakpoints` with `type: "memory"` returns 200 with the engine's own read-back, and never fires: every memory branch of `CheckBreakpoint` is inside `#if C_HEAVY_DEBUGGER` (`debugger.cpp:674-733`), which the shipped debugger build has off. The engine's own BPM/BPMR/BPPM/BPLM commands are hidden on that build (`debugger.cpp:1998-2044`), so REST exposes a facility the UI does not. `tools/debug.py:59-61` asserts the opposite of the truth.
 
@@ -301,6 +301,15 @@ Live-verified end-to-end against the real `build-debugger` binary: pause/status/
 2. The memory branch uses `return false` where it means `continue` (`debugger.cpp:684,690,693,707`), so one failed read aborts the scan of the entire breakpoint list and silently skips later breakpoints.
 
 **Be honest about the cost:** `C_HEAVY_DEBUGGER` puts `DEBUG_HeavyIsBreakpoint` on the per-instruction path in every core. Shipping a heavy build is a performance decision. If the answer is no heavy build, do only the flag and the 501 and skip the rest.
+
+**Shipped, exactly the S-scoped half, with one deliberate deviation from the plan's own text:**
+
+- **No separate `watchpoints` boolean added.** The plan's text predates item 2.1, shipped earlier this session: `BuildCapabilitiesBlock()`'s `capabilities.debugger` already reports `state: "degraded"` with a reason string naming memory breakpoints unavailable specifically, whenever `!C_HEAVY_DEBUGGER` (`capabilities.cpp:90-104`, `ComputeDebuggerCapability`). A second, standalone `watchpoints` flag would either duplicate that disclosure or risk drifting from it as a separate source of truth - the existing capability is more precise (it also names which core execute/interrupt breakpoints fall back to) and already does everything the plan's `watchpoints` boolean was for. Verified live: `GET /api/v1/dosbox/info`'s `capabilities.debugger` still reads exactly as it did after 2.1, unchanged by this item.
+- **The 501 refusal is real and new:** `DebugAddBreakpointCommand::Post`'s `type == "memory"` branch (`debug.cpp`) now checks `#if !C_HEAVY_DEBUGGER` and returns `501` with a clear error naming the reason and pointing at `capabilities.debugger`, before ever constructing a `Command` or crossing the Bridge - matching the plan's "refusal an agent can read beats a breakpoint that never fires." `execute`/`interrupt` breakpoints are unaffected; confirmed live.
+- **Found and fixed in passing, not originally in scope:** the bridge's own `debug_breakpoint_add` tool description for `type: "memory"` was not just silent about non-support, it was **actively wrong about the semantics** - it read "stop on execution reaching segment:offset ... same effect as execute breakpoints for stepping purposes," describing an execute breakpoint, not a watchpoint. The engine's actual mechanism (`CheckBreakpoint`'s `BKPNT_MEMORY` branch, `debugger.cpp:818-928`) is a watched-byte-value-changed check, unrelated to execution reaching the address at all. This predates this item and wasn't touched by 2.4/2.6's own edits to the same tool description (those extended the schema with unrelated fields and never audited this bullet). Rewritten to describe the real semantics, the heavy-debugger requirement, and the 501.
+- **The "two real bugs" and "be honest about the cost" sections are deliberately untouched**, per the plan's own explicit instruction: this build ships without `C_HEAVY_DEBUGGER`, so "do only the flag and the 501 and skip the rest" applies exactly.
+
+**Verification:** engine build clean, zero new warnings. Full suite unaffected (same 20 pre-existing `MountPolicyTest` failures). Live-verified against the real `build-debugger` binary: `POST /api/v1/debug/breakpoints` with `type: "memory"` now returns `501` with the documented error; `type: "execute"` at the same address still returns `200` and works normally; `capabilities.debugger` cross-checked as unchanged and already consistent with the new refusal's own reasoning. Bridge: full suite 185 passed, 2 skipped, zero failures; ruff clean (no new findings beyond the pre-existing, unrelated `PLR0402` pattern already present throughout this file).
 
 #### 2.4 Execution control and stable breakpoint identity
 **Engine. Effort: M. Status: done.**

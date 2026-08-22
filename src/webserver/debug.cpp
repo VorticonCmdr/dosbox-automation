@@ -622,9 +622,28 @@ void DebugAddBreakpointCommand::Post(const Request& req, Response& res)
 		ah      = ByteOrWildcard(j, "ah");
 		al      = ByteOrWildcard(j, "al");
 	} else if (type_str == "memory") {
+#if !C_HEAVY_DEBUGGER
+		// A memory breakpoint's match logic (CheckBreakpoint's watched-
+		// value-changed check) is entirely compiled out on a non-heavy
+		// build (debugger.cpp, #if C_HEAVY_DEBUGGER) - accepting the
+		// request here would return 200 for a breakpoint that can never
+		// fire. Refuse it instead of silently no-oping; the reason is
+		// also visible ahead of time via capabilities.debugger.
+		res.status = httplib::StatusCode::NotImplemented_501;
+		json err;
+		err["error"] =
+		        "memory (watchpoint) breakpoints need a heavy-debugger "
+		        "build (C_HEAVY_DEBUGGER=1); this binary doesn't have "
+		        "one, so a memory breakpoint would accept the request "
+		        "and then never fire - see capabilities.debugger in "
+		        "GET /api/v1/dosbox/info";
+		send_json(res, err);
+		return;
+#else
 		type    = DebugBreakpointType::Memory;
 		segment = RequireU16(j, "segment");
 		offset  = RequireU32(j, "offset");
+#endif
 	} else {
 		throw std::invalid_argument(
 		        "type must be one of: execute, interrupt, memory");
