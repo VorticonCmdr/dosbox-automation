@@ -15,6 +15,8 @@
 #include "dos/dos_memory.h"
 #include "hardware/memory.h"
 
+#include <limits>
+
 using json = nlohmann::json;
 using httplib::Request, httplib::Response;
 
@@ -69,7 +71,18 @@ static void parse_mem_addr(const httplib::Request& req, Segment& segment,
 			const auto seg_addr = PhysicalMake(
 			        num_param<uint16_t>(req, Source::Path, "segment"), 0);
 
-			offset += seg_addr;
+			// 64-bit arithmetic deliberately: offset is untrusted
+			// HTTP input, and a uint32_t addition can overflow and
+			// wrap into a small, in-range-looking value instead of
+			// correctly failing the emulation-thread bounds check
+			// later.
+			const uint64_t resolved = static_cast<uint64_t>(offset) +
+			                          static_cast<uint64_t>(seg_addr);
+			if (resolved > std::numeric_limits<uint32_t>::max()) {
+				throw std::invalid_argument(
+				        "segment:offset exceeds the addressable range");
+			}
+			offset = static_cast<uint32_t>(resolved);
 		}
 	}
 }
@@ -77,21 +90,32 @@ static void parse_mem_addr(const httplib::Request& req, Segment& segment,
 void ReadMemoryCommand::Execute()
 {
 	regs.load();
-	effective_addr = base_segment_to_offset(base) + offset;
 
-	LOG_DEBUG("API: ReadMemoryCommand(0x%06x, %d)", effective_addr, len);
+	// 64-bit arithmetic deliberately: base_segment_to_offset()'s live
+	// segment base plus offset (untrusted HTTP input for the linear/
+	// numeric-segment forms) can overflow uint32_t and silently wrap
+	// into a small, in-range-looking address instead of correctly
+	// failing the bounds check below.
+	const uint64_t addr64 = static_cast<uint64_t>(base_segment_to_offset(base)) +
+	                        static_cast<uint64_t>(offset);
+
+	LOG_DEBUG("API: ReadMemoryCommand(0x%06x, %d)",
+	          static_cast<uint32_t>(addr64),
+	          len);
 
 	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
 	                           MemPageSize;
 
-	const uint64_t end_addr = static_cast<uint64_t>(effective_addr) + len;
+	const uint64_t end_addr = addr64 + len;
 
 	if (end_addr > mem_total) {
-		error = "Address range 0x" + std::to_string(effective_addr) + " + " +
+		error = "Address range 0x" + std::to_string(addr64) + " + " +
 		        std::to_string(len) + " exceeds emulated memory size (" +
 		        std::to_string(mem_total) + " bytes)";
 		return;
 	}
+
+	effective_addr = static_cast<uint32_t>(addr64);
 
 	memory.resize(len);
 	MEM_BlockRead(effective_addr, memory.data(), len);
@@ -139,25 +163,47 @@ void ReadMemoryCommand::Get(const Request& req, Response& res)
 
 void WriteMemoryCommand::Execute()
 {
-	effective_addr = base_segment_to_offset(base) + offset;
+	// 64-bit arithmetic deliberately - see ReadMemoryCommand::Execute's
+	// comment: base_segment_to_offset() plus offset can overflow
+	// uint32_t and silently wrap into a small, in-range-looking address.
+	const uint64_t addr64 = static_cast<uint64_t>(base_segment_to_offset(base)) +
+	                        static_cast<uint64_t>(offset);
 
-	LOG_DEBUG("API: WriteMemoryCommand(0x%06x, %d)", effective_addr, data.size());
+	LOG_DEBUG("API: WriteMemoryCommand(0x%06x, %d)",
+	          static_cast<uint32_t>(addr64),
+	          data.size());
 
 	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
 	                           MemPageSize;
 
-	const uint64_t end_addr = static_cast<uint64_t>(effective_addr) +
-	                          data.size();
+	const uint64_t end_addr = addr64 + data.size();
 
 	if (end_addr > mem_total) {
-		error = "Address range 0x" + std::to_string(effective_addr) +
-		        " + " + std::to_string(data.size()) +
+		error = "Address range 0x" + std::to_string(addr64) + " + " +
+		        std::to_string(data.size()) +
 		        " exceeds emulated memory size (" +
 		        std::to_string(mem_total) + " bytes)";
 		return;
 	}
 
+	effective_addr = static_cast<uint32_t>(addr64);
+
 	if (!expected_data.empty()) {
+		// Separate bound: the CAS comparison reads expected_data.size()
+		// bytes, a different length than the write payload just
+		// checked above - without this, a client could send a short
+		// 'data' (passing the check above) paired with a longer
+		// If-Match value that reads past emulated memory instead of
+		// failing with the same clear error.
+		const uint64_t expected_end_addr = addr64 + expected_data.size();
+		if (expected_end_addr > mem_total) {
+			error = "If-Match range 0x" + std::to_string(addr64) +
+			        " + " + std::to_string(expected_data.size()) +
+			        " exceeds emulated memory size (" +
+			        std::to_string(mem_total) + " bytes)";
+			return;
+		}
+
 		conflict_data.resize(expected_data.size());
 
 		MEM_BlockRead(effective_addr,

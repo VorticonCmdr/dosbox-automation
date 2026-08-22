@@ -1,3 +1,4 @@
+import base64
 import time
 from pathlib import Path
 
@@ -192,9 +193,25 @@ class DosboxClient:
             headers={"Accept": "application/json"},
         )
 
-    def memory_write(self, offset: int, data: bytes) -> requests.Response:
+    def memory_read_segment_json(self, segment, offset: int, length: int) -> requests.Response:
+        # segment may be a register name (cs/ss/ds/es/fs/gs, resolved on
+        # the emulation thread) or a numeric paragraph value.
+        return self._get(
+            f"/api/v1/memory/{segment}/{offset}/{length}",
+            headers={"Accept": "application/json"},
+        )
+
+    def memory_write(
+        self, offset: int, data: bytes, if_match: bytes | None = None
+    ) -> requests.Response:
+        headers = {"Content-Type": "application/octet-stream"}
+        if if_match is not None:
+            headers["If-Match"] = base64.b64encode(if_match).decode()
+        return self._put(f"/api/v1/memory/{offset}", data=data, headers=headers)
+
+    def memory_write_segment(self, segment, offset: int, data: bytes) -> requests.Response:
         return self._put(
-            f"/api/v1/memory/{offset}",
+            f"/api/v1/memory/{segment}/{offset}",
             data=data,
             headers={"Content-Type": "application/octet-stream"},
         )

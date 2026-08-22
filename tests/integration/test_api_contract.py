@@ -530,6 +530,57 @@ def test_memory_read_json(dosbox):
     assert len(decoded) == 16
 
 
+def test_memory_read_segment_by_register_name(dosbox):
+    regs = dosbox.cpu_state().json()["registers"]
+    r = dosbox.memory_read_segment_json("cs", 0, 16)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["memory"]["addr"] == regs["cs"] * 16
+
+
+def test_memory_read_segment_by_numeric_paragraph(dosbox):
+    r = dosbox.memory_read_segment_json(0x1000, 0x50, 16)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["memory"]["addr"] == 0x1000 * 16 + 0x50
+
+
+def test_memory_write_segment_resolves_to_the_same_address_the_linear_route_reads(dosbox):
+    regs = dosbox.cpu_state().json()["registers"]
+    r = dosbox.memory_write_segment("ss", 0, b"\x99")
+    assert r.status_code == 200
+
+    linear_addr = regs["ss"] * 16
+    readback = dosbox.memory_read(linear_addr, 1)
+    assert readback.content == b"\x99"
+
+
+def test_memory_write_if_match_succeeds_when_bytes_match(dosbox):
+    offset = 0x9000  # well clear of anything the BIOS/DOS touches at boot
+    original = dosbox.memory_read(offset, 4).content
+    new_bytes = bytes((b + 1) % 256 for b in original)
+
+    r = dosbox.memory_write(offset, new_bytes, if_match=original)
+    assert r.status_code == 200
+
+    assert dosbox.memory_read(offset, 4).content == new_bytes
+
+
+def test_memory_write_if_match_conflicts_when_bytes_differ(dosbox):
+    offset = 0x9010
+    original = dosbox.memory_read(offset, 4).content
+    wrong_expected = bytes((b + 1) % 256 for b in original)
+    attempted = bytes((b + 2) % 256 for b in original)
+
+    r = dosbox.memory_write(offset, attempted, if_match=wrong_expected)
+    assert r.status_code == 412
+    data = r.json()
+    assert base64.b64decode(data["memory"]["data"]) == original
+
+    # The mismatch must have blocked the write entirely.
+    assert dosbox.memory_read(offset, 4).content == original
+
+
 def test_memory_allocate_and_free(dosbox):
     r = dosbox.memory_allocate(256, area="CONV")
     assert r.status_code == 200
