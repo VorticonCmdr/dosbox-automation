@@ -6,6 +6,7 @@
 #define DOSBOX_WEBSERVER_DEBUG_H
 
 #include "webserver/bridge.h"
+#include "webserver/debug_events.h"
 
 #include "dosbox.h"
 #if C_DEBUGGER
@@ -24,7 +25,8 @@ public:
 	void Execute() override;
 	static void Get(const httplib::Request&, httplib::Response& res);
 
-	bool debugging = false;
+	bool debugging     = false;
+	DebugStopInfo stop = {};
 };
 
 class DebugPauseCommand : public Command {
@@ -32,7 +34,8 @@ public:
 	void Execute() override;
 	static void Post(const httplib::Request&, httplib::Response& res);
 
-	bool debugging = false;
+	bool debugging     = false;
+	DebugStopInfo stop = {};
 };
 
 class DebugContinueCommand : public Command {
@@ -40,7 +43,13 @@ public:
 	void Execute() override;
 	static void Post(const httplib::Request&, httplib::Response& res);
 
-	bool resumed = false;
+	bool resumed   = false;
+	bool debugging = false;
+	// The stop being resumed FROM, not a new one - DEBUG_Resume executes
+	// one instruction and arms breakpoints synchronously, but the next
+	// actual stop happens arbitrarily later. Callers poll GET
+	// /api/v1/debug/wait?since_stop_id=<this> for it.
+	uint64_t resumed_from_stop_id = 0;
 };
 
 class DebugStepCommand : public Command {
@@ -48,7 +57,19 @@ public:
 	void Execute() override;
 	static void Post(const httplib::Request&, httplib::Response& res);
 
-	bool stepped = false;
+	bool stepped       = false;
+	bool debugging     = false;
+	DebugStopInfo stop = {};
+};
+
+// Never a Command: the wait itself blocks the calling httplib worker
+// thread on DebugEvents' condvar, exactly like WaitHandlers::Post (wait.h)
+// - a Bridge Command here would freeze the emulation thread for the
+// whole wait. Declared unconditionally (matching the four classes above):
+// the real long-poll lives in debug.cpp's #if C_DEBUGGER block, a 501
+// NotBuilt stub in its #else.
+struct DebugWaitHandlers {
+	static void Get(const httplib::Request&, httplib::Response& res);
 };
 
 #if C_DEBUGGER

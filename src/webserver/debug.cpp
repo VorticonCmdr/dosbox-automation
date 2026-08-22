@@ -3,6 +3,7 @@
 //
 
 #include "private/debug.h"
+#include "wait.h"
 #include "webserver.h"
 
 #include "dosbox.h"
@@ -11,6 +12,7 @@
 #include "debugger/debugger.h"
 #endif
 
+#include "base64/base64.h"
 #include "json/json.h"
 
 using json = nlohmann::json;
@@ -20,75 +22,37 @@ namespace Webserver {
 
 #if C_DEBUGGER
 
-void DebugStatusCommand::Execute()
-{
-	debugging = DEBUG_IsDebugging();
-}
-
-void DebugStatusCommand::Get(const Request&, Response& res)
-{
-	DebugStatusCommand cmd;
-	cmd.WaitForCompletion();
-
-	json j;
-	j["debugging"] = cmd.debugging;
-	send_json(res, j);
-}
-
-void DebugPauseCommand::Execute()
-{
-	DEBUG_Enable(true);
-	debugging = DEBUG_IsDebugging();
-}
-
-void DebugPauseCommand::Post(const Request&, Response& res)
-{
-	DebugPauseCommand cmd;
-	cmd.WaitForCompletion();
-
-	if (!cmd.debugging) {
-		res.status = httplib::StatusCode::InternalServerError_500;
-	}
-
-	json j;
-	j["status"]    = cmd.debugging ? "ok" : "failed";
-	j["debugging"] = cmd.debugging;
-	send_json(res, j);
-}
-
-void DebugContinueCommand::Execute()
-{
-	resumed = DEBUG_Resume();
-}
-
-void DebugContinueCommand::Post(const Request&, Response& res)
-{
-	DebugContinueCommand cmd;
-	cmd.WaitForCompletion();
-
-	json j;
-	j["status"]    = cmd.resumed ? "ok" : "not_paused";
-	j["debugging"] = !cmd.resumed;
-	send_json(res, j);
-}
-
-void DebugStepCommand::Execute()
-{
-	stepped = DEBUG_SingleStep();
-}
-
-void DebugStepCommand::Post(const Request&, Response& res)
-{
-	DebugStepCommand cmd;
-	cmd.WaitForCompletion();
-
-	json j;
-	j["status"]    = cmd.stepped ? "ok" : "not_paused";
-	j["debugging"] = true;
-	send_json(res, j);
-}
-
 namespace {
+
+json DebugStopToJson(const DebugStopInfo& stop)
+{
+	json j;
+	j["stop_id"]        = stop.stop_id;
+	j["reason"]         = stop.reason;
+	j["registers"]      = stop.registers;
+	j["linear_eip"]     = stop.linear_eip;
+	j["protected_mode"] = stop.protected_mode;
+	j["core"]           = stop.core;
+	j["code_bytes"]     = base64::to_base64(
+                std::string(reinterpret_cast<const char*>(stop.code_bytes.data()),
+                            stop.code_bytes.size()));
+
+	if (stop.breakpoint) {
+		json bp;
+		bp["type"]      = stop.breakpoint->type;
+		bp["segment"]   = stop.breakpoint->segment;
+		bp["offset"]    = stop.breakpoint->offset;
+		bp["int"]       = stop.breakpoint->int_num;
+		bp["ah"]        = stop.breakpoint->ah;
+		bp["al"]        = stop.breakpoint->al;
+		bp["index"]     = stop.breakpoint->index;
+		bp["once"]      = stop.breakpoint->once;
+		j["breakpoint"] = bp;
+	} else {
+		j["breakpoint"] = nullptr;
+	}
+	return j;
+}
 
 json BreakpointToJson(const DebugBreakpointInfo& bp)
 {
@@ -125,8 +89,7 @@ uint16_t ByteOrWildcard(const json& j, const char* key)
 	}
 	const int v = j.at(key).get<int>();
 	if (v < 0 || v > 0xFF) {
-		throw std::invalid_argument(
-		        std::string(key) + " must be 0x00..0xFF");
+		throw std::invalid_argument(std::string(key) + " must be 0x00..0xFF");
 	}
 	return static_cast<uint16_t>(v);
 }
@@ -135,12 +98,136 @@ uint16_t RequireU16(const json& j, const char* key)
 {
 	const int v = j.at(key).get<int>();
 	if (v < 0 || v > 0xFFFF) {
-		throw std::invalid_argument(std::string(key) + " must be 0x0000..0xFFFF");
+		throw std::invalid_argument(std::string(key) +
+		                            " must be 0x0000..0xFFFF");
 	}
 	return static_cast<uint16_t>(v);
 }
 
 } // namespace
+
+void DebugStatusCommand::Execute()
+{
+	debugging = DEBUG_IsDebugging();
+	stop      = DebugEvents::Instance().Current();
+}
+
+void DebugStatusCommand::Get(const Request&, Response& res)
+{
+	DebugStatusCommand cmd;
+	cmd.WaitForCompletion();
+
+	json j;
+	j["debugging"] = cmd.debugging;
+	j["stop"]      = DebugStopToJson(cmd.stop);
+	send_json(res, j);
+}
+
+void DebugPauseCommand::Execute()
+{
+	DEBUG_Enable(true);
+	debugging = DEBUG_IsDebugging();
+	stop      = DebugEvents::Instance().Current();
+}
+
+void DebugPauseCommand::Post(const Request&, Response& res)
+{
+	DebugPauseCommand cmd;
+	cmd.WaitForCompletion();
+
+	if (!cmd.debugging) {
+		res.status = httplib::StatusCode::InternalServerError_500;
+	}
+
+	json j;
+	j["status"]    = cmd.debugging ? "ok" : "failed";
+	j["debugging"] = cmd.debugging;
+	j["stop"]      = DebugStopToJson(cmd.stop);
+	send_json(res, j);
+}
+
+void DebugContinueCommand::Execute()
+{
+	// Capture what we're resuming FROM before DEBUG_Resume() runs - it
+	// executes one instruction and arms breakpoints synchronously, but
+	// the actual next stop happens arbitrarily later, published by
+	// whatever runs next (DEBUG_Enable on a breakpoint hit, or nothing
+	// at all if it just keeps running).
+	resumed_from_stop_id = DebugEvents::Instance().Current().stop_id;
+	resumed              = DEBUG_Resume();
+	// Read back rather than assuming !resumed: DEBUG_Resume() returning
+	// false means it was never paused to begin with, which is also
+	// !debugging - assuming the negation happened to be right for that
+	// case, but only because "wasn't paused" and "no longer paused"
+	// collapse to the same debugging=false. Reading the real state keeps
+	// this correct regardless of why resumed came back false.
+	debugging = DEBUG_IsDebugging();
+}
+
+void DebugContinueCommand::Post(const Request&, Response& res)
+{
+	DebugContinueCommand cmd;
+	cmd.WaitForCompletion();
+
+	json j;
+	j["status"]               = cmd.resumed ? "ok" : "not_paused";
+	j["debugging"]            = cmd.debugging;
+	j["resumed_from_stop_id"] = cmd.resumed_from_stop_id;
+	send_json(res, j);
+}
+
+void DebugStepCommand::Execute()
+{
+	stepped   = DEBUG_SingleStep();
+	debugging = DEBUG_IsDebugging();
+	stop      = DebugEvents::Instance().Current();
+}
+
+void DebugStepCommand::Post(const Request&, Response& res)
+{
+	DebugStepCommand cmd;
+	cmd.WaitForCompletion();
+
+	json j;
+	j["status"]    = cmd.stepped ? "ok" : "not_paused";
+	j["debugging"] = cmd.debugging;
+	j["stop"]      = DebugStopToJson(cmd.stop);
+	send_json(res, j);
+}
+
+void DebugWaitHandlers::Get(const Request& req, Response& res)
+{
+	uint64_t since_stop_id = 0;
+	if (req.has_param("since_stop_id")) {
+		since_stop_id = num_param<uint64_t>(req, Source::Param, "since_stop_id");
+	}
+
+	uint32_t timeout_ms = DefaultWaitTimeoutMs;
+	if (req.has_param("timeout_ms")) {
+		timeout_ms = num_param<uint32_t>(req,
+		                                 Source::Param,
+		                                 "timeout_ms",
+		                                 MinWaitTimeoutMs,
+		                                 MaxWaitTimeoutMs);
+	}
+
+	const auto result = DebugEvents::Instance().WaitFor(since_stop_id, timeout_ms);
+
+	json j         = DebugStopToJson(result.info);
+	j["satisfied"] = result.satisfied;
+	// On a genuine wakeup, report the debugging state captured together
+	// with the rest of this stop record at publish time (result.info),
+	// not a fresh, separate DEBUG_IsDebugging() read - the emulation
+	// thread is free to run further debug transitions (a concurrent
+	// debug/continue, a fresh breakpoint) between WaitFor() returning and
+	// any later read on this (web) thread, which could make an
+	// independent read disagree with the reason/stop_id it's paired
+	// with. A timeout has no specific stop to be coherent with, so a live
+	// read is exactly what's wanted there.
+	j["debugging"] = result.satisfied ? result.info.debugging
+	                                  : DEBUG_IsDebugging();
+	send_json(res, j);
+}
 
 void DebugAddBreakpointCommand::Execute()
 {
@@ -306,6 +393,11 @@ void DebugStepCommand::Execute() {}
 void DebugStepCommand::Post(const Request&, Response& res)
 {
 	NotBuilt("debug_step", res);
+}
+
+void DebugWaitHandlers::Get(const Request&, Response& res)
+{
+	NotBuilt("debug_wait", res);
 }
 
 void DebugAddBreakpointCommand::Execute() {}

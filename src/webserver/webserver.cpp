@@ -206,6 +206,7 @@ static void setup_api_handlers()
 	server.Post("/api/v1/debug/pause", DebugPauseCommand::Post);
 	server.Post("/api/v1/debug/continue", DebugContinueCommand::Post);
 	server.Post("/api/v1/debug/step", DebugStepCommand::Post);
+	server.Get("/api/v1/debug/wait", DebugWaitHandlers::Get);
 
 	server.Get("/api/v1/debug/breakpoints", DebugListBreakpointsCommand::Get);
 	server.Post("/api/v1/debug/breakpoints", DebugAddBreakpointCommand::Post);
@@ -672,12 +673,13 @@ void WEBSERVER_Init()
 
 void WEBSERVER_Destroy()
 {
-	// Wake any in-flight POST /api/v1/wait requests first: they block
-	// an httplib worker thread on a condvar that only the frame hook,
-	// DEBUG_Loop or an SDL pause loop would otherwise notify, none of
-	// which run once shutdown starts - server.stop() would hang
-	// waiting for that worker to join.
+	// Wake any in-flight POST /api/v1/wait or GET /api/v1/debug/wait
+	// requests first: they block an httplib worker thread on a condvar
+	// that only the frame hook, DEBUG_Loop or an SDL pause loop would
+	// otherwise notify, none of which run once shutdown starts -
+	// server.stop() would hang waiting for that worker to join.
 	Webserver::WaitRegistry::Instance().DrainAll();
+	Webserver::DebugEvents::Instance().DrainAll();
 	OSDPORT_Destroy();
 	Webserver::server.stop();
 	Webserver::remove_token_file();

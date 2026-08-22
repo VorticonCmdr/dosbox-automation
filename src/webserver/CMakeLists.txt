@@ -5,6 +5,7 @@ target_sources(dosboxcommon PRIVATE
   control.cpp
   cpu.cpp
   debug.cpp
+  debug_events.cpp
   dos.cpp
   drive.cpp
   freeze.cpp

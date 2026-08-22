@@ -53,6 +53,7 @@ add_executable(dosbox_tests
     webserver_bridge_tests.cpp
     webserver_wait_tests.cpp
     webserver_capabilities_tests.cpp
+    webserver_debug_events_tests.cpp
     fnv_hash_tests.cpp
     multi_prefix_tests.cpp
 )

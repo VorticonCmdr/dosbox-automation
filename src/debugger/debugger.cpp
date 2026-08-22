@@ -6,11 +6,13 @@
 
 #if C_DEBUGGER
 
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <list>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -39,6 +41,7 @@
 #include "utils/checks.h"
 #include "utils/string_utils.h"
 #include "webserver/bridge.h"
+#include "webserver/debug_events.h"
 #include "webserver/wait.h"
 #include "webserver/webserver.h"
 
@@ -113,9 +116,15 @@ static Segment oldsegs[6] = {};
 static auto oldflags  = cpu_regs.flags;
 static auto oldcpucpl = cpu.cpl;
 
-DBGBlock dbg          = {};
-Bitu cycle_count      = 0;
-static bool debugging = false;
+DBGBlock dbg     = {};
+Bitu cycle_count = 0;
+
+// Atomic because DEBUG_IsDebugging() (via GET /api/v1/debug/wait) is now
+// read from a web thread, not just the emulation thread that writes it -
+// a plain bool would be an unsynchronized cross-thread read, the same
+// class of bug rendered_frame_count (sdl_gui.cpp) and active_core_kind
+// (cpu.cpp) already had to be fixed for.
+static std::atomic<bool> debugging{false};
 
 #define MAXCMDLEN 254
 struct SCodeViewData {
@@ -641,6 +650,82 @@ void CBreakpoint::ActivateBreakpointsExceptAt(PhysPt adr)
 	}
 }
 
+// A breakpoint's index is its position in DEBUG_ListBreakpoints() at the
+// moment this runs - not a stable identifier (see the caveat on
+// DebugBreakpointInfo::index in debugger.h; a real stable id is 2.4's
+// job). Snapshotting into a plain DebugBreakpointInfo here, rather than
+// keeping the CBreakpoint* around, matters because CheckBreakpoint's
+// once-only handling deletes the matched breakpoint before returning -
+// reading bp's fields after that would be a use-after-free.
+static DebugBreakpointInfo ToDebugBreakpointInfo(CBreakpoint* bp, uint16_t index)
+{
+	DebugBreakpointInfo info;
+	info.index  = index;
+	info.once   = bp->GetOnce();
+	info.active = bp->IsActive();
+	switch (bp->GetType()) {
+	case BKPNT_INTERRUPT:
+		info.type    = DebugBreakpointType::Interrupt;
+		info.int_num = bp->GetIntNr();
+		info.ah      = bp->GetValue();
+		info.al      = bp->GetOther();
+		break;
+	case BKPNT_MEMORY:
+	case BKPNT_MEMORY_READ:
+	case BKPNT_MEMORY_PROT:
+	case BKPNT_MEMORY_LINEAR:
+		info.type    = DebugBreakpointType::Memory;
+		info.segment = bp->GetSegment();
+		info.offset  = bp->GetOffset();
+		break;
+	case BKPNT_PHYSICAL:
+	default:
+		info.type    = DebugBreakpointType::Execute;
+		info.segment = bp->GetSegment();
+		info.offset  = bp->GetOffset();
+		break;
+	}
+	return info;
+}
+
+static Webserver::DebugStopBreakpoint ToDebugStopBreakpoint(const DebugBreakpointInfo& info)
+{
+	Webserver::DebugStopBreakpoint out;
+	switch (info.type) {
+	case DebugBreakpointType::Interrupt: out.type = "interrupt"; break;
+	case DebugBreakpointType::Memory: out.type = "memory"; break;
+	case DebugBreakpointType::Execute:
+	default: out.type = "execute"; break;
+	}
+	out.segment = info.segment;
+	out.offset  = info.offset;
+	out.int_num = info.int_num;
+	out.ah      = info.ah;
+	out.al      = info.al;
+	out.index   = info.index;
+	out.once    = info.once;
+	return out;
+}
+
+// Set by CheckBreakpoint/CheckIntBreakpoint's match sites (also reachable
+// from cpu.cpp's CPU_Interrupt case 0x03, a second, independent caller of
+// the same check). A plain file-static is safe here: every reader and
+// writer runs synchronously on the emulation thread.
+//
+// A match reaches this code from two structurally different places, and
+// only one of them means "a real, reportable breakpoint stop just
+// happened": the normal opcode-dispatch loop, where a match makes the
+// core return debugCallback, which the main loop (dosbox.cpp) routes
+// through DEBUG_EnableDebugger -> DEBUG_Enable - and DEBUG_Run's own
+// forced single-instruction execution (used by DEBUG_Resume and
+// DEBUG_SingleStep), where that same return value is simply discarded,
+// so a match there would never reach DEBUG_Enable at all. DEBUG_Resume
+// and DEBUG_SingleStep must each clear this themselves right after their
+// DEBUG_Run call for exactly that reason - left set, it would survive
+// undetected and get misattributed to a later, unrelated DEBUG_Enable
+// call (a manual pause reported as a breakpoint hit, with stale data).
+static std::optional<Webserver::DebugStopBreakpoint> pending_breakpoint_hit;
+
 // Checks if breakpoint is valid and should stop execution
 bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 {
@@ -650,12 +735,18 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 	}
 
 	// Search matching breakpoint
+	uint16_t idx = 0;
 	for (auto i = BPoints.begin(); i != BPoints.end(); ++i) {
 		auto bp = (*i);
 
 		if ((bp->GetType() == BKPNT_PHYSICAL) && bp->IsActive() &&
 		    (bp->GetLocation() == GetAddress(seg, off))) {
-			// Found
+			// Found - snapshot before any of the once-only handling
+			// below can delete bp.
+			if (WEBSERVER_IsEnabled()) {
+				pending_breakpoint_hit = ToDebugStopBreakpoint(
+				        ToDebugBreakpointInfo(bp, idx));
+			}
 			if (bp->GetOnce()) {
 				// delete it, if it should only be used once
 				BPoints.erase(i);
@@ -718,6 +809,10 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 					              bp->GetValue(),
 					              value);
 					bp->SetValue(value);
+					if (WEBSERVER_IsEnabled()) {
+						pending_breakpoint_hit = ToDebugStopBreakpoint(
+						        ToDebugBreakpointInfo(bp, idx));
+					}
 					return true;
 				}
 			} else if (bp->GetType() == BKPNT_MEMORY_READ) {
@@ -727,11 +822,16 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 					              bp->GetSegment(),
 					              bp->GetOffset());
 					bp->FlagMemoryAsUnread();
+					if (WEBSERVER_IsEnabled()) {
+						pending_breakpoint_hit = ToDebugStopBreakpoint(
+						        ToDebugBreakpointInfo(bp, idx));
+					}
 					return true;
 				}
 			}
 		}
 #endif
+		++idx;
 	}
 	return false;
 }
@@ -745,6 +845,7 @@ bool CBreakpoint::CheckIntBreakpoint([[maybe_unused]] PhysPt adr, uint8_t intNr,
 	}
 
 	// Search matching breakpoint
+	uint16_t idx = 0;
 	for (auto i = BPoints.begin(); i != BPoints.end(); ++i) {
 		auto bp = (*i);
 		if ((bp->GetType() == BKPNT_INTERRUPT) && bp->IsActive() &&
@@ -754,7 +855,12 @@ bool CBreakpoint::CheckIntBreakpoint([[maybe_unused]] PhysPt adr, uint8_t intNr,
 			    ((bp->GetOther() == BPINT_ALL) ||
 			     (bp->GetOther() == alValue))) {
 				// Ignore it once ?
-				// Found
+				// Found - snapshot before the once-only
+				// handling below can delete bp.
+				if (WEBSERVER_IsEnabled()) {
+					pending_breakpoint_hit = ToDebugStopBreakpoint(
+					        ToDebugBreakpointInfo(bp, idx));
+				}
 				if (bp->GetOnce()) {
 					// delete it, if it should only be used
 					// once
@@ -765,6 +871,7 @@ bool CBreakpoint::CheckIntBreakpoint([[maybe_unused]] PhysPt adr, uint8_t intNr,
 				return true;
 			}
 		}
+		++idx;
 	}
 	return false;
 }
@@ -2580,6 +2687,16 @@ bool DEBUG_Resume(void)
 	}
 	debugging = false;
 	DEBUG_Run(1, false);
+	// DEBUG_Run's forced instruction can itself match a breakpoint
+	// (CheckBreakpoint/CheckIntBreakpoint set pending_breakpoint_hit from
+	// inside the CPU core's own dispatch), but its return value - which
+	// is how a match would normally reach debugCallback -> DEBUG_Enable -
+	// is discarded here, exactly like the normal opcode-dispatch loop
+	// would consume it. Left alone, that leftover value would survive
+	// undetected until some later, unrelated DEBUG_Enable call (a manual
+	// pause) and get misreported as its reason. Discard it: this
+	// resume's own match, if any, isn't attributable to this call.
+	pending_breakpoint_hit = std::nullopt;
 	return true;
 }
 
@@ -2590,6 +2707,13 @@ bool DEBUG_SingleStep(void)
 	}
 	exitLoop = false;
 	DEBUG_Run(1, true);
+	// Same reasoning as DEBUG_Resume above: a match set during this
+	// call's own forced instruction is not this step's concern and must
+	// not survive to contaminate a later, unrelated stop.
+	pending_breakpoint_hit = std::nullopt;
+	if (WEBSERVER_IsEnabled()) {
+		Webserver::PublishDebugStop("step", debugging, std::nullopt);
+	}
 	return true;
 }
 
@@ -2626,33 +2750,7 @@ std::vector<DebugBreakpointInfo> DEBUG_ListBreakpoints(void)
 	std::vector<DebugBreakpointInfo> result;
 	uint16_t idx = 0;
 	for (auto& bp : BPoints) {
-		DebugBreakpointInfo info;
-		info.index  = idx++;
-		info.once   = bp->GetOnce();
-		info.active = bp->IsActive();
-		switch (bp->GetType()) {
-		case BKPNT_INTERRUPT:
-			info.type    = DebugBreakpointType::Interrupt;
-			info.int_num = bp->GetIntNr();
-			info.ah      = bp->GetValue();
-			info.al      = bp->GetOther();
-			break;
-		case BKPNT_MEMORY:
-		case BKPNT_MEMORY_READ:
-		case BKPNT_MEMORY_PROT:
-		case BKPNT_MEMORY_LINEAR:
-			info.type    = DebugBreakpointType::Memory;
-			info.segment = bp->GetSegment();
-			info.offset  = bp->GetOffset();
-			break;
-		case BKPNT_PHYSICAL:
-		default:
-			info.type    = DebugBreakpointType::Execute;
-			info.segment = bp->GetSegment();
-			info.offset  = bp->GetOffset();
-			break;
-		}
-		result.push_back(info);
+		result.push_back(ToDebugBreakpointInfo(bp, idx++));
 	}
 	return result;
 }
@@ -3029,6 +3127,26 @@ void DEBUG_Enable(bool pressed)
 	DOSBOX_SetLoop(&DEBUG_Loop);
 
 	KEYBOARD_ClrBuffer();
+
+	// This is the single choke point every path into "debugging" runs
+	// through: a manual pause (the webserver's DebugPauseCommand or the
+	// Pause hotkey via MAPPER_AddHandler) and a breakpoint hit reached
+	// through the normal opcode-dispatch loop (the CPU core's
+	// debugCallback -> DEBUG_EnableDebugger -> here) both end up calling
+	// DEBUG_Enable. pending_breakpoint_hit, set moments earlier by
+	// CheckBreakpoint/CheckIntBreakpoint's match sites, tells the two
+	// apart. It's safe to read here specifically because DEBUG_Resume and
+	// DEBUG_SingleStep clear it themselves right after their own
+	// DEBUG_Run call (see the comment on its declaration) - without that,
+	// a match from one of those paths would still be sitting here
+	// unconsumed and get misattributed to this, unrelated, pause.
+	if (WEBSERVER_IsEnabled()) {
+		Webserver::PublishDebugStop(pending_breakpoint_hit ? "breakpoint"
+		                                                   : "paused",
+		                            debugging,
+		                            pending_breakpoint_hit);
+		pending_breakpoint_hit = std::nullopt;
+	}
 }
 
 void DEBUG_DrawScreen(void)
