@@ -27,6 +27,14 @@ constexpr size_t MaxMemoryTransferBytes = 128 * 1024 * 1024; // 128 MiB
 // SearchMemoryCommand::Post's [start, end) span bound.
 constexpr uint32_t MaxSearchSpanBytes = 16 * 1024 * 1024; // 16 MiB
 
+// SearchMemoryCommand::Post's 'limit' bound and default. A width=1 scan
+// for a common byte over the full span can match millions of times;
+// without a cap the response is megabytes of transcript from one call.
+// 'total' (the real match count) is still reported uncapped, so a
+// caller can tell a capped result from a complete one.
+constexpr uint32_t DefaultSearchLimit = 256;
+constexpr uint32_t MaxSearchLimit     = 4096;
+
 class ReadMemoryCommand : public Command {
 public:
 	ReadMemoryCommand(const Segment base, const uint32_t offset, const uint32_t len)
@@ -80,14 +88,25 @@ private:
 };
 
 // Scan a byte buffer for little-endian matches of `value` at `width`
-// (1, 2, or 4). Returns the offsets where a match starts.
-std::vector<uint32_t> ScanBufferForValue(const std::vector<uint8_t>& buf,
-                                         uint32_t value, int width);
+// (1, 2, or 4). Returns the offsets where a match starts, capped at
+// `limit` entries; when `total_out` is non-null, it receives the true
+// number of matches found (which may exceed `limit`/the returned
+// vector's size). Defaults keep every pre-existing call site (and its
+// exact return-value assertions) unchanged: unlimited, no total.
+std::vector<uint32_t> ScanBufferForValue(
+        const std::vector<uint8_t>& buf, uint32_t value, int width,
+        size_t limit      = std::numeric_limits<size_t>::max(),
+        size_t* total_out = nullptr);
 
 class SearchMemoryCommand : public Command {
 public:
-	SearchMemoryCommand(uint32_t start, uint32_t end, uint32_t value, int width)
-	        : start(start), end(end), value(value), width(width)
+	SearchMemoryCommand(uint32_t start, uint32_t end, uint32_t value,
+	                    int width, uint32_t limit)
+	        : start(start),
+	          end(end),
+	          value(value),
+	          width(width),
+	          limit(limit)
 	{}
 
 	void Execute() override;
@@ -98,13 +117,22 @@ public:
 		return matches;
 	}
 
+	// The true number of matches in [start, end), even when it exceeds
+	// Matches().size() because `limit` capped what was returned.
+	uint64_t Total() const
+	{
+		return total;
+	}
+
 private:
 	uint32_t start = 0;
 	uint32_t end   = 0;
 	uint32_t value = 0;
 	int width      = 1;
+	uint32_t limit = DefaultSearchLimit;
 
 	std::vector<uint32_t> matches = {};
+	uint64_t total                = 0;
 };
 
 } // namespace Webserver

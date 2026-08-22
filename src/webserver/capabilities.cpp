@@ -111,6 +111,8 @@ json BuildCapabilitiesBlock()
 	json memory_limits;
 	memory_limits["max_transfer_bytes"]    = MaxMemoryTransferBytes;
 	memory_limits["max_search_span_bytes"] = MaxSearchSpanBytes;
+	memory_limits["default_search_limit"]  = DefaultSearchLimit;
+	memory_limits["max_search_limit"]      = MaxSearchLimit;
 	memory_limits["max_dos_allocations"]   = AllocationRegistry::MaxEntries;
 
 	json input_limits;

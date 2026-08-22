@@ -60,4 +60,41 @@ TEST(MemSearch, EmptyBufferReturnsEmpty)
 	EXPECT_TRUE(hits.empty());
 }
 
+TEST(MemSearch, LimitCapsReturnedMatchesButNotTotal)
+{
+	std::vector<uint8_t> buf = {0x63, 0x63, 0x63, 0x63, 0x63};
+	size_t total             = 0;
+	auto hits                = ScanBufferForValue(buf, 0x63, 1, 2, &total);
+	EXPECT_EQ(hits, (std::vector<uint32_t>{0, 1}));
+	EXPECT_EQ(total, 5u);
+}
+
+TEST(MemSearch, LimitAtOrAboveMatchCountReturnsEverythingUntruncated)
+{
+	std::vector<uint8_t> buf = {0x63, 0x00, 0x63};
+	size_t total             = 0;
+	auto hits = ScanBufferForValue(buf, 0x63, 1, 100, &total);
+	EXPECT_EQ(hits, (std::vector<uint32_t>{0, 2}));
+	EXPECT_EQ(total, 2u);
+}
+
+TEST(MemSearch, ZeroLimitReturnsNoMatchesButStillCountsTotal)
+{
+	std::vector<uint8_t> buf = {0x63, 0x63};
+	size_t total             = 0;
+	auto hits                = ScanBufferForValue(buf, 0x63, 1, 0, &total);
+	EXPECT_TRUE(hits.empty());
+	EXPECT_EQ(total, 2u);
+}
+
+TEST(MemSearch, DefaultArgumentsMatchPreExistingUnlimitedBehavior)
+{
+	// The exact pre-existing call shape every call site above already
+	// uses - confirms the new limit/total_out parameters are additive,
+	// not a behavior change for an unlimited caller.
+	std::vector<uint8_t> buf = {0x63, 0x63, 0x63};
+	auto hits                = ScanBufferForValue(buf, 0x63, 1);
+	EXPECT_EQ(hits, (std::vector<uint32_t>{0, 1, 2}));
+}
+
 } // namespace

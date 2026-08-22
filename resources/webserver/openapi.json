@@ -1576,7 +1576,7 @@
         ],
         "summary": "Scan memory for a value",
         "operationId": "searchMemory",
-        "description": "Scans a memory range for all occurrences of a value. The width selects byte (1), word (2), or dword (4) matching. Maximum scan span is 16 MB.",
+        "description": "Scans a memory range for all occurrences of a value. The width selects byte (1), word (2), or dword (4) matching. Maximum scan span is 16 MB. 'matches' is capped at 'limit' (default 256, max 4096); 'total' reports the real match count even when it exceeds that, and 'truncated' says whether it did.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1606,7 +1606,15 @@
                       "items": {
                         "type": "integer"
                       },
-                      "description": "Physical addresses where the value was found."
+                      "description": "Physical addresses where the value was found, up to 'limit' entries."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "description": "The real number of matches, which can exceed matches.length."
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "True when total exceeds matches.length."
                     }
                   }
                 },
@@ -1614,7 +1622,9 @@
                   "matches": [
                     65536,
                     131072
-                  ]
+                  ],
+                  "total": 2,
+                  "truncated": false
                 }
               }
             }
@@ -2451,6 +2461,11 @@
           "end": {
             "type": "integer",
             "description": "Physical end address (exclusive). Max span 16 MB."
+          },
+          "limit": {
+            "type": "integer",
+            "default": 256,
+            "description": "Max matches to return, 1-4096. The full match count is still reported in 'total' even when it exceeds this."
           }
         }
       },

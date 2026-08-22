@@ -280,23 +280,30 @@ void WriteMemoryCommand::Put(const httplib::Request& req, httplib::Response& res
 // --- Memory value scan ---
 
 std::vector<uint32_t> ScanBufferForValue(const std::vector<uint8_t>& buf,
-                                         const uint32_t value, const int width)
+                                         const uint32_t value, const int width,
+                                         const size_t limit, size_t* total_out)
 {
 	if (width != 1 && width != 2 && width != 4) {
 		throw std::invalid_argument("width must be 1, 2, or 4");
 	}
 	std::vector<uint32_t> hits;
-	if (buf.size() < static_cast<size_t>(width)) {
-		return hits;
+	size_t total = 0;
+	if (buf.size() >= static_cast<size_t>(width)) {
+		for (uint32_t i = 0; i + width <= buf.size(); ++i) {
+			uint32_t v = 0;
+			for (int b = 0; b < width; ++b) {
+				v |= static_cast<uint32_t>(buf[i + b]) << (8 * b);
+			}
+			if (v == value) {
+				++total;
+				if (hits.size() < limit) {
+					hits.push_back(i);
+				}
+			}
+		}
 	}
-	for (uint32_t i = 0; i + width <= buf.size(); ++i) {
-		uint32_t v = 0;
-		for (int b = 0; b < width; ++b) {
-			v |= static_cast<uint32_t>(buf[i + b]) << (8 * b);
-		}
-		if (v == value) {
-			hits.push_back(i);
-		}
+	if (total_out) {
+		*total_out = total;
 	}
 	return hits;
 }
@@ -312,7 +319,11 @@ void SearchMemoryCommand::Execute()
 	const auto len = end - start;
 	std::vector<uint8_t> buf(len);
 	MEM_BlockRead(start, buf.data(), len);
-	matches = ScanBufferForValue(buf, value, width);
+
+	size_t total_count = 0;
+	matches = ScanBufferForValue(buf, value, width, limit, &total_count);
+	total   = total_count;
+
 	for (auto& m : matches) {
 		m += start;
 	}
@@ -326,6 +337,7 @@ void SearchMemoryCommand::Post(const Request& req, Response& res)
 	const int width      = j.value("width", 1);
 	const uint32_t start = j.at("start").get<uint32_t>();
 	const uint32_t end   = j.at("end").get<uint32_t>();
+	const uint32_t limit = j.value("limit", DefaultSearchLimit);
 
 	if (width != 1 && width != 2 && width != 4) {
 		throw std::invalid_argument("width must be 1, 2, or 4");
@@ -337,14 +349,21 @@ void SearchMemoryCommand::Post(const Request& req, Response& res)
 		                            " bytes");
 	}
 
-	SearchMemoryCommand cmd(start, end, value, width);
+	if (limit < 1 || limit > MaxSearchLimit) {
+		throw std::invalid_argument("limit must be 1.." +
+		                            std::to_string(MaxSearchLimit));
+	}
+
+	SearchMemoryCommand cmd(start, end, value, width, limit);
 	cmd.WaitForCompletion(2000);
 	if (!cmd.error.empty()) {
 		throw std::out_of_range(cmd.error);
 	}
 
 	json result;
-	result["matches"] = cmd.Matches();
+	result["matches"]   = cmd.Matches();
+	result["total"]     = cmd.Total();
+	result["truncated"] = cmd.Total() > cmd.Matches().size();
 	send_json(res, result);
 }
 
