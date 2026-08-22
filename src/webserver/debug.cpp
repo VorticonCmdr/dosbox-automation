@@ -15,6 +15,8 @@
 #include "base64/base64.h"
 #include "json/json.h"
 
+#include <limits>
+
 using json = nlohmann::json;
 using httplib::Request, httplib::Response;
 
@@ -45,6 +47,7 @@ json DebugStopToJson(const DebugStopInfo& stop)
 		bp["int"]       = stop.breakpoint->int_num;
 		bp["ah"]        = stop.breakpoint->ah;
 		bp["al"]        = stop.breakpoint->al;
+		bp["id"]        = stop.breakpoint->id;
 		bp["index"]     = stop.breakpoint->index;
 		bp["once"]      = stop.breakpoint->once;
 		j["breakpoint"] = bp;
@@ -57,6 +60,7 @@ json DebugStopToJson(const DebugStopInfo& stop)
 json BreakpointToJson(const DebugBreakpointInfo& bp)
 {
 	json j;
+	j["id"]     = bp.id;
 	j["index"]  = bp.index;
 	j["once"]   = bp.once;
 	j["active"] = bp.active;
@@ -82,12 +86,30 @@ json BreakpointToJson(const DebugBreakpointInfo& bp)
 	return j;
 }
 
+// nlohmann only tags a parsed number as the unsigned representation when
+// the JSON text had no leading '-'; a value built from a C++ integer
+// literal (as in tests, and some client serialization paths) is always
+// the signed representation regardless of value - is_number_integer()
+// covers both, so validate the value itself rather than which
+// representation happens to be present (see wait.cpp's own
+// RequireNonNegative for the same fix, same reasoning). It also rejects
+// non-integral numbers outright: get<int64_t>() on a float silently
+// truncates (2.9 -> 2) rather than throwing, which we don't want for
+// values that end up as breakpoint addresses or step counts.
+int64_t RequireInt(const json& j, const char* key)
+{
+	if (!j.contains(key) || !j[key].is_number_integer()) {
+		throw std::invalid_argument(std::string(key) + " must be an integer");
+	}
+	return j[key].get<int64_t>();
+}
+
 uint16_t ByteOrWildcard(const json& j, const char* key)
 {
 	if (!j.contains(key)) {
 		return DEBUG_BPINT_ANY;
 	}
-	const int v = j.at(key).get<int>();
+	const int64_t v = RequireInt(j, key);
 	if (v < 0 || v > 0xFF) {
 		throw std::invalid_argument(std::string(key) + " must be 0x00..0xFF");
 	}
@@ -96,12 +118,31 @@ uint16_t ByteOrWildcard(const json& j, const char* key)
 
 uint16_t RequireU16(const json& j, const char* key)
 {
-	const int v = j.at(key).get<int>();
+	const int64_t v = RequireInt(j, key);
 	if (v < 0 || v > 0xFFFF) {
 		throw std::invalid_argument(std::string(key) +
 		                            " must be 0x0000..0xFFFF");
 	}
 	return static_cast<uint16_t>(v);
+}
+
+uint32_t RequireU32(const json& j, const char* key)
+{
+	const int64_t v = RequireInt(j, key);
+	if (v < 0 || v > std::numeric_limits<uint32_t>::max()) {
+		throw std::invalid_argument(std::string(key) +
+		                            " must be 0x00000000..0xFFFFFFFF");
+	}
+	return static_cast<uint32_t>(v);
+}
+
+uint64_t RequireU64(const json& j, const char* key)
+{
+	const int64_t raw = RequireInt(j, key);
+	if (raw < 0) {
+		throw std::invalid_argument(std::string(key) + " must not be negative");
+	}
+	return static_cast<uint64_t>(raw);
 }
 
 } // namespace
@@ -178,20 +219,81 @@ void DebugContinueCommand::Post(const Request&, Response& res)
 
 void DebugStepCommand::Execute()
 {
-	stepped   = DEBUG_SingleStep();
+	stepped   = DEBUG_SingleStep(count);
 	debugging = DEBUG_IsDebugging();
 	stop      = DebugEvents::Instance().Current();
 }
 
-void DebugStepCommand::Post(const Request&, Response& res)
+void DebugStepCommand::Post(const Request& req, Response& res)
 {
-	DebugStepCommand cmd;
-	cmd.WaitForCompletion();
+	int32_t count = 1;
+	if (!req.body.empty()) {
+		auto j = json::parse(req.body);
+		if (j.contains("count")) {
+			const int64_t v = RequireInt(j, "count");
+			if (v < 1 || v > DEBUG_MaxStepCount) {
+				throw std::invalid_argument(
+				        "count must be 1.." +
+				        std::to_string(DEBUG_MaxStepCount));
+			}
+			count = static_cast<int32_t>(v);
+		}
+	}
+
+	DebugStepCommand cmd(count);
+	// A single step uses the Bridge's own default; a multi-instruction
+	// burst gets the same raised deadline SearchMemoryCommand uses for
+	// its own bounded worst case (memory.cpp) - count is capped at
+	// DEBUG_MaxStepCount precisely so this stays a bounded wait, not an
+	// open-ended one, while the Bridge mutex is held for the whole call.
+	if (count > 1) {
+		cmd.WaitForCompletion(2000);
+	} else {
+		cmd.WaitForCompletion();
+	}
 
 	json j;
 	j["status"]    = cmd.stepped ? "ok" : "not_paused";
 	j["debugging"] = cmd.debugging;
 	j["stop"]      = DebugStopToJson(cmd.stop);
+	send_json(res, j);
+}
+
+void DebugStepOverCommand::Execute()
+{
+	resumed_from_stop_id = DebugEvents::Instance().Current().stop_id;
+	stepped_over         = DEBUG_StepOver();
+	if (!stepped_over) {
+		// Not a call/int/loop/rep at the current instruction (or not
+		// paused at all) - fall back to a plain step, matching the F10
+		// key handler's own fallthrough to F11.
+		stepped = DEBUG_SingleStep();
+	}
+	debugging = DEBUG_IsDebugging();
+	stop      = DebugEvents::Instance().Current();
+}
+
+void DebugStepOverCommand::Post(const Request&, Response& res)
+{
+	DebugStepOverCommand cmd;
+	cmd.WaitForCompletion();
+
+	json j;
+	j["status"] = (cmd.stepped_over || cmd.stepped) ? "ok" : "not_paused";
+	j["stepped_over"]         = cmd.stepped_over;
+	j["debugging"]            = cmd.debugging;
+	j["resumed_from_stop_id"] = cmd.resumed_from_stop_id;
+	// Only include stop when something was actually published during
+	// this call - the stepped fallback always publishes one, and the
+	// plant-and-resume path usually doesn't (the real stop happens later,
+	// poll debug/wait with resumed_from_stop_id), except in the rare case
+	// where the forced instruction itself hit a different already-armed
+	// breakpoint synchronously. Without this check, the field would
+	// otherwise silently carry a stale, unrelated prior stop on the
+	// common plant-and-resume path.
+	if (cmd.stop.stop_id != cmd.resumed_from_stop_id) {
+		j["stop"] = DebugStopToJson(cmd.stop);
+	}
 	send_json(res, j);
 }
 
@@ -229,17 +331,38 @@ void DebugWaitHandlers::Get(const Request& req, Response& res)
 	send_json(res, j);
 }
 
+void DebugRunToCommand::Execute()
+{
+	resumed_from_stop_id = DebugEvents::Instance().Current().stop_id;
+	started              = DEBUG_RunToAddress(segment, offset);
+}
+
+void DebugRunToCommand::Post(const Request& req, Response& res)
+{
+	auto j                     = json::parse(req.body);
+	const uint16_t req_segment = RequireU16(j, "segment");
+	const uint32_t req_offset  = RequireU32(j, "offset");
+
+	DebugRunToCommand cmd(req_segment, req_offset);
+	cmd.WaitForCompletion();
+
+	json j2;
+	j2["status"]               = cmd.started ? "ok" : "not_paused";
+	j2["resumed_from_stop_id"] = cmd.resumed_from_stop_id;
+	send_json(res, j2);
+}
+
 void DebugAddBreakpointCommand::Execute()
 {
 	switch (type) {
 	case DebugBreakpointType::Execute:
-		DEBUG_AddExecuteBreakpoint(segment, offset);
+		DEBUG_AddExecuteBreakpoint(segment, offset, once);
 		break;
 	case DebugBreakpointType::Interrupt:
-		DEBUG_AddIntBreakpoint(int_num, ah, al);
+		DEBUG_AddIntBreakpoint(int_num, ah, al, once);
 		break;
 	case DebugBreakpointType::Memory:
-		DEBUG_AddMemBreakpoint(segment, offset);
+		DEBUG_AddMemBreakpoint(segment, offset, once);
 		break;
 	}
 
@@ -264,14 +387,15 @@ void DebugAddBreakpointCommand::Post(const Request& req, Response& res)
 	uint8_t int_num  = 0;
 	uint16_t ah      = 0;
 	uint16_t al      = 0;
+	const bool once          = j.value("once", false);
 
 	if (type_str == "execute") {
 		type    = DebugBreakpointType::Execute;
 		segment = RequireU16(j, "segment");
-		offset  = j.at("offset").get<uint32_t>();
+		offset  = RequireU32(j, "offset");
 	} else if (type_str == "interrupt") {
 		type = DebugBreakpointType::Interrupt;
-		const int intNr = j.at("int").get<int>();
+		const int64_t intNr = RequireInt(j, "int");
 		if (intNr < 0 || intNr > 0xFF) {
 			throw std::invalid_argument("int must be 0x00..0xFF");
 		}
@@ -281,13 +405,13 @@ void DebugAddBreakpointCommand::Post(const Request& req, Response& res)
 	} else if (type_str == "memory") {
 		type    = DebugBreakpointType::Memory;
 		segment = RequireU16(j, "segment");
-		offset  = j.at("offset").get<uint32_t>();
+		offset  = RequireU32(j, "offset");
 	} else {
 		throw std::invalid_argument(
 		        "type must be one of: execute, interrupt, memory");
 	}
 
-	DebugAddBreakpointCommand cmd(type, segment, offset, int_num, ah, al);
+	DebugAddBreakpointCommand cmd(type, segment, offset, int_num, ah, al, once);
 	cmd.WaitForCompletion();
 
 	json j2 = BreakpointToJson(cmd.result);
@@ -318,18 +442,22 @@ void DebugListBreakpointsCommand::Get(const Request&, Response& res)
 
 void DebugDeleteBreakpointCommand::Execute()
 {
-	if (delete_all) {
+	switch (by) {
+	case By::All:
 		DEBUG_DeleteAllBreakpoints();
 		deleted = true;
-	} else {
-		deleted = DEBUG_DeleteBreakpointByIndex(index);
+		break;
+	case By::Index:
+		deleted = DEBUG_DeleteBreakpointByIndex(static_cast<uint16_t>(value));
+		break;
+	case By::Id: deleted = DEBUG_DeleteBreakpointById(value); break;
 	}
 }
 
 void DebugDeleteBreakpointCommand::Delete(const Request& req, Response& res)
 {
 	if (req.body.empty()) {
-		DebugDeleteBreakpointCommand cmd(true, 0);
+		DebugDeleteBreakpointCommand cmd(By::All, 0);
 		cmd.WaitForCompletion();
 
 		json result;
@@ -339,22 +467,35 @@ void DebugDeleteBreakpointCommand::Delete(const Request& req, Response& res)
 	}
 
 	auto j = json::parse(req.body);
-	const uint16_t index = RequireU16(j, "index");
+	const bool has_id    = j.contains("id");
+	const bool has_index = j.contains("index");
+	if (has_id && has_index) {
+		throw std::invalid_argument("specify only one of 'id' or 'index'");
+	}
+	if (!has_id && !has_index) {
+		throw std::invalid_argument(
+		        "body must contain 'id' or 'index', or be empty to delete all");
+	}
 
-	DebugDeleteBreakpointCommand cmd(false, index);
+	const By by = has_id ? By::Id : By::Index;
+	const uint64_t value = has_id ? RequireU64(j, "id") : RequireU16(j, "index");
+
+	DebugDeleteBreakpointCommand cmd(by, value);
 	cmd.WaitForCompletion();
 
 	if (!cmd.deleted) {
 		res.status = httplib::StatusCode::NotFound_404;
 		json err;
-		err["error"] = "No breakpoint at index " + std::to_string(index);
+		err["error"] = "No breakpoint at " +
+		               std::string(has_id ? "id " : "index ") +
+		               std::to_string(value);
 		send_json(res, err);
 		return;
 	}
 
 	json result;
-	result["status"] = "removed";
-	result["index"]  = index;
+	result["status"]                = "removed";
+	result[has_id ? "id" : "index"] = value;
 	send_json(res, result);
 }
 
@@ -395,9 +536,21 @@ void DebugStepCommand::Post(const Request&, Response& res)
 	NotBuilt("debug_step", res);
 }
 
+void DebugStepOverCommand::Execute() {}
+void DebugStepOverCommand::Post(const Request&, Response& res)
+{
+	NotBuilt("debug_step_over", res);
+}
+
 void DebugWaitHandlers::Get(const Request&, Response& res)
 {
 	NotBuilt("debug_wait", res);
+}
+
+void DebugRunToCommand::Execute() {}
+void DebugRunToCommand::Post(const Request&, Response& res)
+{
+	NotBuilt("debug_run_to", res);
 }
 
 void DebugAddBreakpointCommand::Execute() {}

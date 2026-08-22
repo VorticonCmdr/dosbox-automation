@@ -27,9 +27,11 @@ struct DebugStopBreakpoint {
 	uint8_t int_num   = 0;
 	uint16_t ah       = 0;
 	uint16_t al       = 0;
+	// Stable identifier (2.4): assigned once at construction, never
+	// reused or renumbered. Prefer this over index.
+	uint64_t id = 0;
 	// The breakpoint's position in DEBUG_ListBreakpoints() at the moment
-	// it fired - not a stable identifier (see debugger.h's own caveat on
-	// DebugBreakpointInfo::index; a real stable id is 2.4's job).
+	// it fired - shifts whenever a breakpoint is added or removed.
 	uint16_t index = 0;
 	bool once      = false;
 };

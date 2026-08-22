@@ -364,6 +364,12 @@ enum EBreakpoint {
 
 #define BPINT_ALL 0x100
 
+// Assigns each CBreakpoint's stable id. No mutex needed: every
+// CBreakpoint construction happens inside a Command::Execute() or the
+// interactive debugger's own key handlers, both already serialized on
+// the emulation thread.
+static uint64_t next_breakpoint_id = 0;
+
 class CBreakpoint {
 public:
 	CBreakpoint(void);
@@ -440,6 +446,10 @@ public:
 	{
 		return alValue;
 	}
+	uint64_t GetId() const noexcept
+	{
+		return id;
+	}
 #if C_HEAVY_DEBUGGER
 	void FlagMemoryAsRead()
 	{
@@ -461,7 +471,8 @@ public:
 	static CBreakpoint* AddBreakpoint(uint16_t seg, uint32_t off, bool once);
 	static CBreakpoint* AddIntBreakpoint(uint8_t intNum, uint16_t ah,
 	                                     uint16_t al, bool once);
-	static CBreakpoint* AddMemBreakpoint(uint16_t seg, uint32_t off);
+	static CBreakpoint* AddMemBreakpoint(uint16_t seg, uint32_t off,
+	                                     bool once = false);
 	static void DeactivateBreakpoints();
 	static void ActivateBreakpoints();
 	static void ActivateBreakpointsExceptAt(PhysPt adr);
@@ -474,6 +485,7 @@ public:
 	static bool IsBreakpoint(uint16_t seg, uint32_t off);
 	static bool DeleteBreakpoint(uint16_t seg, uint32_t off);
 	static bool DeleteByIndex(uint16_t index);
+	static bool DeleteById(uint64_t id);
 	static void DeleteAll(void);
 	static void ShowList(void);
 
@@ -491,6 +503,10 @@ private:
 	// Shared
 	bool active = 0;
 	bool once   = 0;
+	// Monotonic, assigned once at construction (see next_breakpoint_id) -
+	// unlike list position (DEBUG_ListBreakpoints' index), this never
+	// changes as other breakpoints are added or removed.
+	uint64_t id = 0;
 #if C_HEAVY_DEBUGGER
 	bool memory_was_read = false;
 
@@ -508,7 +524,8 @@ CBreakpoint::CBreakpoint(void)
           ahValue(0),
           alValue(0),
           active(false),
-          once(false)
+          once(false),
+          id(++next_breakpoint_id)
 {}
 
 void CBreakpoint::Activate(bool _active)
@@ -610,11 +627,11 @@ CBreakpoint* CBreakpoint::AddIntBreakpoint(uint8_t intNum, uint16_t ah,
 	return bp;
 }
 
-CBreakpoint* CBreakpoint::AddMemBreakpoint(uint16_t seg, uint32_t off)
+CBreakpoint* CBreakpoint::AddMemBreakpoint(uint16_t seg, uint32_t off, bool once)
 {
 	auto bp = new CBreakpoint();
 	bp->SetAddress(seg, off);
-	bp->SetOnce(false);
+	bp->SetOnce(once);
 	bp->SetType(BKPNT_MEMORY);
 	BPoints.push_front(bp);
 	return bp;
@@ -660,6 +677,7 @@ void CBreakpoint::ActivateBreakpointsExceptAt(PhysPt adr)
 static DebugBreakpointInfo ToDebugBreakpointInfo(CBreakpoint* bp, uint16_t index)
 {
 	DebugBreakpointInfo info;
+	info.id     = bp->GetId();
 	info.index  = index;
 	info.once   = bp->GetOnce();
 	info.active = bp->IsActive();
@@ -702,6 +720,7 @@ static Webserver::DebugStopBreakpoint ToDebugStopBreakpoint(const DebugBreakpoin
 	out.int_num = info.int_num;
 	out.ah      = info.ah;
 	out.al      = info.al;
+	out.id      = info.id;
 	out.index   = info.index;
 	out.once    = info.once;
 	return out;
@@ -900,6 +919,20 @@ bool CBreakpoint::DeleteByIndex(uint16_t index)
 	bp->Activate(false);
 	delete bp;
 	return true;
+}
+
+bool CBreakpoint::DeleteById(uint64_t id)
+{
+	for (auto it = BPoints.begin(); it != BPoints.end(); ++it) {
+		if ((*it)->GetId() == id) {
+			auto bp = *it;
+			BPoints.erase(it);
+			bp->Activate(false);
+			delete bp;
+			return true;
+		}
+	}
+	return false;
 }
 
 CBreakpoint* CBreakpoint::FindPhysBreakpoint(uint16_t seg, uint32_t off, bool once)
@@ -2680,15 +2713,16 @@ int32_t DEBUG_Run(int32_t amount, bool quickexit)
 // opcode-dispatch loop (dosbox.cpp's normal_loop) and the interactive
 // debugger's own F5/F10/F11 handler (DEBUG_CheckKeys below) both route it
 // through Callback_Handlers, since that's how a breakpoint match reaches
-// debugCallback -> DEBUG_EnableDebugger -> DEBUG_Enable. DEBUG_Resume
-// forces exactly one instruction via DEBUG_Run(1, false); without this
-// dispatch, a match on an already-armed breakpoint during that one
-// instruction would be silently dropped entirely - not just misattributed,
-// but never reported at all, leaving the emulator to run straight past a
-// stop it should have made while the caller is told the call succeeded.
-// This is reachable, not theoretical: a manual pause (DebugPauseCommand's
-// DEBUG_Enable) never deactivates breakpoints the way a real hit does, so
-// one armed by an earlier continue stays armed across it.
+// debugCallback -> DEBUG_EnableDebugger -> DEBUG_Enable. DEBUG_Resume,
+// DEBUG_StepOver and DEBUG_RunToAddress each force exactly one
+// instruction via DEBUG_Run(1, false); without this dispatch, a match on
+// an already-armed breakpoint during that one instruction would be
+// silently dropped entirely - not just misattributed, but never reported
+// at all, leaving the emulator to run straight past a stop it should
+// have made while the caller is told the call succeeded. This is
+// reachable, not theoretical: a manual pause (DebugPauseCommand's
+// DEBUG_Enable) never deactivates breakpoints the way a real hit does,
+// so one armed by an earlier continue stays armed across it.
 static void DispatchDebugRunCallback(const int32_t ret)
 {
 	if (ret > 0 && ret < CB_MAX) {
@@ -2717,16 +2751,20 @@ bool DEBUG_Resume(void)
 	return true;
 }
 
-bool DEBUG_SingleStep(void)
+bool DEBUG_SingleStep(int32_t count)
 {
 	if (!debugging) {
 		return false;
 	}
 	exitLoop = false;
-	DEBUG_Run(1, true);
+	DEBUG_Run(count, true);
 	// Same reasoning as DEBUG_Resume above: a match set during this
-	// call's own forced instruction is not this step's concern and must
-	// not survive to contaminate a later, unrelated stop.
+	// call's own forced instruction(s) is not this step's concern and
+	// must not survive to contaminate a later, unrelated stop. This
+	// applies just as much to count > 1: an already-armed breakpoint
+	// hit mid-burst still stops the CPU core's own dispatch loop early
+	// (see DEBUG_MaxStepCount's doc comment), but that match, like a
+	// single step's, was never routed through debugCallback either.
 	pending_breakpoint_hit = std::nullopt;
 	if (WEBSERVER_IsEnabled()) {
 		Webserver::PublishDebugStop("step", debugging, std::nullopt);
@@ -2734,27 +2772,69 @@ bool DEBUG_SingleStep(void)
 	return true;
 }
 
+// See DEBUG_StepOver's declaration (debugger.h) for the caller-facing
+// contract. Mirrors the F10 key handler (DEBUG_CheckKeys below) exactly:
+// StepOver() plants the one-shot breakpoint and sets debugging=false,
+// then DEBUG_Run(1, false) both runs the call/int/loop/rep itself and
+// (via its quickexit=false branch) arms that breakpoint and leaves debug
+// mode - execution then continues in the background until the planted
+// breakpoint is hit, at which point the normal debugCallback ->
+// DEBUG_Enable chain reports it, same as any other breakpoint stop.
+bool DEBUG_StepOver()
+{
+	if (!debugging) {
+		return false;
+	}
+	if (!StepOver()) {
+		return false;
+	}
+	DispatchDebugRunCallback(DEBUG_Run(1, false));
+	pending_breakpoint_hit = std::nullopt;
+	return true;
+}
+
+bool DEBUG_RunToAddress(const uint16_t seg, const uint32_t off)
+{
+	if (!debugging) {
+		return false;
+	}
+	// Don't add a temporary breakpoint if there's already one here -
+	// same dedup StepOver() does for its own planted breakpoint.
+	if (!CBreakpoint::FindPhysBreakpoint(seg, off, true)) {
+		CBreakpoint::AddBreakpoint(seg, off, true);
+	}
+	debugging = false;
+	DispatchDebugRunCallback(DEBUG_Run(1, false));
+	pending_breakpoint_hit = std::nullopt;
+	return true;
+}
+
 // Breakpoints added here aren't armed immediately (matching the BP/BPINT
 // interactive commands): CBreakpoint::ActivateBreakpoints() only runs when
 // execution is resumed via DEBUG_Run(), i.e. on the next DEBUG_Resume().
-void DEBUG_AddExecuteBreakpoint(uint16_t seg, uint32_t off)
+void DEBUG_AddExecuteBreakpoint(uint16_t seg, uint32_t off, bool once)
 {
-	CBreakpoint::AddBreakpoint(seg, off, false);
+	CBreakpoint::AddBreakpoint(seg, off, once);
 }
 
-void DEBUG_AddIntBreakpoint(uint8_t int_num, uint16_t ah, uint16_t al)
+void DEBUG_AddIntBreakpoint(uint8_t int_num, uint16_t ah, uint16_t al, bool once)
 {
-	CBreakpoint::AddIntBreakpoint(int_num, ah, al, false);
+	CBreakpoint::AddIntBreakpoint(int_num, ah, al, once);
 }
 
-void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off)
+void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off, bool once)
 {
-	CBreakpoint::AddMemBreakpoint(seg, off);
+	CBreakpoint::AddMemBreakpoint(seg, off, once);
 }
 
 bool DEBUG_DeleteBreakpointByIndex(uint16_t index)
 {
 	return CBreakpoint::DeleteByIndex(index);
+}
+
+bool DEBUG_DeleteBreakpointById(uint64_t id)
+{
+	return CBreakpoint::DeleteById(id);
 }
 
 void DEBUG_DeleteAllBreakpoints(void)

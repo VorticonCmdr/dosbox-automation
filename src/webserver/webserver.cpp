@@ -206,6 +206,8 @@ static void setup_api_handlers()
 	server.Post("/api/v1/debug/pause", DebugPauseCommand::Post);
 	server.Post("/api/v1/debug/continue", DebugContinueCommand::Post);
 	server.Post("/api/v1/debug/step", DebugStepCommand::Post);
+	server.Post("/api/v1/debug/step_over", DebugStepOverCommand::Post);
+	server.Post("/api/v1/debug/run_to", DebugRunToCommand::Post);
 	server.Get("/api/v1/debug/wait", DebugWaitHandlers::Get);
 
 	server.Get("/api/v1/debug/breakpoints", DebugListBreakpointsCommand::Get);

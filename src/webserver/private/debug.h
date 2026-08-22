@@ -54,12 +54,39 @@ public:
 
 class DebugStepCommand : public Command {
 public:
+	DebugStepCommand(int32_t count = 1) : count(count) {}
+
 	void Execute() override;
 	static void Post(const httplib::Request&, httplib::Response& res);
 
 	bool stepped       = false;
 	bool debugging     = false;
 	DebugStopInfo stop = {};
+
+private:
+	int32_t count = 1;
+};
+
+// A step-over/run-to-address doesn't return a new stop record the way
+// DebugStepCommand does - DEBUG_StepOver/DEBUG_RunToAddress plant a
+// one-shot breakpoint and resume, so the actual stop happens arbitrarily
+// later (same reasoning as DebugContinueCommand::resumed_from_stop_id).
+// The immediate response only says whether the resume was armed;
+// DebugStepOverCommand additionally falls back to a plain step (with its
+// own synchronous stop record) when the current instruction isn't a
+// call/int/loop/rep, matching the F10 key handler's own fallthrough to F11.
+class DebugStepOverCommand : public Command {
+public:
+	void Execute() override;
+	static void Post(const httplib::Request&, httplib::Response& res);
+
+	bool stepped_over = false;
+	// Only set (via a DEBUG_SingleStep fallback) when stepped_over is
+	// false and the emulator was paused to begin with.
+	bool stepped                  = false;
+	bool debugging                = false;
+	uint64_t resumed_from_stop_id = 0;
+	DebugStopInfo stop            = {};
 };
 
 // Never a Command: the wait itself blocks the calling httplib worker
@@ -72,15 +99,40 @@ struct DebugWaitHandlers {
 	static void Get(const httplib::Request&, httplib::Response& res);
 };
 
+// Same "actual stop happens later" shape as DebugStepOverCommand, without
+// the disassembly-based detection - the target address is explicit.
+class DebugRunToCommand : public Command {
+public:
+	DebugRunToCommand(uint16_t segment, uint32_t offset)
+	        : segment(segment),
+	          offset(offset)
+	{}
+
+	void Execute() override;
+	static void Post(const httplib::Request&, httplib::Response& res);
+
+	bool started                  = false;
+	uint64_t resumed_from_stop_id = 0;
+
+private:
+	uint16_t segment = 0;
+	uint32_t offset  = 0;
+};
+
 #if C_DEBUGGER
 
 class DebugAddBreakpointCommand : public Command {
 public:
 	DebugAddBreakpointCommand(DebugBreakpointType type, uint16_t segment,
 	                          uint32_t offset, uint8_t int_num, uint16_t ah,
-	                          uint16_t al)
-	        : type(type), segment(segment), offset(offset),
-	          int_num(int_num), ah(ah), al(al)
+	                          uint16_t al, bool once = false)
+	        : type(type),
+	          segment(segment),
+	          offset(offset),
+	          int_num(int_num),
+	          ah(ah),
+	          al(al),
+	          once(once)
 	{}
 
 	void Execute() override;
@@ -97,6 +149,7 @@ private:
 	uint8_t int_num  = 0;
 	uint16_t ah      = 0;
 	uint16_t al      = 0;
+	bool once        = false;
 };
 
 class DebugListBreakpointsCommand : public Command {
@@ -109,16 +162,19 @@ public:
 
 class DebugDeleteBreakpointCommand : public Command {
 public:
-	DebugDeleteBreakpointCommand(bool delete_all, uint16_t index)
-	        : delete_all(delete_all), index(index)
+	enum class By { All, Index, Id };
+
+	DebugDeleteBreakpointCommand(By by, uint64_t value)
+	        : by(by),
+	          value(value)
 	{}
 
 	void Execute() override;
 	static void Delete(const httplib::Request&, httplib::Response& res);
 
 private:
-	bool delete_all = false;
-	uint16_t index  = 0;
+	By by          = By::All;
+	uint64_t value = 0;
 
 public:
 	bool deleted = false;
