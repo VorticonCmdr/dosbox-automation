@@ -5,6 +5,7 @@
 #include "capabilities.h"
 
 #include "bridge.h"
+#include "drive.h"
 #include "input.h"
 #include "private/backtrace.h"
 #include "private/disassemble.h"
@@ -110,10 +111,10 @@ CapabilityInfo ComputeDebuggerCapability(const bool built, const bool heavy,
 json BuildCapabilitiesBlock()
 {
 	json memory_limits;
-	memory_limits["max_transfer_bytes"]    = MaxMemoryTransferBytes;
-	memory_limits["max_search_span_bytes"] = MaxSearchSpanBytes;
-	memory_limits["default_search_limit"]  = DefaultSearchLimit;
-	memory_limits["max_search_limit"]      = MaxSearchLimit;
+	memory_limits["max_transfer_bytes"]      = MaxMemoryTransferBytes;
+	memory_limits["max_search_span_bytes"]   = MaxSearchSpanBytes;
+	memory_limits["default_search_limit"]    = DefaultSearchLimit;
+	memory_limits["max_search_limit"]        = MaxSearchLimit;
 	memory_limits["max_scan_pattern_bytes"]  = MaxScanPatternBytes;
 	memory_limits["max_scan_worst_case_ops"] = MaxScanWorstCaseOps;
 	memory_limits["max_snapshot_total_bytes"] = SnapshotRegistry::MaxTotalBytes;
@@ -160,7 +161,7 @@ json BuildCapabilitiesBlock()
 	        ComputeDebuggerCapability(static_cast<bool>(C_DEBUGGER),
 	                                  static_cast<bool>(C_HEAVY_DEBUGGER),
 	                                  CPU_GetActiveCoreKind()));
-	j["script"]  = ToJson(AlwaysOn("always available", script_limits));
+	j["script"] = ToJson(AlwaysOn("always available", script_limits));
 	json disassemble_limits;
 	disassemble_limits["max_count"] = MaxDisassembleCount;
 	// Unlike every other debugger.* facility, decoding instruction bytes
@@ -180,7 +181,9 @@ json BuildCapabilitiesBlock()
 	j["backtrace"] = ToJson(
 	        AlwaysOn("always available, regardless of the debugger capability",
 	                 backtrace_limits));
-	j["drive"]   = ToJson(AlwaysOn("always available"));
+	json drive_limits;
+	drive_limits["max_images_per_root"] = MaxImagesPerRoot;
+	j["drive"]   = ToJson(AlwaysOn("always available", drive_limits));
 	j["capture"] = ToJson(AlwaysOn("always available"));
 	j["wait"]    = ToJson(AlwaysOn("always available", wait_limits));
 

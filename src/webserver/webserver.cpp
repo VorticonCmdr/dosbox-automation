@@ -240,21 +240,13 @@ static void setup_api_handlers()
 
 	server.Post("/api/v1/wait", WaitHandlers::Post);
 
+	server.Get("/api/v1/drive", DriveListCommand::Get);
 	server.Post("/api/v1/drive/swap", DriveSwapCommand::Post);
 
-	server.Post("/api/v1/mount/lock",
-	            [](const httplib::Request&, httplib::Response& res) {
-		            MountPolicy::Lock();
-		            json j;
-		            j["status"] = "locked";
-		            send_json(res, j);
-	            });
-	server.Get("/api/v1/mount/lock",
-	           [](const httplib::Request&, httplib::Response& res) {
-		           json j;
-		           j["locked"] = MountPolicy::IsLocked();
-		           send_json(res, j);
-	           });
+	server.Post("/api/v1/mount/lock", MountHandlers::PostLock);
+	server.Get("/api/v1/mount/lock", MountHandlers::GetLock);
+	server.Get("/api/v1/mount/policy", MountHandlers::GetPolicy);
+	server.Get("/api/v1/mount/images", MountHandlers::GetImages);
 
 	server.Post("/api/v1/input/record/start", RecordingHandlers::PostStart);
 	server.Post("/api/v1/input/record/pause", RecordingHandlers::PostPause);

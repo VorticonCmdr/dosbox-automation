@@ -1014,7 +1014,7 @@
         ],
         "summary": "Mount or swap a disk image on a drive",
         "operationId": "driveSwap",
-        "description": "Mount or swap a floppy or hard disk image on a drive letter. For multi-disk installs, call this when the installer prompts for the next disk.",
+        "description": "Mount or swap a floppy or hard disk image on a drive letter. For multi-disk installs, call this when the installer prompts for the next disk. GET /mount/images lists what's available under the configured image roots; GET /mount/policy shows those roots and whether mounting is locked.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1053,13 +1053,67 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "description": "Rejected: a missing field, an invalid drive letter, or the image path failed mount policy. error_code is one of missing_field, invalid_drive_letter, does_not_resolve, not_regular_file, symlink_component, system_path, outside_whitelist, not_a_disk_image - see GET /mount/policy for the configured roots a policy-denied path must be under.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "Blocked by mount policy",
+                  "error_code": "outside_whitelist",
+                  "retryable": false
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "description": "Mount blocked by policy (mounts locked or path not allowed)."
+            "description": "Mounting is locked (POST /mount/lock) - a one-way latch for the life of the process.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "mount is locked",
+                  "error_code": "mount_locked",
+                  "retryable": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resolved image path no longer exists (a race between validation and the mount itself).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "File not found",
+                  "error_code": "file_not_found",
+                  "retryable": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The image passed mount policy validation but the drive itself failed to construct (unexpected image structure).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "Failed to mount image",
+                  "error_code": "mount_failed",
+                  "retryable": false
+                }
+              }
+            }
           }
         }
       }
@@ -2286,6 +2340,118 @@
           }
         }
       }
+    },
+    "/api/v1/drive": {
+      "get": {
+        "tags": [
+          "Drive"
+        ],
+        "summary": "List all drive letters and what's mounted on each",
+        "operationId": "driveList",
+        "description": "Walks A: through Z:, reporting which are mounted and, for each mounted one, its type and host info. The read side drive/swap never had: which letters are free to swap something onto.",
+        "responses": {
+          "200": {
+            "description": "Drive listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveList"
+                },
+                "example": {
+                  "drives": [
+                    {
+                      "letter": "A",
+                      "mounted": false
+                    },
+                    {
+                      "letter": "C",
+                      "mounted": true,
+                      "type": "local",
+                      "info": "/home/user/games/mygame",
+                      "read_only": false,
+                      "removable": false
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/mount/policy": {
+      "get": {
+        "tags": [
+          "Drive"
+        ],
+        "summary": "Show the configured mount policy",
+        "operationId": "mountPolicy",
+        "description": "Whether mounting is locked, and the directory/image roots an API-origin mount must be under. An empty allowed_image_roots means every drive/swap call is refused by policy regardless of path - the out-of-the-box state until an operator configures mount_allowed_image_roots.",
+        "responses": {
+          "200": {
+            "description": "Policy state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MountPolicyInfo"
+                },
+                "example": {
+                  "locked": false,
+                  "allowed_bases": [],
+                  "allowed_image_roots": [
+                    "/home/user/games/images"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/mount/images": {
+      "get": {
+        "tags": [
+          "Drive"
+        ],
+        "summary": "List image files under the configured image roots",
+        "operationId": "mountImages",
+        "description": "Non-recursive per-root listing of regular files under mount_allowed_image_roots, so an agent can discover what's mountable without shell access. Each entry's path is independently re-validated against the same policy drive/swap enforces, so a path returned here will not then be refused by mount policy (it can still fail structural validation as a disk image).",
+        "responses": {
+          "200": {
+            "description": "Image listing, grouped by root.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MountImages"
+                },
+                "example": {
+                  "roots": [
+                    {
+                      "root": "/home/user/games/images",
+                      "images": [
+                        {
+                          "path": "/home/user/games/images/disk1.img",
+                          "size_bytes": 1474560
+                        }
+                      ],
+                      "truncated": false
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2359,9 +2525,20 @@
     "schemas": {
       "Error": {
         "type": "object",
+        "required": [
+          "error"
+        ],
         "properties": {
           "error": {
             "type": "string"
+          },
+          "error_code": {
+            "type": "string",
+            "description": "Stable machine-readable cause, additive to 'error'. Not present on every error response."
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "Whether the same request might succeed unmodified after waiting. Not present on every error response."
           }
         }
       },
@@ -2944,6 +3121,118 @@
           "isLast": {
             "type": "boolean",
             "description": "True if this is the last block in the chain."
+          }
+        }
+      },
+      "DriveEntry": {
+        "type": "object",
+        "required": [
+          "letter",
+          "mounted"
+        ],
+        "properties": {
+          "letter": {
+            "type": "string",
+            "description": "Single drive letter, A-Z."
+          },
+          "mounted": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "local",
+              "cdrom",
+              "fat",
+              "iso",
+              "virtual",
+              "unknown"
+            ],
+            "description": "Present only when mounted."
+          },
+          "info": {
+            "type": "string",
+            "description": "Present only when mounted. The mounted host path for local/FAT/ISO/CD-ROM drives - a filesystem path disclosure, deliberate: this whole API sits behind the bearer token on loopback."
+          },
+          "read_only": {
+            "type": "boolean",
+            "description": "Present only when mounted."
+          },
+          "removable": {
+            "type": "boolean",
+            "description": "Present only when mounted."
+          }
+        }
+      },
+      "DriveList": {
+        "type": "object",
+        "properties": {
+          "drives": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DriveEntry"
+            },
+            "description": "Always 26 entries, A through Z, in order."
+          }
+        }
+      },
+      "MountPolicyInfo": {
+        "type": "object",
+        "properties": {
+          "locked": {
+            "type": "boolean"
+          },
+          "allowed_bases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Directory-mount roots (MOUNT), canonicalized."
+          },
+          "allowed_image_roots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Image-file roots (drive/swap, IMGMOUNT via the API origin), canonicalized. Empty means every API-origin image mount is refused, regardless of path."
+          }
+        }
+      },
+      "MountImageEntry": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Full canonical host path - usable directly as drive/swap's 'image'."
+          },
+          "size_bytes": {
+            "type": "integer"
+          }
+        }
+      },
+      "MountImages": {
+        "type": "object",
+        "properties": {
+          "roots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string"
+                },
+                "images": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MountImageEntry"
+                  }
+                },
+                "truncated": {
+                  "type": "boolean",
+                  "description": "True if this root held more regular files than the max_images_per_root cap (see dosbox/info's capabilities.drive.limits)."
+                }
+              }
+            }
           }
         }
       }
