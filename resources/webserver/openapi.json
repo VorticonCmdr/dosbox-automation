@@ -2685,7 +2685,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "The API token printed to the log at startup (or written to the token file). Send it as `Authorization: Bearer <token>`."
+        "description": "The API token, written to the token file at startup by default (see webserver_token_file), or supplied via DOSBOX_API_TOKEN. The log only ever gets a short preview. Send it as `Authorization: Bearer <token>`."
       }
     },
     "parameters": {

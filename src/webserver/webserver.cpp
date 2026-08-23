@@ -568,8 +568,10 @@ static void init_config_settings(SectionProp& section)
 	        "default). Open http://localhost:8386 in a browser (or use the configured port)\n"
 	        "to view the API documentation.\n"
 	        "\n"
-	        "An API token is generated at startup and printed to the log output.\n"
-	        "All API requests require Authorization: Bearer <token>.");
+	        "An API token is generated at startup and written to a token file\n"
+	        "by default (see webserver_token_file); only a short preview is\n"
+	        "printed to the log output. All API requests require\n"
+	        "Authorization: Bearer <token>.");
 
 	auto bind_ip = section.AddString("webserver_bind_address",
 	                                 OnlyAtStart,
@@ -588,13 +590,16 @@ static void init_config_settings(SectionProp& section)
 	        "the full API to the network. Do not enable unless you understand the\n"
 	        "security implications.");
 
-	auto token_file = section.AddBool("webserver_token_file", OnlyAtStart, false);
+	auto token_file = section.AddBool("webserver_token_file", OnlyAtStart, true);
 	token_file->SetHelp(
-	        "Write the API token to a file instead of printing it to the log.\n"
-	        "The file is written to the webserver config directory with restricted\n"
-	        "permissions (0600) and removed on clean shutdown. Launchers and tools\n"
-	        "can read the token from this file instead of scraping log output.\n"
-	        "Has no effect when DOSBOX_API_TOKEN is set via environment variable.");
+	        "Write the full API token to a file (enabled by default); the log\n"
+	        "only ever gets a short preview. The file is written to the webserver\n"
+	        "config directory with restricted permissions (0600) and removed on\n"
+	        "clean shutdown. Launchers and tools can read the token from this\n"
+	        "file instead of scraping log output. Set to false to suppress the\n"
+	        "file and rely on DOSBOX_API_TOKEN instead - with both off, the full\n"
+	        "token is not obtainable. Has no effect when DOSBOX_API_TOKEN is set\n"
+	        "via environment variable.");
 
 	auto osd = section.AddBool("webserver_osd", OnlyAtStart, true);
 	osd->SetHelp(

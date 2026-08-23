@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.13, 2.15-2.17 done. Rest of tiers 2-4 outstanding.**
+**Progress: 1.1-1.8, 2.1-2.13, 2.15-2.17, 4.6 done. Rest of tiers 2-4 outstanding.**
 
 ---
 
@@ -870,9 +870,19 @@ The engine's four workflows only deploy the website. The bridge repo has no `.gi
 `extras/api/` ships a JS client that sends no Authorization header (so it cannot work against a token-enforcing engine), declares response fields the engine deliberately removed, has zero tests, and is the only place `compareAndSwap` and `alloc`/`free` are exercised at all. Decide: fix it or delete it.
 
 ### 4.6 Make the default token obtainable
-**Engine. Effort: S.**
+**Engine. Effort: S. Status: done.**
 
 With `webserver_token_file=false` (the default) and no `DOSBOX_API_TOKEN`, the only output is `"API token: %.8s..."`. The full 64-char token is never printed anywhere. Meanwhile the setting help says "generated at startup and printed to the log output", the token_file help says "instead of printing it to the log", and the OpenAPI security scheme says "the API token printed to the log at startup". The out-of-the-box configuration cannot be authenticated to, and three user-facing texts claim otherwise. Either print it or fix all three texts and change the default.
+
+**Shipped: changed the default, kept the log truncated.** The truncation itself is deliberate (`58702d192`, "Address findings from security audit": "Show only the first 8 characters so the operator can identify the token without exposing it fully in captured logs") - printing the full 64-char secret to a log stream that's routinely captured, aggregated, or shipped elsewhere is exactly the kind of exposure that audit was closing. Reverting it to make the default work would trade one advertised-but-broken channel for a real regression.
+
+Flipped `webserver_token_file`'s default to `true` instead. This is Channel B, already implemented and tested (0600 permissions, written under the webserver config directory, removed on clean shutdown) - the only change is which setting is on out of the box. Rewrote the three texts that claimed the log was the way to get the token: `webserver_enabled`'s and `webserver_token_file`'s `SetHelp()` in `webserver.cpp`, and `bearerAuth`'s `description` in `openapi.json`. All three now point at the token file as the default channel and are explicit that the log only ever gets the 8-char preview, including when file-writing fails or is turned off - `webserver_token_file`'s help states outright that with both it and `DOSBOX_API_TOKEN` off, the full token isn't obtainable.
+
+No other code path needed a change: the live-engine test harness (`tests/integration/conftest.py`) and `bridge_start` (per 1.2) both provision the token via `DOSBOX_API_TOKEN`, which already takes priority over the file regardless of this default.
+
+**Verification:** rebuilt both `build` and `build-debugger`; ctest still 98% (1191 tests, the same pre-existing 20 `MountPolicyTest` failures, 0 new). Live-verified against the real macOS binary with a fresh `HOME`/`XDG_CONFIG_HOME`: no explicit `webserver_token_file` setting now writes the full 64-char token to `<config dir>/webserver/api_token` at 0600, and that token authenticates a real `/api/v1/dosbox/info` call; the file is removed on a clean `/dosbox/shutdown`. Separately confirmed `webserver_token_file=false` with no env var still writes no file and produces no way to authenticate, matching the (now honest) documentation. Added two tests to `tests/integration/test_token_provisioning.py`: `test_token_file_written_by_default` (no explicit `--set`, relies purely on the engine's own default) and `test_no_full_token_obtainable_when_explicitly_disabled` (explicit `false`, asserts no file and that the log preview line never exceeds 8 hex chars plus the literal `...`). Both pass against a real binary; full-suite local pytest runs of this file are blocked on macOS by a pre-existing, unrelated gap - the file assumes Linux's XDG config layout (`work_dir/.config/...`) for locating the config directory it needs to inspect, while macOS resolves it through `HOME/Library/Preferences/...` regardless of `XDG_CONFIG_HOME` (the same asymmetry item 1.2 documents); this affects all six tests in the file equally, predates this change, and is a Linux-CI-targeted test file, not a regression here.
+
+Not adversarially reviewed via the Workflow tool: the diff is a default-bool flip plus three help/doc strings, previously-shipped and previously-tested machinery (Channel B) doing the actual work, so the risk surface didn't seem to warrant it. Talked through the main risk vectors by hand instead: the file is 0600 and user-private, so this isn't a new exposure, just a wider default for a channel already judged acceptable; unclean shutdowns already left stale-but-valid token files behind for anyone who opted in before, this only broadens who's affected by that pre-existing, undocumented-beyond-"clean shutdown" caveat; and same-config-dir concurrent instances already had a last-writer-wins race on the token file before this change, mitigated the same way it always was, by giving concurrent instances distinct `HOME`/`XDG_CONFIG_HOME` (which the test harness and `bridge_start` both already do).
 
 ### 4.7 Token scopes
 **Engine + bridge + protocol. Effort: L. Value depends on deployment.**

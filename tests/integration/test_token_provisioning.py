@@ -20,11 +20,15 @@ import requests
 from conftest import find_free_port, start_dosbox_instance, WORKSPACE
 
 
-def start_with_token_file(work_dir, use_env_token=False):
+def start_with_token_file(work_dir, use_env_token=False, token_file_setting=True):
     """Start DOSBox with webserver_token_file enabled.
 
     When use_env_token is False, no DOSBOX_API_TOKEN is set, so the
     server auto-generates a token and writes it to the file.
+
+    token_file_setting selects what's passed on the command line:
+    True/False pass an explicit --set webserver_token_file=..., None
+    omits the flag entirely so the engine's own default applies.
     """
     import secrets
     import subprocess
@@ -67,8 +71,9 @@ def start_with_token_file(work_dir, use_env_token=False):
         "--nolocalconf",
         "--set", "webserver_enabled=true",
         "--set", f"webserver_port={port}",
-        "--set", "webserver_token_file=true",
     ]
+    if token_file_setting is not None:
+        cmd += ["--set", f"webserver_token_file={'true' if token_file_setting else 'false'}"]
 
     proc = subprocess.Popen(
         cmd, env=env,
@@ -204,3 +209,103 @@ def test_no_token_file_with_env_var(tmp_path):
         )
     finally:
         inst.shutdown()
+
+
+# -----------------------------------------------------------------------
+# webserver_token_file defaults to on, so the out-of-the-box token is
+# actually obtainable (see docs/mcp-plan.md item 4.6).
+# -----------------------------------------------------------------------
+
+def test_token_file_written_by_default(tmp_path):
+    """With no --set for webserver_token_file, the engine's own default
+    still writes the full token to a file."""
+    work_dir = tmp_path / "default-test"
+    inst, token = start_with_token_file(work_dir, token_file_setting=None)
+
+    token_path = work_dir / ".config" / "dosbox-automation" / "webserver" / "api_token"
+
+    try:
+        assert token_path.exists(), (
+            f"Token file not found at {token_path} - webserver_token_file "
+            "default may have regressed to off"
+        )
+        assert token_path.read_text().strip() == token
+    finally:
+        inst.shutdown()
+
+
+def test_no_full_token_obtainable_when_explicitly_disabled(tmp_path):
+    """With webserver_token_file=false and no DOSBOX_API_TOKEN, the full
+    token is genuinely unobtainable: no file, and only a short preview
+    in the log."""
+    import subprocess
+
+    from conftest import DOSBOX_BIN, StderrCapture
+
+    work_dir = tmp_path / "disabled-test"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    port = find_free_port()
+
+    config_dir = work_dir / ".config" / "dosbox-automation"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    dosbox_bin = Path(DOSBOX_BIN).resolve()
+    resource_dir = dosbox_bin.parent / "resources"
+    (config_dir / "dosbox-automation.conf").write_text(
+        f"[webserver]\nmount_allowed_bases = {resource_dir}\n"
+    )
+
+    env = {
+        **os.environ,
+        "SDL_VIDEODRIVER": "offscreen",
+        "SDL_AUDIODRIVER": "dummy",
+        "HOME": str(work_dir),
+        "XDG_CONFIG_HOME": str(work_dir / ".config"),
+    }
+    env.pop("DOSBOX_API_TOKEN", None)
+
+    cmd = [
+        DOSBOX_BIN,
+        "--noprimaryconf",
+        "--nolocalconf",
+        "--set", "webserver_enabled=true",
+        "--set", f"webserver_port={port}",
+        "--set", "webserver_token_file=false",
+    ]
+
+    proc = subprocess.Popen(
+        cmd, env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        cwd=str(work_dir),
+    )
+
+    capture = StderrCapture(proc.stderr)
+    capture.start()
+
+    try:
+        assert capture.ready.wait(timeout=15), (
+            f"DOSBox did not start:\n{capture.get_output()[:2000]}"
+        )
+
+        token_path = config_dir / "webserver" / "api_token"
+        assert not token_path.exists(), (
+            "No token file should exist with webserver_token_file=false"
+        )
+
+        preview_lines = [
+            line for line in capture.lines
+            if "WEBSERVER:" in line and "API token:" in line
+        ]
+        assert preview_lines, "Expected a log preview line for the token"
+        # "API token: xxxxxxxx..." - always the 8-char preview, never
+        # the full 64-char token, with no other channel to get it from.
+        preview = preview_lines[0].split("API token:", 1)[1].strip()
+        assert preview == "..." or len(preview) <= len("xxxxxxxx..."), (
+            f"Full token appears to have leaked into the log: {preview!r}"
+        )
+    finally:
+        # No valid token exists anywhere to shut down cleanly through
+        # the API - this configuration is exactly what's under test.
+        proc.kill()
+        proc.wait(timeout=5)
+        capture.join(timeout=2)
