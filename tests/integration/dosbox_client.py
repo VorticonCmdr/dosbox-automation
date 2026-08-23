@@ -350,7 +350,15 @@ class DosboxClient:
 
     # --- Video Capture ---
 
-    def capture_start(self) -> requests.Response:
+    def capture_start(self, mode: str | None = None,
+                       compression: int | None = None) -> requests.Response:
+        body = {}
+        if mode is not None:
+            body["mode"] = mode
+        if compression is not None:
+            body["compression"] = compression
+        if body:
+            return self._post("/api/v1/capture/video/start", json=body)
         return self._post("/api/v1/capture/video/start")
 
     def capture_stop(self) -> requests.Response:

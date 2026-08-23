@@ -1377,6 +1377,12 @@
                         "raw",
                         "rendered"
                       ]
+                    },
+                    "compression": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9,
+                      "description": "Present only if the request set a compression level."
                     }
                   }
                 },
@@ -1386,6 +1392,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "A video capture is already running and the request tried to change the compression level."
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1409,6 +1418,12 @@
                     ],
                     "default": "raw",
                     "description": "What feeds the encoder: 'raw' captures the emulator framebuffer at native resolution, 'rendered' captures the post-shader output at window resolution as shown on screen."
+                  },
+                  "compression": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9,
+                    "description": "Zlib compression level to apply to `mode` before starting, 0 (store only) to 9 (maximum). Set and started atomically in this one call; omit to keep the level already configured for `mode` (see GET /capture/video/compression)."
                   }
                 }
               },
@@ -1473,6 +1488,28 @@
                     "capturing": {
                       "type": "boolean"
                     },
+                    "path": {
+                      "type": "string",
+                      "description": "Host filesystem path of the current (or, after a stop, the most recently finished) recording. Omitted if no video capture has run yet this session. Same disclosure decision as GET /drive's `info` field: this whole API sits behind the bearer token on loopback."
+                    },
+                    "frames": {
+                      "type": "integer",
+                      "description": "Frames written so far (or, after a stop, in total). The clearest signal that a capture nominally ran but the emulator was paused or minimized the whole time: capturing:true with frames staying at 0."
+                    },
+                    "elapsed_ms": {
+                      "type": "integer",
+                      "description": "Milliseconds since the recording's file was created (not since capture/video/start was called - the file isn't created until the first frame arrives). Frozen at the final duration once the recording stops."
+                    },
+                    "bytes_written": {
+                      "type": "integer",
+                      "description": "Bytes of video/audio chunk data written so far, or in total once stopped."
+                    },
+                    "compression_level": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9,
+                      "description": "Zlib level configured for `mode` at query time."
+                    },
                     "last_stop_reason": {
                       "type": "string",
                       "enum": [
@@ -1496,6 +1533,11 @@
                 "example": {
                   "capturing": true,
                   "mode": "raw",
+                  "path": "/home/user/.local/share/dosbox-automation/capture/video0007.avi",
+                  "frames": 412,
+                  "elapsed_ms": 5893,
+                  "bytes_written": 1048576,
+                  "compression_level": 9,
                   "last_stop_reason": "none"
                 }
               }

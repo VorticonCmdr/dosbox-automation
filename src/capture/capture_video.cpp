@@ -14,6 +14,7 @@
 
 #include "gui/osd/osd.h"
 #include "hardware/memory.h"
+#include "hardware/timer.h"
 #include "misc/support.h"
 #include "utils/math_utils.h"
 
@@ -44,10 +45,19 @@ static struct {
 	std::vector<uint8_t> index = {};
 	uint32_t index_used        = 0;
 
+	// Where this (or the most recently finished) recording landed, and
+	// when its file was created. end_ticks_ms is 0 while still recording
+	// (capture_video_get_elapsed_ms uses "now" instead) and set once at
+	// finalise time, freezing the reported elapsed time for the status
+	// route rather than letting it keep climbing after the capture ends.
+	std_fs::path path      = {};
+	int64_t start_ticks_ms = 0;
+	int64_t end_ticks_ms   = 0;
+
 	// Set on the first failed write; later writes short-circuit so a
 	// dead file isn't hammered and the first errno is preserved
-	bool write_error         = false;
-	int write_errno          = 0;
+	bool write_error          = false;
+	int write_errno           = 0;
 	uint32_t next_space_check = 0;
 
 	struct {
@@ -227,6 +237,8 @@ void capture_video_finalise()
 	if (!video.handle) {
 		return;
 	}
+	video.end_ticks_ms = GetTicks();
+
 	if (video.codec) {
 		video.codec->FinishVideo();
 	}
@@ -382,10 +394,9 @@ void capture_video_finalise()
 	// Attempted even after a write error: the header bytes at offset 0
 	// were preallocated at creation, so this rewrite usually survives
 	// a full disk and leaves a truncated but still playable file
-	const bool header_written =
-	        (fseek(video.handle, 0, SEEK_SET) == 0) &&
-	        (fwrite(&avi_header, 1, AviHeaderSize, video.handle) ==
-	         AviHeaderSize);
+	const bool header_written = (fseek(video.handle, 0, SEEK_SET) == 0) &&
+	                            (fwrite(&avi_header, 1, AviHeaderSize, video.handle) ==
+	                             AviHeaderSize);
 
 	// fclose flushes; a failure here means the tail of the recording
 	// never reached the disk
@@ -405,20 +416,44 @@ void capture_video_finalise()
 	// Classify how this capture ended, unless the frame path already
 	// did (low disk space is decided and reported there)
 	if (end_reason == VideoCaptureEndReason::NotEnded) {
-		end_reason = video.write_error
-		                   ? VideoCaptureEndReason::WriteError
-		                   : VideoCaptureEndReason::CleanStop;
+		end_reason = video.write_error ? VideoCaptureEndReason::WriteError
+		                               : VideoCaptureEndReason::CleanStop;
 	}
 
 	if (end_reason == VideoCaptureEndReason::WriteError) {
-		const auto detail = std::string(
-		        video.write_errno ? strerror(video.write_errno)
-		                          : "short write");
+		const auto detail = std::string(video.write_errno
+		                                        ? strerror(video.write_errno)
+		                                        : "short write");
 		notify_capture_ended_abnormally(
 		        "Video recording stopped after a write error (" +
 		                detail + "); the file may be truncated",
 		        "REC STOPPED: WRITE ERROR (" + detail + ")");
 	}
+}
+
+std_fs::path capture_video_get_path()
+{
+	return video.path;
+}
+
+uint32_t capture_video_get_frame_count()
+{
+	return video.frames;
+}
+
+uint32_t capture_video_get_bytes_written()
+{
+	return video.written;
+}
+
+int64_t capture_video_get_elapsed_ms()
+{
+	if (video.start_ticks_ms == 0) {
+		return 0;
+	}
+	const auto end_ticks_ms = video.end_ticks_ms != 0 ? video.end_ticks_ms
+	                                                  : GetTicks();
+	return end_ticks_ms - video.start_ticks_ms;
 }
 
 void capture_video_add_audio_data(const uint32_t sample_rate,
@@ -449,9 +484,8 @@ static void create_avi_file(const uint16_t width, const uint16_t height,
 	video.handle = CAPTURE_CreateFile(CaptureType::Video);
 	if (!video.handle) {
 		end_reason = VideoCaptureEndReason::WriteError;
-		notify_capture_ended_abnormally(
-		        "Could not create the video recording file",
-		        "REC FAILED: CANNOT CREATE FILE");
+		notify_capture_ended_abnormally("Could not create the video recording file",
+		                                "REC FAILED: CANNOT CREATE FILE");
 		return;
 	}
 
@@ -464,7 +498,7 @@ static void create_avi_file(const uint16_t width, const uint16_t height,
 
 	OSD::OsdManager::Instance().ClearByTag(OsdNoticeTag);
 
-	video.codec = new VideoCodec();
+	video.codec      = new VideoCodec();
 	const auto level = is_rendered ? compression_levels.rendered
 	                               : compression_levels.raw;
 	if (!video.codec->SetupCompress(width, height, level)) {
@@ -494,9 +528,9 @@ static void create_avi_file(const uint16_t width, const uint16_t height,
 
 		end_reason = VideoCaptureEndReason::WriteError;
 
-		const auto detail = std::string(
-		        video.write_errno ? strerror(video.write_errno)
-		                          : "short write");
+		const auto detail = std::string(video.write_errno
+		                                        ? strerror(video.write_errno)
+		                                        : "short write");
 		notify_capture_ended_abnormally(
 		        "Could not start video recording, writing failed (" +
 		                detail + ")",
@@ -508,6 +542,10 @@ static void create_avi_file(const uint16_t width, const uint16_t height,
 	video.written               = 0;
 	video.audio.buf_frames_used = 0;
 	video.audio.bytes_written   = 0;
+
+	video.path           = CAPTURE_GetLastCreatedFilePath();
+	video.start_ticks_ms = GetTicks();
+	video.end_ticks_ms   = 0;
 }
 
 // Performs some transforms on the passed down rendered image to make sure
@@ -615,8 +653,8 @@ static void maybe_stop_recording_on_low_disk_space()
 	}
 	video.next_space_check = video.written + SpaceCheckIntervalBytes;
 
-	std::error_code ec           = {};
-	const auto space             = std_fs::space(free_space_limit.capture_dir, ec);
+	std::error_code ec = {};
+	const auto space   = std_fs::space(free_space_limit.capture_dir, ec);
 	if (ec) {
 		// Being unable to measure free space is no reason to kill a
 		// recording; the write error path catches an actual full disk
@@ -724,8 +762,8 @@ void capture_video_add_frame(const RenderedImage& image, const float frames_per_
 		              video.audio.buf,
 		              0);
 
-		video.audio.bytes_written = video.audio.buf_frames_used *
-		                            SampleFrameSize;
+		video.audio.bytes_written   = video.audio.buf_frames_used *
+		                              SampleFrameSize;
 		video.audio.buf_frames_used = 0;
 	}
 

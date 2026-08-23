@@ -27,4 +27,11 @@ void capture_video_add_audio_data(const uint32_t sample_rate,
 
 void capture_video_finalise();
 
+// Backs CAPTURE_GetVideoPath/FrameCount/BytesWritten/ElapsedMs - see their
+// doc comments in capture.h for the retained-past-stop semantics.
+std_fs::path capture_video_get_path();
+uint32_t capture_video_get_frame_count();
+uint32_t capture_video_get_bytes_written();
+int64_t capture_video_get_elapsed_ms();
+
 #endif

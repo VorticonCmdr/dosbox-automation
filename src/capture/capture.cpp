@@ -35,6 +35,8 @@ static struct {
 	std_fs::path path     = {};
 	bool path_initialised = false;
 
+	std_fs::path last_created_path = {};
+
 	struct {
 		std::atomic<CaptureState> audio = {};
 		std::atomic<CaptureState> midi  = {};
@@ -61,12 +63,13 @@ static struct {
 	{
 		path.clear();
 		path_initialised = false;
-		state.audio = CaptureState::Off;
-		state.midi = CaptureState::Off;
-		state.video = CaptureState::Off;
-		video_capture_mode = VideoCaptureMode::Raw;
+		last_created_path.clear();
+		state.audio               = CaptureState::Off;
+		state.midi                = CaptureState::Off;
+		state.video               = CaptureState::Off;
+		video_capture_mode        = VideoCaptureMode::Raw;
 		last_rendered_frame_count = 0;
-		next_index = {};
+		next_index                = {};
 	}
 } capture = {};
 
@@ -324,10 +327,10 @@ int32_t get_next_capture_index(const CaptureType type)
 std_fs::path generate_capture_filename(const CaptureType type, const int32_t index)
 {
 	const auto filename = format_str("%s%04d%s%s",
-	                                    capture_type_to_basename(type),
-	                                    index,
-	                                    capture_type_to_postfix(type),
-	                                    capture_type_to_extension(type));
+	                                 capture_type_to_basename(type),
+	                                 index,
+	                                 capture_type_to_postfix(type),
+	                                 capture_type_to_extension(type));
 	return {capture.path / filename};
 }
 
@@ -345,6 +348,7 @@ FILE* CAPTURE_CreateFile(const CaptureType type,
 		const auto index = get_next_capture_index(type);
 		path_str = generate_capture_filename(type, index).string();
 	}
+	capture.last_created_path = path_str;
 
 	FILE* handle = open_file(path_str.c_str(), "wb");
 	if (handle) {
@@ -357,6 +361,11 @@ FILE* CAPTURE_CreateFile(const CaptureType type,
 		            capture_type_to_string(type));
 	}
 	return handle;
+}
+
+std_fs::path CAPTURE_GetLastCreatedFilePath()
+{
+	return capture.last_created_path;
 }
 
 void CAPTURE_StartVideoCapture(const VideoCaptureMode mode)
@@ -381,6 +390,26 @@ VideoCaptureMode CAPTURE_GetVideoCaptureMode()
 	return capture.video_capture_mode;
 }
 
+std_fs::path CAPTURE_GetVideoPath()
+{
+	return capture_video_get_path();
+}
+
+uint32_t CAPTURE_GetVideoFrameCount()
+{
+	return capture_video_get_frame_count();
+}
+
+uint32_t CAPTURE_GetVideoBytesWritten()
+{
+	return capture_video_get_bytes_written();
+}
+
+int64_t CAPTURE_GetVideoElapsedMs()
+{
+	return capture_video_get_elapsed_ms();
+}
+
 bool CAPTURE_IsCapturingRenderedVideo()
 {
 	return capture.state.video != CaptureState::Off &&
@@ -394,8 +423,7 @@ int CAPTURE_GetVideoCompressionLevel(const VideoCaptureMode mode)
 
 void CAPTURE_SetVideoCompressionLevel(const VideoCaptureMode mode, const int level)
 {
-	capture_video_set_compression_level(mode == VideoCaptureMode::Rendered,
-	                                    level);
+	capture_video_set_compression_level(mode == VideoCaptureMode::Rendered, level);
 }
 
 void CAPTURE_AddRenderedVideoFrame(const RenderedImage& image,
