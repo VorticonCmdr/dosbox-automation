@@ -9,8 +9,10 @@
 #include "libs/http/http.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace Webserver {
@@ -65,9 +67,22 @@ inline constexpr double MinTypingCps = 0.1;
 inline constexpr double MaxTypingCps = 1000.0;
 
 // Max events in one /api/v1/input/sequence body, and max characters in
-// one /api/v1/input/type body.
+// one /api/v1/input/type body. Also the cap on a single recording's
+// rec_buffer (see InputRecording::OnKeyEvent et al.): the same limit
+// either way, since a recording that couldn't fit in one /input/sequence
+// body couldn't be replayed by it either.
 inline constexpr size_t MaxInputEvents    = 32000;
 inline constexpr size_t MaxTypedTextChars = 4096;
+
+// Named recording store limits. MaxRecordingNameLength matches
+// Lua::ScriptValidator::ValidateParams' rule for script names -
+// [A-Za-z0-9_-], <=64 chars - the same "safe as a filename or map key"
+// bar. MaxStoredRecordings bounds worst-case memory: each recording can
+// hold up to MaxInputEvents events, so the store's ceiling is deliberately
+// modest (roughly the same order of magnitude as SnapshotRegistry's
+// 32 MB total-bytes cap, in spirit if not in exact accounting).
+inline constexpr size_t MaxRecordingNameLength = 64;
+inline constexpr size_t MaxStoredRecordings    = 20;
 
 // A key event that can't dispatch (keyboard buffer full) retries every
 // backpressure_retry_ms (PIC engine) or every frame (frame engine)
@@ -149,16 +164,20 @@ public:
 
 	bool was_recording             = false;
 	std::vector<InputEvent> events = {};
+	// Whether MaxInputEvents was hit and further events were dropped
+	// during this recording (see RecordingHandlers::PostStop).
+	bool truncated = false;
 };
 
 namespace InputRecording {
 void StartOnEmulationThread();
 void Pause();
-bool Stop(std::vector<InputEvent>& out_events);
+bool Stop(std::vector<InputEvent>& out_events, bool& out_truncated);
 bool IsRecording();
 bool IsPaused();
 size_t EventCount();
 double DurationMs();
+bool IsTruncated();
 
 void OnKeyEvent(int key, bool pressed);
 void OnMouseMove(float x_rel, float y_rel, float x_abs, float y_abs);
@@ -171,8 +190,54 @@ void InstallHooks();
 struct RecordingHandlers {
 	static void PostStart(const httplib::Request&, httplib::Response& res);
 	static void PostPause(const httplib::Request&, httplib::Response& res);
-	static void PostStop(const httplib::Request&, httplib::Response& res);
+	static void PostStop(const httplib::Request& req, httplib::Response& res);
 	static void GetStatus(const httplib::Request&, httplib::Response& res);
+};
+
+// Process-lifetime, in-memory named recording store - zero filesystem
+// surface. Populated only from RecordingHandlers::PostStop (after a
+// StopRecordingCommand has already completed) and read from
+// InputSequenceCommand::Post (resolving a {"recording":"<name>"} body
+// into an already-validated event vector before the Command is even
+// constructed). Every function here is web-thread-only: the emulation
+// thread never touches this store.
+namespace RecordingStore {
+// <=MaxRecordingNameLength chars, [A-Za-z0-9_-] - same rule as
+// Lua::ScriptValidator::ValidateParams uses for script names.
+bool IsValidName(const std::string& name);
+
+// False only if `name` doesn't already exist and the store is at
+// MaxStoredRecordings capacity - callers should check this before
+// stopping a recording they intend to name, so a full store fails the
+// request up front rather than after the recording has already ended.
+bool HasRoom(const std::string& name);
+
+// Saves (or overwrites) a named recording.
+void Save(const std::string& name, std::vector<InputEvent> events,
+          bool truncated, double duration_ms);
+
+struct Entry {
+	size_t event_count = 0;
+	double duration_ms = 0;
+	bool truncated     = false;
+};
+
+// Metadata for every stored recording, name paired with its Entry.
+std::vector<std::pair<std::string, Entry>> List();
+
+// A copy of the stored events for `name`, or nullopt if no recording
+// by that name exists. A copy, not a move: a named recording is meant
+// to be replayed repeatedly, so resolving it must never consume or
+// invalidate the stored original.
+std::optional<std::vector<InputEvent>> Get(const std::string& name);
+
+// True if a recording named `name` existed and was removed.
+bool Delete(const std::string& name);
+} // namespace RecordingStore
+
+struct RecordingStoreHandlers {
+	static void GetList(const httplib::Request&, httplib::Response& res);
+	static void Delete(const httplib::Request& req, httplib::Response& res);
 };
 
 void ReplayDispatchFrame(uint64_t current_frame);

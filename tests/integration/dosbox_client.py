@@ -130,11 +130,26 @@ class DosboxClient:
     def recording_pause(self) -> requests.Response:
         return self._post("/api/v1/input/record/pause")
 
-    def recording_stop(self) -> requests.Response:
-        return self._post("/api/v1/input/record/stop")
+    def recording_stop(self, name: str | None = None,
+                        include_events: bool | None = None) -> requests.Response:
+        params = {}
+        if name is not None:
+            params["name"] = name
+        if include_events is not None:
+            params["include_events"] = "true" if include_events else "false"
+        return self._post("/api/v1/input/record/stop", params=params)
 
     def recording_status(self) -> requests.Response:
         return self._get("/api/v1/input/record/status")
+
+    def recordings_list(self) -> requests.Response:
+        return self._get("/api/v1/input/recordings")
+
+    def recording_delete(self, name: str) -> requests.Response:
+        return self._delete(f"/api/v1/input/recordings/{name}")
+
+    def input_sequence_from_recording(self, name: str) -> requests.Response:
+        return self._post("/api/v1/input/sequence", json={"recording": name})
 
     # --- Video capture ---
 

@@ -16,6 +16,7 @@
 #include "utils/string_utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 
@@ -426,10 +427,75 @@ void InputSequenceCommand::Post(const httplib::Request& req, httplib::Response& 
 {
 	auto body = json::parse(req.body);
 
+	if (body.contains("events") && body.contains("recording")) {
+		res.status = 400;
+		json err;
+		err["error"] = "Provide either 'events' or 'recording', not both";
+		send_json(res, err);
+		return;
+	}
+
+	if (body.contains("recording")) {
+		if (!body["recording"].is_string()) {
+			res.status = 400;
+			json err;
+			err["error"] = "'recording' must be a string";
+			send_json(res, err);
+			return;
+		}
+		const auto name = body["recording"].get<std::string>();
+		// Reject before ever touching RecordingStore: an unbounded
+		// name would otherwise be hashed as a full map key lookup and,
+		// on the guaranteed miss, echoed whole into the 404 body below
+		// - up to MaxRequestBodyBytes of attacker-controlled data
+		// round-tripped through a single request for no reason. Same
+		// rule RecordingHandlers::PostStop already applies to its own
+		// 'name' query param.
+		if (!RecordingStore::IsValidName(name)) {
+			res.status = 400;
+			json err;
+			err["error"] = "Invalid recording name (max " +
+			               std::to_string(MaxRecordingNameLength) +
+			               " chars, [A-Za-z0-9_-])";
+			send_json(res, err);
+			return;
+		}
+		auto stored_events = RecordingStore::Get(name);
+		if (!stored_events) {
+			res.status = 404;
+			json err;
+			err["error"] = "No recording named '" + name + "'";
+			send_json(res, err);
+			return;
+		}
+
+		// Every recorded event carries a frame (InputRecording::
+		// OnKeyEvent et al. always set one), so a stored recording
+		// always replays through the frame-timed engine.
+		const auto events_scheduled = stored_events->size();
+		InputSequenceCommand cmd(std::move(*stored_events),
+		                         /*has_frame_data=*/true);
+		cmd.WaitForCompletion(5000);
+
+		if (!cmd.error.empty()) {
+			res.status = 409;
+			json err;
+			err["error"] = cmd.error;
+			send_json(res, err);
+			return;
+		}
+
+		json result;
+		result["status"]           = "ok";
+		result["events_scheduled"] = events_scheduled;
+		send_json(res, result);
+		return;
+	}
+
 	if (!body.contains("events") || !body["events"].is_array()) {
 		res.status = 400;
 		json err;
-		err["error"] = "Missing or invalid 'events' array";
+		err["error"] = "Missing or invalid 'events' array (or provide 'recording' instead)";
 		send_json(res, err);
 		return;
 	}
@@ -641,6 +707,23 @@ static std::vector<InputEvent> rec_buffer;
 static double rec_start_pic_ms;
 static uint64_t rec_start_frame = 0;
 
+// Set once rec_buffer hits MaxInputEvents and a new event gets dropped
+// rather than appended. Cleared on the next StartOnEmulationThread().
+static bool rec_truncated = false;
+
+// Caller must already hold rec_mutex. True if rec_buffer has room for
+// one more event; if not, latches rec_truncated and returns false.
+// Coalescing into an existing entry (OnMouseMove) never needs this -
+// only appending a brand new one does.
+static bool RecordingHasRoom()
+{
+	if (rec_buffer.size() >= MaxInputEvents) {
+		rec_truncated = true;
+		return false;
+	}
+	return true;
+}
+
 static const std::unordered_map<int, std::string> button_id_to_name = {
         {0,   "left"},
         {1,  "right"},
@@ -671,6 +754,7 @@ void InputRecording::StartOnEmulationThread()
 	rec_buffer.clear();
 	rec_active       = true;
 	rec_paused       = false;
+	rec_truncated    = false;
 	rec_start_pic_ms = PIC_FullIndex();
 	rec_start_frame  = GFX_GetRenderedFrameCount();
 	TITLEBAR_NotifyApiRecordingStatus(true);
@@ -697,7 +781,7 @@ void PauseRecordingCommand::Execute()
 
 void StopRecordingCommand::Execute()
 {
-	was_recording = InputRecording::Stop(events);
+	was_recording = InputRecording::Stop(events, truncated);
 }
 
 void InputRecording::Pause()
@@ -708,16 +792,18 @@ void InputRecording::Pause()
 	}
 }
 
-bool InputRecording::Stop(std::vector<InputEvent>& out_events)
+bool InputRecording::Stop(std::vector<InputEvent>& out_events, bool& out_truncated)
 {
 	std::lock_guard<std::mutex> lock(rec_mutex);
 	if (!rec_active) {
 		return false;
 	}
-	rec_active = false;
-	rec_paused = false;
-	out_events = std::move(rec_buffer);
+	rec_active    = false;
+	rec_paused    = false;
+	out_events    = std::move(rec_buffer);
+	out_truncated = rec_truncated;
 	rec_buffer.clear();
+	rec_truncated = false;
 	TITLEBAR_NotifyApiRecordingStatus(false);
 	OSD::OsdManager::Instance().SetIcon(OSD::IconId::RecordingActive, false);
 	return true;
@@ -741,6 +827,12 @@ size_t InputRecording::EventCount()
 	return rec_buffer.size();
 }
 
+bool InputRecording::IsTruncated()
+{
+	std::lock_guard<std::mutex> lock(rec_mutex);
+	return rec_truncated;
+}
+
 double InputRecording::DurationMs()
 {
 	std::lock_guard<std::mutex> lock(rec_mutex);
@@ -753,7 +845,7 @@ double InputRecording::DurationMs()
 void InputRecording::OnKeyEvent(int key, bool pressed)
 {
 	std::lock_guard<std::mutex> lock(rec_mutex);
-	if (!rec_active || rec_paused) {
+	if (!rec_active || rec_paused || !RecordingHasRoom()) {
 		return;
 	}
 	InputEvent ev;
@@ -771,9 +863,34 @@ void InputRecording::OnMouseMove(float x_rel, float y_rel, float x_abs, float y_
 	if (!rec_active || rec_paused) {
 		return;
 	}
+	const auto frame = GFX_GetRenderedFrameCount() - rec_start_frame;
+
+	// Host mice sample at 125-1000 Hz against a much slower render
+	// clock, so several samples routinely land in the same rendered
+	// frame. Coalescing them into one event per frame - summed deltas,
+	// latest absolute position - cuts volume roughly an order of
+	// magnitude and loses nothing the frame-timed replay engine can
+	// act on, since it only ever dispatches on frame boundaries anyway.
+	// Never subject to RecordingHasRoom(): merging into an existing
+	// entry doesn't grow rec_buffer.
+	if (!rec_buffer.empty()) {
+		auto& last = rec_buffer.back();
+		if (last.type == InputEvent::Type::MouseMove && last.frame == frame) {
+			last.x_rel += x_rel;
+			last.y_rel += y_rel;
+			last.x_abs = x_abs;
+			last.y_abs = y_abs;
+			last.t_ms  = rec_elapsed_ms_precise();
+			return;
+		}
+	}
+
+	if (!RecordingHasRoom()) {
+		return;
+	}
 	InputEvent ev;
 	ev.t_ms  = rec_elapsed_ms_precise();
-	ev.frame = GFX_GetRenderedFrameCount() - rec_start_frame;
+	ev.frame = frame;
 	ev.type  = InputEvent::Type::MouseMove;
 	ev.x_rel = x_rel;
 	ev.y_rel = y_rel;
@@ -785,7 +902,7 @@ void InputRecording::OnMouseMove(float x_rel, float y_rel, float x_abs, float y_
 void InputRecording::OnMouseButton(const std::string& button, bool pressed)
 {
 	std::lock_guard<std::mutex> lock(rec_mutex);
-	if (!rec_active || rec_paused) {
+	if (!rec_active || rec_paused || !RecordingHasRoom()) {
 		return;
 	}
 	InputEvent ev;
@@ -800,7 +917,7 @@ void InputRecording::OnMouseButton(const std::string& button, bool pressed)
 void InputRecording::OnMouseWheel(float delta)
 {
 	std::lock_guard<std::mutex> lock(rec_mutex);
-	if (!rec_active || rec_paused) {
+	if (!rec_active || rec_paused || !RecordingHasRoom()) {
 		return;
 	}
 	InputEvent ev;
@@ -920,8 +1037,39 @@ void RecordingHandlers::PostPause(const httplib::Request&, httplib::Response& re
 	send_json(res, j);
 }
 
-void RecordingHandlers::PostStop(const httplib::Request&, httplib::Response& res)
+void RecordingHandlers::PostStop(const httplib::Request& req, httplib::Response& res)
 {
+	// Validated before the recording is actually stopped: an invalid
+	// name or a full store should refuse the request up front and
+	// leave the recording running, not stop it and then discover the
+	// name can't be honored with no way to un-stop.
+	std::string name;
+	if (req.has_param("name")) {
+		name = req.get_param_value("name");
+		if (!RecordingStore::IsValidName(name)) {
+			res.status = 400;
+			json err;
+			err["error"] = "Invalid recording name (max " +
+			               std::to_string(MaxRecordingNameLength) +
+			               " chars, [A-Za-z0-9_-])";
+			send_json(res, err);
+			return;
+		}
+		if (!RecordingStore::HasRoom(name)) {
+			res.status = 503;
+			json err;
+			err["error"] = "Named recording store is full (max " +
+			               std::to_string(MaxStoredRecordings) +
+			               "); delete one first";
+			err["error_code"] = "registry_full";
+			err["retryable"]  = false;
+			send_json(res, err);
+			return;
+		}
+	}
+	const bool include_events = !(req.has_param("include_events") &&
+	                              req.get_param_value("include_events") == "false");
+
 	StopRecordingCommand cmd;
 	cmd.WaitForCompletion(1000);
 	if (!cmd.was_recording) {
@@ -932,17 +1080,36 @@ void RecordingHandlers::PostStop(const httplib::Request&, httplib::Response& res
 		return;
 	}
 
-	json j;
-	j["event_count"] = cmd.events.size();
-	j["events"]      = json::array();
-	double duration  = 0;
+	const auto event_count = cmd.events.size();
+
+	json events_json;
+	double duration = 0;
+	if (include_events) {
+		events_json = json::array();
+	}
 	for (const auto& ev : cmd.events) {
-		j["events"].push_back(event_to_json(ev));
+		if (include_events) {
+			events_json.push_back(event_to_json(ev));
+		}
 		if (ev.t_ms > duration) {
 			duration = ev.t_ms;
 		}
 	}
+
+	if (!name.empty()) {
+		RecordingStore::Save(name, std::move(cmd.events), cmd.truncated, duration);
+	}
+
+	json j;
+	j["event_count"] = event_count;
+	j["truncated"]   = cmd.truncated;
 	j["duration_ms"] = duration;
+	if (!name.empty()) {
+		j["name"] = name;
+	}
+	if (include_events) {
+		j["events"] = std::move(events_json);
+	}
 	send_json(res, j);
 }
 
@@ -953,6 +1120,116 @@ void RecordingHandlers::GetStatus(const httplib::Request&, httplib::Response& re
 	j["paused"]      = InputRecording::IsPaused();
 	j["event_count"] = InputRecording::EventCount();
 	j["duration_ms"] = InputRecording::DurationMs();
+	j["truncated"]   = InputRecording::IsTruncated();
+	send_json(res, j);
+}
+
+bool RecordingStore::IsValidName(const std::string& name)
+{
+	if (name.empty() || name.size() > MaxRecordingNameLength) {
+		return false;
+	}
+	for (const auto c : name) {
+		const bool valid = std::isalnum(static_cast<unsigned char>(c)) ||
+		                   c == '-' || c == '_';
+		if (!valid) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static std::mutex recordings_mutex;
+
+namespace {
+struct StoredRecording {
+	std::vector<InputEvent> events = {};
+	bool truncated                 = false;
+	double duration_ms             = 0;
+};
+} // namespace
+
+static std::unordered_map<std::string, StoredRecording> stored_recordings;
+
+bool RecordingStore::HasRoom(const std::string& name)
+{
+	std::lock_guard<std::mutex> lock(recordings_mutex);
+	return stored_recordings.contains(name) ||
+	       stored_recordings.size() < MaxStoredRecordings;
+}
+
+void RecordingStore::Save(const std::string& name, std::vector<InputEvent> events,
+                          bool truncated, double duration_ms)
+{
+	std::lock_guard<std::mutex> lock(recordings_mutex);
+	StoredRecording stored;
+	stored.events           = std::move(events);
+	stored.truncated        = truncated;
+	stored.duration_ms      = duration_ms;
+	stored_recordings[name] = std::move(stored);
+}
+
+std::vector<std::pair<std::string, RecordingStore::Entry>> RecordingStore::List()
+{
+	std::lock_guard<std::mutex> lock(recordings_mutex);
+	std::vector<std::pair<std::string, Entry>> result;
+	result.reserve(stored_recordings.size());
+	for (const auto& [name, stored] : stored_recordings) {
+		Entry entry;
+		entry.event_count = stored.events.size();
+		entry.duration_ms = stored.duration_ms;
+		entry.truncated   = stored.truncated;
+		result.emplace_back(name, entry);
+	}
+	return result;
+}
+
+std::optional<std::vector<InputEvent>> RecordingStore::Get(const std::string& name)
+{
+	std::lock_guard<std::mutex> lock(recordings_mutex);
+	const auto it = stored_recordings.find(name);
+	if (it == stored_recordings.end()) {
+		return std::nullopt;
+	}
+	return it->second.events;
+}
+
+bool RecordingStore::Delete(const std::string& name)
+{
+	std::lock_guard<std::mutex> lock(recordings_mutex);
+	return stored_recordings.erase(name) > 0;
+}
+
+void RecordingStoreHandlers::GetList(const httplib::Request&, httplib::Response& res)
+{
+	json list = json::array();
+	for (const auto& [name, entry] : RecordingStore::List()) {
+		json j;
+		j["name"]        = name;
+		j["event_count"] = entry.event_count;
+		j["duration_ms"] = entry.duration_ms;
+		j["truncated"]   = entry.truncated;
+		list.push_back(j);
+	}
+	json result;
+	result["recordings"] = list;
+	send_json(res, result);
+}
+
+void RecordingStoreHandlers::Delete(const httplib::Request& req,
+                                    httplib::Response& res)
+{
+	const auto& name = req.path_params.at("name");
+	if (!RecordingStore::Delete(name)) {
+		res.status = 404;
+		json err;
+		err["error"] = "No recording named '" + name + "'";
+		send_json(res, err);
+		return;
+	}
+	json j;
+	j["status"] = "deleted";
+	j["name"]   = name;
 	send_json(res, j);
 }
 

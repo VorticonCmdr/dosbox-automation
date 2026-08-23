@@ -445,6 +445,118 @@ def test_recording_round_trip(dosbox):
     assert data["duration_ms"] >= 0
 
 
+def test_recording_status_and_stop_report_truncated_field(dosbox):
+    dosbox.recording_start()
+    r = dosbox.recording_status()
+    assert r.json()["truncated"] is False
+
+    r = dosbox.recording_stop()
+    assert r.json()["truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# Named recording store
+# ---------------------------------------------------------------------------
+
+def test_named_recording_save_list_replay_delete(dosbox):
+    # API-injected keys aren't recorded (see test_recording_round_trip),
+    # so this exercises the store's plumbing - not that real captured
+    # events survive the round trip, which is covered by construction
+    # (the store only ever holds what StopRecordingCommand handed it).
+    dosbox.recording_start()
+    r = dosbox.recording_stop(name="it-named-1")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["name"] == "it-named-1"
+
+    r = dosbox.recordings_list()
+    assert r.status_code == 200
+    names = [rec["name"] for rec in r.json()["recordings"]]
+    assert "it-named-1" in names
+
+    r = dosbox.input_sequence_from_recording("it-named-1")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+    # Not consumed by replay - still there for a second replay.
+    r = dosbox.input_sequence_from_recording("it-named-1")
+    assert r.status_code == 200
+
+    r = dosbox.recording_delete("it-named-1")
+    assert r.status_code == 200
+    assert r.json()["status"] == "deleted"
+
+    r = dosbox.recording_delete("it-named-1")
+    assert r.status_code == 404
+
+
+def test_named_recording_replay_unknown_name_is_404(dosbox):
+    r = dosbox.input_sequence_from_recording("does-not-exist")
+    assert r.status_code == 404
+
+
+def test_named_recording_delete_unknown_name_is_404(dosbox):
+    r = dosbox.recording_delete("does-not-exist")
+    assert r.status_code == 404
+
+
+def test_input_sequence_rejects_events_and_recording_together(dosbox):
+    r = dosbox.input_sequence_raw(
+        json.dumps({"events": [], "recording": "whatever"}))
+    assert r.status_code == 400
+
+
+def test_recording_stop_invalid_name_leaves_recording_running(dosbox):
+    dosbox.recording_start()
+    try:
+        r = dosbox.recording_stop(name="bad name with spaces")
+        assert r.status_code == 400
+
+        r = dosbox.recording_status()
+        assert r.json()["recording"] is True
+    finally:
+        dosbox.recording_stop()
+
+
+def test_recording_stop_include_events_false_omits_events(dosbox):
+    dosbox.recording_start()
+    r = dosbox.recording_stop(include_events=False)
+    assert r.status_code == 200
+    assert "events" not in r.json()
+
+
+def test_named_recording_store_capacity_rejects_new_name_when_full(dosbox):
+    limits = dosbox.dosbox_info().json()["capabilities"]["input"]["limits"]
+    cap = limits["max_stored_recordings"]
+
+    names = []
+    try:
+        for i in range(cap):
+            name = f"it-cap-{i}"
+            dosbox.recording_start()
+            r = dosbox.recording_stop(name=name)
+            assert r.status_code == 200
+            names.append(name)
+
+        dosbox.recording_start()
+        r = dosbox.recording_stop(name="it-cap-overflow")
+        assert r.status_code == 503
+        assert r.json()["error_code"] == "registry_full"
+
+        # Recording must still be running - the refusal happens before
+        # the stop, not after losing the data.
+        assert dosbox.recording_status().json()["recording"] is True
+        dosbox.recording_stop()
+
+        # Overwriting an existing name is still allowed at capacity.
+        dosbox.recording_start()
+        r = dosbox.recording_stop(name=names[0])
+        assert r.status_code == 200
+    finally:
+        for name in names:
+            dosbox.recording_delete(name)
+
+
 # ---------------------------------------------------------------------------
 # Video frame capture
 # ---------------------------------------------------------------------------

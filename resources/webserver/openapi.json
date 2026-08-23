@@ -744,6 +744,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "404": {
+            "description": "No recording by that name (only when 'recording' was given)."
+          },
           "409": {
             "description": "A replay chain of the same kind (PIC-timed or frame-timed) is already in progress."
           },
@@ -800,7 +803,7 @@
         ],
         "summary": "Stop recording and return captured events",
         "operationId": "recordStop",
-        "description": "The returned events can be replayed via /api/v1/input/sequence.",
+        "description": "The returned events can be replayed via POST /input/sequence's 'events' array. Pass 'name' to also save the recording under that name for POST /input/sequence's 'recording' field - GET /input/recordings lists what's stored, DELETE /input/recordings/{name} removes one.",
         "responses": {
           "200": {
             "description": "Captured events.",
@@ -812,6 +815,8 @@
                 "example": {
                   "event_count": 42,
                   "duration_ms": 5234.5,
+                  "truncated": false,
+                  "name": "install-run-1",
                   "events": [
                     {
                       "t": 0.0,
@@ -829,8 +834,34 @@
           },
           "409": {
             "description": "Not recording."
+          },
+          "400": {
+            "description": "Invalid 'name' (see the parameter description)."
+          },
+          "503": {
+            "description": "Named recording store is full (error_code registry_full); delete one first."
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Save the recording under this name (<=64 chars, [A-Za-z0-9_-]) in the process-lifetime named recording store."
+          },
+          {
+            "name": "include_events",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only the literal value 'false' is special-cased and omits the 'events' array from the response body; any other value (or omitting the parameter) behaves the same as including it. Useful once the recording is also being saved by name, so the caller doesn't have to receive the full event list just to discard it."
+          }
+        ]
       }
     },
     "/api/v1/input/record/status": {
@@ -852,7 +883,8 @@
                   "recording": true,
                   "paused": false,
                   "event_count": 42,
-                  "duration_ms": 5234.5
+                  "duration_ms": 5234.5,
+                  "truncated": false
                 }
               }
             }
@@ -2565,6 +2597,87 @@
           }
         }
       }
+    },
+    "/api/v1/input/recordings": {
+      "get": {
+        "tags": [
+          "Recording"
+        ],
+        "summary": "List stored recordings",
+        "operationId": "listRecordings",
+        "description": "Metadata only, process-lifetime and in-memory - nothing here survives a restart. Use POST /input/sequence {\"recording\": \"<name>\"} to replay one.",
+        "responses": {
+          "200": {
+            "description": "Stored recordings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "recordings": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RecordingEntry"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "recordings": [
+                    {
+                      "name": "install-run-1",
+                      "event_count": 3120,
+                      "duration_ms": 45320.5,
+                      "truncated": false
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/input/recordings/{name}": {
+      "delete": {
+        "tags": [
+          "Recording"
+        ],
+        "summary": "Delete a stored recording",
+        "operationId": "deleteRecording",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "deleted",
+                  "name": "install-run-1"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "No recording by that name."
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2900,15 +3013,16 @@
       },
       "InputSequence": {
         "type": "object",
-        "required": [
-          "events"
-        ],
         "properties": {
           "events": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InputEvent"
             }
+          },
+          "recording": {
+            "type": "string",
+            "description": "Name of a stored recording (see GET /input/recordings) to replay instead of an inline 'events' array. Mutually exclusive with 'events' - provide exactly one."
           }
         }
       },
@@ -2920,6 +3034,14 @@
           },
           "duration_ms": {
             "type": "number"
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True if MaxInputEvents (32000) was hit during this recording and further events were dropped."
+          },
+          "name": {
+            "type": "string",
+            "description": "Present only if the stop request named this recording."
           },
           "events": {
             "type": "array",
@@ -2943,6 +3065,10 @@
           },
           "duration_ms": {
             "type": "number"
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True if MaxInputEvents was hit and further events are being dropped."
           }
         }
       },
@@ -3384,6 +3510,23 @@
           },
           "current_frame": {
             "type": "integer"
+          }
+        }
+      },
+      "RecordingEntry": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "event_count": {
+            "type": "integer"
+          },
+          "duration_ms": {
+            "type": "number"
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       }

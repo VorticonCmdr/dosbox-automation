@@ -130,6 +130,8 @@ json BuildCapabilitiesBlock()
 	input_limits["min_typing_cps"]            = MinTypingCps;
 	input_limits["max_typing_cps"]            = MaxTypingCps;
 	input_limits["replay_stall_threshold_ms"] = ReplayStallThresholdMs;
+	input_limits["max_recording_name_length"] = MaxRecordingNameLength;
+	input_limits["max_stored_recordings"]     = MaxStoredRecordings;
 
 	json cpu_control_limits;
 	cpu_control_limits["cycles_min"] = CpuCyclesMin;

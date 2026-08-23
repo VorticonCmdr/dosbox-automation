@@ -254,6 +254,9 @@ static void setup_api_handlers()
 	server.Post("/api/v1/input/record/pause", RecordingHandlers::PostPause);
 	server.Post("/api/v1/input/record/stop", RecordingHandlers::PostStop);
 	server.Get("/api/v1/input/record/status", RecordingHandlers::GetStatus);
+	server.Get("/api/v1/input/recordings", RecordingStoreHandlers::GetList);
+	server.Delete("/api/v1/input/recordings/:name",
+	              RecordingStoreHandlers::Delete);
 
 	server.Post("/api/v1/script/load", Lua::LuaLoadCommand::Post);
 	server.Post("/api/v1/script/start", Lua::LuaStartCommand::Post);
