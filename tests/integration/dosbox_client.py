@@ -28,6 +28,9 @@ class DosboxClient:
     def _put(self, path: str, **kwargs) -> requests.Response:
         return self.session.put(self._url(path), timeout=self.timeout, **kwargs)
 
+    def _delete(self, path: str, **kwargs) -> requests.Response:
+        return self.session.delete(self._url(path), timeout=self.timeout, **kwargs)
+
     # --- Status & Info ---
 
     def status(self) -> requests.Response:
@@ -112,6 +115,12 @@ class DosboxClient:
                     events.append({"t": t + delay_ms / 2, "type": "key", "key": "KBD_leftshift", "pressed": False})
                 t += delay_ms
         return self.input_sequence(events)
+
+    def replay_status(self) -> requests.Response:
+        return self._get("/api/v1/input/replay/status")
+
+    def replay_cancel(self) -> requests.Response:
+        return self._delete("/api/v1/input/replay")
 
     # --- Recording ---
 

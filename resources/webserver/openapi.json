@@ -677,7 +677,7 @@
         ],
         "summary": "Inject a sequence of input events",
         "operationId": "postInputSequence",
-        "description": "Events with `t > 0` are scheduled via the PIC timer for cycle-accurate delivery. Returns 400 for unknown key names, event types, or button names.",
+        "description": "Returns immediately once the chain is armed (events_scheduled), before any of it has actually dispatched - use GET /input/replay/status to track progress, and DELETE /input/replay to cancel. Events with `t > 0` are scheduled via the PIC timer for cycle-accurate delivery; events carrying a `frame` field are scheduled against the frame counter instead. Returns 400 for unknown key names, event types, or button names, and 409 if a chain of the same kind (PIC-timed or frame-timed) is already running.",
         "requestBody": {
           "required": true,
           "content": {
@@ -743,6 +743,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "description": "A replay chain of the same kind (PIC-timed or frame-timed) is already in progress."
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -2494,6 +2497,74 @@
           }
         }
       }
+    },
+    "/api/v1/input/replay/status": {
+      "get": {
+        "tags": [
+          "Input"
+        ],
+        "summary": "Query replay progress",
+        "operationId": "getReplayStatus",
+        "description": "A finished, cancelled, or self-aborted chain keeps reporting its final total/dispatched/elapsed_ms/drift_ms rather than zeroing them out - checking status right after a replay ends is the normal sequence.",
+        "responses": {
+          "200": {
+            "description": "Replay state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayStatus"
+                },
+                "example": {
+                  "active": true,
+                  "engine": "pic",
+                  "total": 6,
+                  "dispatched": 2,
+                  "remaining": 4,
+                  "elapsed_ms": 317.76,
+                  "drift_ms": -0.12,
+                  "current_frame": 2741
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/input/replay": {
+      "delete": {
+        "tags": [
+          "Input"
+        ],
+        "summary": "Cancel an active replay",
+        "operationId": "deleteReplay",
+        "description": "Drains both the PIC-timed and frame-timed chains unconditionally, whichever (if either) is active. Safe to call when nothing is running - reports cancelled:false rather than erroring.",
+        "responses": {
+          "200": {
+            "description": "Cancelled (or nothing was running).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "cancelled": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "example": {
+                  "cancelled": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3275,6 +3346,44 @@
                 }
               }
             }
+          }
+        }
+      },
+      "ReplayStatus": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "engine": {
+            "type": "string",
+            "enum": [
+              "none",
+              "pic",
+              "frame",
+              "mixed"
+            ],
+            "description": "Which dispatch engine the reported numbers describe. \"mixed\" only happens if two separate POST calls armed one chain of each kind at once; \"none\" means no replay has run yet this session."
+          },
+          "total": {
+            "type": "integer"
+          },
+          "dispatched": {
+            "type": "integer"
+          },
+          "remaining": {
+            "type": "integer"
+          },
+          "elapsed_ms": {
+            "type": "number",
+            "description": "Wall-clock time since the chain started. Live while active; frozen at its final value once the chain finishes, is cancelled, or self-aborts (see capabilities.input.limits.replay_stall_threshold_ms)."
+          },
+          "drift_ms": {
+            "type": "number",
+            "description": "Wall-clock drift (actual minus expected) of the most recently dispatched event."
+          },
+          "current_frame": {
+            "type": "integer"
           }
         }
       }

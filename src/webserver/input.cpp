@@ -17,10 +17,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #include "libs/json/json.h"
 
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <unordered_map>
 
@@ -193,6 +195,20 @@ static size_t pending_dispatched  = 0;
 static double replay_start_pic_ms = 0;
 static std::chrono::steady_clock::time_point replay_start_wall;
 
+// Wall elapsed/drift as of the last dispatched event - kept after the
+// chain empties or self-aborts so a status check right after still
+// reports the finished run's numbers instead of zero. While the chain
+// is active, InputReplay::GetStatus() computes elapsed live instead
+// (more accurate between dispatches); drift only has meaning at a
+// dispatch, so it's always read from here.
+static double pending_elapsed_ms = 0;
+static double pending_drift_ms   = 0;
+
+// Set the first time the front event hits keyboard backpressure, reset
+// the moment it (or a different front event) doesn't. See
+// ReplayStallThresholdMs.
+static std::optional<std::chrono::steady_clock::time_point> pending_backpressure_since;
+
 static std::mutex frame_replay_mutex;
 static std::queue<InputEvent> frame_pending_events;
 static bool frame_replay_active        = false;
@@ -201,6 +217,31 @@ static size_t frame_pending_total      = 0;
 static size_t frame_pending_dispatched = 0;
 static std::chrono::steady_clock::time_point frame_replay_start_wall;
 static double frame_replay_first_t_ms = 0;
+
+static double frame_elapsed_ms = 0;
+static double frame_drift_ms   = 0;
+static std::optional<std::chrono::steady_clock::time_point> frame_backpressure_since;
+
+// Which engine most recently had *any* state-changing event - armed a
+// chain, dispatched, finished, stalled-out, or was cancelled - read
+// only once neither chain is active, to attribute a finished/aborted
+// run's stats to the right one instead of reporting all-zero, and to
+// prefer whichever engine's status is actually fresh over one that
+// happened to start first but already finished. Its own small mutex:
+// touched from both engines' code paths (each already under a
+// different lock) and from GetStatus(), so it can't safely piggyback
+// on pending_mutex or frame_replay_mutex without entangling their lock
+// ordering. Callers must already hold pending_mutex or
+// frame_replay_mutex before calling this - never the reverse - so
+// last_engine_mutex is always the innermost lock.
+static std::mutex last_engine_mutex;
+static std::string last_engine = "none";
+
+static void mark_last_engine(const char* engine)
+{
+	std::lock_guard<std::mutex> lock(last_engine_mutex);
+	last_engine = engine;
+}
 
 static constexpr double backpressure_retry_ms = 1.0;
 
@@ -217,9 +258,34 @@ static void pic_input_handler(uint32_t)
 	// slots. If there's no room, retry after a short delay instead
 	// of dispatching into the overflow latch.
 	if (ev.type == InputEvent::Type::Key && KEYBOARD_GetBufferFreeSlots() < 2) {
+		const auto now = std::chrono::steady_clock::now();
+		if (!pending_backpressure_since) {
+			pending_backpressure_since = now;
+		} else if (std::chrono::duration<double, std::milli>(
+		                   now - *pending_backpressure_since)
+		                   .count() >= ReplayStallThresholdMs) {
+			const auto dropped = pending_events.size();
+			std::queue<InputEvent>().swap(pending_events);
+			pending_backpressure_since.reset();
+			pending_elapsed_ms = std::chrono::duration<double, std::milli>(
+			                             now - replay_start_wall)
+			                             .count();
+			mark_last_engine("pic");
+			TITLEBAR_NotifyApiReplayStatus(false);
+			LOG_WARNING(
+			        "REPLAY (PIC): chain aborted, stuck %.0fms waiting "
+			        "for keyboard buffer space - %zu event(s) never "
+			        "dispatched (%zu/%zu total)",
+			        ReplayStallThresholdMs,
+			        dropped,
+			        pending_dispatched,
+			        pending_total);
+			return;
+		}
 		PIC_AddEvent(pic_input_handler, backpressure_retry_ms);
 		return;
 	}
+	pending_backpressure_since.reset();
 
 	auto dispatched_ev = ev;
 	pending_events.pop();
@@ -232,6 +298,9 @@ static void pic_input_handler(uint32_t)
 	                                  .count();
 	const double pic_drift  = pic_ms - dispatched_ev.t_ms;
 	const double wall_drift = wall_ms - dispatched_ev.t_ms;
+
+	pending_elapsed_ms = wall_ms;
+	pending_drift_ms   = wall_drift;
 
 	if (pending_dispatched % 100 == 0 || pending_dispatched == pending_total) {
 		LOG_MSG("REPLAY [%zu/%zu] t=%.1fms pic=%+.2fms wall=%+.2fms (pic-wall=%+.2fms)",
@@ -250,6 +319,7 @@ static void pic_input_handler(uint32_t)
 		const auto delay = std::max(next.t_ms - dispatched_ev.t_ms, 0.0);
 		PIC_AddEvent(pic_input_handler, delay);
 	} else {
+		mark_last_engine("pic");
 		TITLEBAR_NotifyApiReplayStatus(false);
 		LOG_MSG("REPLAY chain complete: %zu/%zu events dispatched, pic=%+.2fms wall=%+.2fms",
 		        pending_dispatched,
@@ -288,12 +358,18 @@ void InputSequenceCommand::ExecutePicBased()
 	}
 	pending_total      = pending_events.size();
 	pending_dispatched = 0;
+	// Otherwise a status query landing after arming but before the
+	// first dispatch would report a leftover drift figure from
+	// whatever chain last dispatched, misattributed to this new one.
+	pending_drift_ms = 0;
+	pending_backpressure_since.reset();
 	LOG_DEBUG("REPLAY (PIC) starting chain: %zu timed events", pending_total);
 	if (!pending_events.empty()) {
 		replay_start_pic_ms = PIC_FullIndex();
 		replay_start_wall   = std::chrono::steady_clock::now();
 		TITLEBAR_NotifyApiReplayStatus(true);
 		PIC_AddEvent(pic_input_handler, pending_events.front().t_ms);
+		mark_last_engine("pic");
 	}
 }
 
@@ -328,6 +404,8 @@ void InputSequenceCommand::ExecuteFrameBased()
 	}
 	frame_pending_total      = frame_pending_events.size();
 	frame_pending_dispatched = 0;
+	frame_drift_ms           = 0;
+	frame_backpressure_since.reset();
 
 	if (!frame_pending_events.empty()) {
 		frame_replay_start      = GFX_GetRenderedFrameCount();
@@ -340,6 +418,7 @@ void InputSequenceCommand::ExecuteFrameBased()
 		        frame_pending_total,
 		        static_cast<unsigned long long>(frame_base),
 		        t_base);
+		mark_last_engine("frame");
 	}
 }
 
@@ -877,6 +956,92 @@ void RecordingHandlers::GetStatus(const httplib::Request&, httplib::Response& re
 	send_json(res, j);
 }
 
+void ReplayHandlers::GetStatus(const httplib::Request&, httplib::Response& res)
+{
+	const auto status = InputReplay::GetStatus();
+
+	json j;
+	j["active"]        = status.active;
+	j["engine"]        = status.engine;
+	j["total"]         = status.total;
+	j["dispatched"]    = status.dispatched;
+	j["remaining"]     = status.total - status.dispatched;
+	j["elapsed_ms"]    = status.elapsed_ms;
+	j["drift_ms"]      = status.drift_ms;
+	j["current_frame"] = status.current_frame;
+	send_json(res, j);
+}
+
+void ReplayCancelCommand::Execute()
+{
+	{
+		std::lock_guard<std::mutex> lock(pending_mutex);
+		if (!pending_events.empty()) {
+			cancelled_pic = true;
+			std::queue<InputEvent>().swap(pending_events);
+			// Freeze elapsed_ms at the actual wall-clock duration
+			// up to this cancellation, not the time of the last
+			// dispatch - which would understate it by however long
+			// the chain had already been idly waiting for its next
+			// scheduled event.
+			pending_elapsed_ms = std::chrono::duration<double, std::milli>(
+			                             std::chrono::steady_clock::now() -
+			                             replay_start_wall)
+			                             .count();
+			mark_last_engine("pic");
+		}
+		pending_backpressure_since.reset();
+	}
+	// Cancels any still-scheduled pic_input_handler invocation (the
+	// delayed dispatch of the next event, or a pending backpressure
+	// retry). Safe to call unconditionally even if nothing was
+	// scheduled. Must run here, on the emulation thread - PIC_RemoveEvents
+	// walks the raw PIC event list with no locking of its own.
+	PIC_RemoveEvents(pic_input_handler);
+
+	{
+		std::lock_guard<std::mutex> lock(frame_replay_mutex);
+		if (frame_replay_active) {
+			cancelled_frame     = true;
+			frame_replay_active = false;
+			std::queue<InputEvent>().swap(frame_pending_events);
+			frame_elapsed_ms = std::chrono::duration<double, std::milli>(
+			                           std::chrono::steady_clock::now() -
+			                           frame_replay_start_wall)
+			                           .count();
+			mark_last_engine("frame");
+		}
+		frame_backpressure_since.reset();
+	}
+
+	if (cancelled_pic || cancelled_frame) {
+		TITLEBAR_NotifyApiReplayStatus(false);
+		OSD::OsdManager::Instance().SetIcon(OSD::IconId::ReplayActive, false);
+		LOG_MSG("REPLAY: cancelled by API (%s%s%s)",
+		        cancelled_pic ? "pic" : "",
+		        (cancelled_pic && cancelled_frame) ? "+" : "",
+		        cancelled_frame ? "frame" : "");
+	}
+}
+
+void ReplayCancelCommand::Delete(const httplib::Request&, httplib::Response& res)
+{
+	ReplayCancelCommand cmd;
+	cmd.WaitForCompletion(1000);
+
+	if (!cmd.error.empty()) {
+		res.status = 500;
+		json err;
+		err["error"] = cmd.error;
+		send_json(res, err);
+		return;
+	}
+
+	json j;
+	j["cancelled"] = cmd.cancelled_pic || cmd.cancelled_frame;
+	send_json(res, j);
+}
+
 bool InputReplay::IsActive()
 {
 	{
@@ -887,6 +1052,98 @@ bool InputReplay::IsActive()
 	}
 	std::lock_guard<std::mutex> lock(frame_replay_mutex);
 	return frame_replay_active;
+}
+
+ReplayStatus InputReplay::GetStatus()
+{
+	// Both locks held together for the whole snapshot below, not
+	// released between the two engines' reads: every mutator in this
+	// file only ever locks one of these two at a time (never both), so
+	// holding both here blocks every mutator out for the duration and
+	// makes the combined snapshot atomic. Without this, a chain could
+	// arm or finish in the gap between two separately-scoped locks,
+	// producing a combined result (e.g. active:false with a stale
+	// engine attribution) that was never true at any single instant.
+	std::lock_guard<std::mutex> pic_lock(pending_mutex);
+	std::lock_guard<std::mutex> frame_lock(frame_replay_mutex);
+
+	const bool pic_active       = !pending_events.empty();
+	const size_t pic_total      = pending_total;
+	const size_t pic_dispatched = pending_dispatched;
+	const double pic_drift_ms   = pending_drift_ms;
+	const double pic_elapsed_ms =
+	        pic_active ? std::chrono::duration<double, std::milli>(
+	                             std::chrono::steady_clock::now() - replay_start_wall)
+	                             .count()
+	                   : pending_elapsed_ms;
+
+	const bool fr_active       = frame_replay_active;
+	const size_t fr_total      = frame_pending_total;
+	const size_t fr_dispatched = frame_pending_dispatched;
+	const double fr_drift_ms   = frame_drift_ms;
+	const double fr_elapsed_ms = fr_active
+	                                   ? std::chrono::duration<double, std::milli>(
+	                                             std::chrono::steady_clock::now() -
+	                                             frame_replay_start_wall)
+	                                             .count()
+	                                   : frame_elapsed_ms;
+
+	ReplayStatus status;
+
+	if (pic_active && fr_active) {
+		// Two independent POST /input/sequence calls (one with frame
+		// data, one without) can each arm their own chain - each
+		// engine only checks its own state, not the other's. Merge
+		// rather than pick one arbitrarily, so an agent that manages
+		// to hit this edge case at least sees both chains' progress
+		// instead of one going silently unreported.
+		status.active     = true;
+		status.engine     = "mixed";
+		status.total      = pic_total + fr_total;
+		status.dispatched = pic_dispatched + fr_dispatched;
+		status.elapsed_ms = std::max(pic_elapsed_ms, fr_elapsed_ms);
+		// Whichever chain is further off schedule, not arbitrarily the
+		// PIC one - a caller checking drift wants the worse-behaving
+		// chain, same reasoning as elapsed_ms's max() above.
+		status.drift_ms = std::abs(pic_drift_ms) >= std::abs(fr_drift_ms)
+		                        ? pic_drift_ms
+		                        : fr_drift_ms;
+	} else if (pic_active) {
+		status.active     = true;
+		status.engine     = "pic";
+		status.total      = pic_total;
+		status.dispatched = pic_dispatched;
+		status.elapsed_ms = pic_elapsed_ms;
+		status.drift_ms   = pic_drift_ms;
+	} else if (fr_active) {
+		status.active     = true;
+		status.engine     = "frame";
+		status.total      = fr_total;
+		status.dispatched = fr_dispatched;
+		status.elapsed_ms = fr_elapsed_ms;
+		status.drift_ms   = fr_drift_ms;
+	} else {
+		// Neither chain is active: attribute to whichever one last
+		// ran, so a status check right after completion (or a stall
+		// abort) still reports the finished run's numbers instead of
+		// an all-zero result that looks like nothing ever happened.
+		std::lock_guard<std::mutex> lock(last_engine_mutex);
+		status.engine = last_engine;
+		if (last_engine == "frame") {
+			status.total      = fr_total;
+			status.dispatched = fr_dispatched;
+			status.elapsed_ms = fr_elapsed_ms;
+			status.drift_ms   = fr_drift_ms;
+		} else if (last_engine == "pic") {
+			status.total      = pic_total;
+			status.dispatched = pic_dispatched;
+			status.elapsed_ms = pic_elapsed_ms;
+			status.drift_ms   = pic_drift_ms;
+		}
+	}
+
+	status.current_frame = GFX_GetRenderedFrameCount();
+	return status;
 }
 
 void ReplayDispatchFrame(uint64_t current_frame)
@@ -900,6 +1157,7 @@ void ReplayDispatchFrame(uint64_t current_frame)
 	const auto relative_frame   = current_frame - frame_replay_start;
 	int dispatched_this_frame   = 0;
 	double last_dispatched_t_ms = 0;
+	bool stuck_on_backpressure  = false;
 
 	while (!frame_pending_events.empty() &&
 	       frame_pending_events.front().frame <= relative_frame &&
@@ -909,6 +1167,7 @@ void ReplayDispatchFrame(uint64_t current_frame)
 		// Hold key events until the keyboard buffer has room
 		if (ev.type == InputEvent::Type::Key &&
 		    KEYBOARD_GetBufferFreeSlots() < 2) {
+			stuck_on_backpressure = true;
 			break;
 		}
 
@@ -945,6 +1204,9 @@ void ReplayDispatchFrame(uint64_t current_frame)
 		                           frame_replay_first_t_ms;
 		const double wall_drift  = wall_ms - expected_ms;
 
+		frame_elapsed_ms = wall_ms;
+		frame_drift_ms   = wall_drift;
+
 		if (frame_pending_dispatched % 100 == 0 ||
 		    dispatched_this_frame >= 10) {
 			LOG_MSG("REPLAY frame %llu: %d events (%zu/%zu), "
@@ -956,6 +1218,49 @@ void ReplayDispatchFrame(uint64_t current_frame)
 			        wall_ms,
 			        expected_ms,
 			        wall_drift);
+		}
+	}
+
+	// dispatched_this_frame > 0 means the front event blocking now (if
+	// any) had genuine progress dispatch ahead of it, so it isn't the
+	// same stall a previous call may have started timing - start its
+	// clock fresh rather than inheriting an unrelated event's elapsed
+	// stuck time. Without this, a chain throttled to ~1 event per frame
+	// by keyboard backpressure - genuine, continuous progress - would
+	// look stuck on every single call (some events dispatch, then the
+	// next due one blocks) and self-abort after ReplayStallThresholdMs
+	// despite never actually being wedged.
+	if (dispatched_this_frame > 0) {
+		frame_backpressure_since.reset();
+	}
+
+	if (stuck_on_backpressure) {
+		const auto now = std::chrono::steady_clock::now();
+		if (!frame_backpressure_since) {
+			frame_backpressure_since = now;
+		} else if (std::chrono::duration<double, std::milli>(
+		                   now - *frame_backpressure_since)
+		                   .count() >= ReplayStallThresholdMs) {
+			const auto dropped = frame_pending_events.size();
+			std::queue<InputEvent>().swap(frame_pending_events);
+			frame_replay_active = false;
+			frame_backpressure_since.reset();
+			frame_elapsed_ms = std::chrono::duration<double, std::milli>(
+			                           now - frame_replay_start_wall)
+			                           .count();
+			mark_last_engine("frame");
+			TITLEBAR_NotifyApiReplayStatus(false);
+			OSD::OsdManager::Instance().SetIcon(OSD::IconId::ReplayActive,
+			                                    false);
+			LOG_WARNING(
+			        "REPLAY (frame): chain aborted, stuck %.0fms "
+			        "waiting for keyboard buffer space - %zu event(s) "
+			        "never dispatched (%zu/%zu total)",
+			        ReplayStallThresholdMs,
+			        dropped,
+			        frame_pending_dispatched,
+			        frame_pending_total);
+			return;
 		}
 	}
 
@@ -975,6 +1280,9 @@ void ReplayDispatchFrame(uint64_t current_frame)
 		const double expected_ms = last_dispatched_t_ms -
 		                           frame_replay_first_t_ms;
 		const double wall_drift  = wall_ms - expected_ms;
+		frame_elapsed_ms         = wall_ms;
+		frame_drift_ms           = wall_drift;
+		mark_last_engine("frame");
 		LOG_MSG("REPLAY (frame) complete: %zu/%zu events, %llu frames, "
 		        "wall=%.1fms expected=%.1fms drift=%+.1fms",
 		        frame_pending_dispatched,

@@ -256,6 +256,107 @@ def test_input_negative_delay_rejected(dosbox):
 
 
 # ---------------------------------------------------------------------------
+# Replay status and cancel
+# ---------------------------------------------------------------------------
+
+def test_replay_status_when_idle(dosbox):
+    dosbox.replay_cancel()  # in case an earlier test in this module left one running
+    r = dosbox.replay_status()
+    assert r.status_code == 200
+    data = r.json()
+    assert data["active"] is False
+    assert data["total"] == 0
+    assert data["dispatched"] == 0
+    assert data["remaining"] == 0
+    assert "current_frame" in data
+
+
+def test_replay_status_reports_progress_for_pic_sequence(dosbox):
+    # Two events a second apart (no 'frame' field -> PIC-timed engine),
+    # so there's a real window to observe mid-flight progress in.
+    r = dosbox.input_sequence([
+        {"type": "key", "key": "KBD_a", "pressed": True, "delay_ms": 0},
+        {"type": "key", "key": "KBD_a", "pressed": False, "delay_ms": 1000},
+    ])
+    assert r.status_code == 200
+
+    time.sleep(0.2)
+    r = dosbox.replay_status()
+    assert r.status_code == 200
+    data = r.json()
+    assert data["active"] is True
+    assert data["engine"] == "pic"
+    assert data["total"] == 2
+    assert data["dispatched"] == 1
+    assert data["remaining"] == 1
+    assert data["elapsed_ms"] > 0
+
+    # Let it finish, then confirm the finished run's numbers are
+    # retained (not zeroed) and frozen (not still climbing).
+    time.sleep(1.2)
+    r = dosbox.replay_status()
+    data = r.json()
+    assert data["active"] is False
+    assert data["dispatched"] == 2
+    assert data["total"] == 2
+    frozen_elapsed = data["elapsed_ms"]
+
+    time.sleep(0.3)
+    r = dosbox.replay_status()
+    assert r.json()["elapsed_ms"] == frozen_elapsed
+
+
+def test_replay_status_reports_progress_for_frame_sequence(dosbox):
+    # A 'frame' field on any event routes the whole sequence through the
+    # frame-timed engine instead of the PIC-timed one.
+    r = dosbox.input_sequence([
+        {"type": "key", "key": "KBD_b", "pressed": True, "frame": 0, "t": 0},
+        {"type": "key", "key": "KBD_b", "pressed": False, "frame": 200, "t": 3000},
+    ])
+    assert r.status_code == 200
+
+    time.sleep(0.1)
+    r = dosbox.replay_status()
+    data = r.json()
+    assert data["active"] is True
+    assert data["engine"] == "frame"
+
+    dosbox.replay_cancel()
+
+
+def test_replay_cancel_stops_a_running_sequence(dosbox):
+    r = dosbox.input_sequence([
+        {"type": "key", "key": "KBD_c", "pressed": True, "delay_ms": 0},
+        {"type": "key", "key": "KBD_c", "pressed": False, "delay_ms": 5000},
+    ])
+    assert r.status_code == 200
+    time.sleep(0.1)
+
+    r = dosbox.replay_cancel()
+    assert r.status_code == 200
+    assert r.json()["cancelled"] is True
+
+    r = dosbox.replay_status()
+    data = r.json()
+    assert data["active"] is False
+    assert data["dispatched"] < data["total"]
+
+    # The queue was actually drained, not just marked inactive - a new
+    # sequence must be free to start right away rather than 409ing.
+    r = dosbox.input_sequence([
+        {"type": "key", "key": "KBD_c", "pressed": True},
+        {"type": "key", "key": "KBD_c", "pressed": False},
+    ])
+    assert r.status_code == 200
+
+
+def test_replay_cancel_when_nothing_active(dosbox):
+    r = dosbox.replay_cancel()
+    assert r.status_code == 200
+    assert r.json()["cancelled"] is False
+
+
+# ---------------------------------------------------------------------------
 # Recording lifecycle
 # ---------------------------------------------------------------------------
 

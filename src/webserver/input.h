@@ -69,6 +69,19 @@ inline constexpr double MaxTypingCps = 1000.0;
 inline constexpr size_t MaxInputEvents    = 32000;
 inline constexpr size_t MaxTypedTextChars = 4096;
 
+// A key event that can't dispatch (keyboard buffer full) retries every
+// backpressure_retry_ms (PIC engine) or every frame (frame engine)
+// indefinitely - correct for a guest that's briefly slow to drain its
+// buffer, but a guest that never will (hung, crashed, or never reading
+// input) would otherwise wedge the chain forever and leave every later
+// POST /input/sequence refused with 409. Once the *same* front event has
+// been stuck this long, the chain self-aborts rather than waiting
+// indefinitely. Deliberately not tied to "time since the last dispatch"
+// in general: a legitimate sequence can have long, intentional gaps
+// between events (e.g. a 10s wait for a menu to load), and those must
+// never be mistaken for a stall.
+inline constexpr double ReplayStallThresholdMs = 5000.0;
+
 // Bounds for an event's position on the replay timeline and a
 // frame-relative event's target frame. PIC_AddEvent (hardware/pic.h)
 // turns an event's time into CPU cycles and asserts the result fits an
@@ -164,12 +177,57 @@ struct RecordingHandlers {
 
 void ReplayDispatchFrame(uint64_t current_frame);
 
+// Snapshot for GET /api/v1/input/replay/status. `engine` is "pic",
+// "frame", "mixed" (both chains happen to be active at once - two
+// separate POST /input/sequence calls, one with frame data and one
+// without, can each start their own chain independently; rare, but not
+// prevented), or "none" (no replay has run yet this session). A
+// finished or self-aborted chain keeps reporting its final
+// total/dispatched/elapsed_ms/drift_ms rather than zeroing them out -
+// checking status right after a replay ends (or a stall aborts it) is
+// the normal sequence.
+struct ReplayStatus {
+	bool active            = false;
+	std::string engine     = "none";
+	size_t total           = 0;
+	size_t dispatched      = 0;
+	double elapsed_ms      = 0;
+	double drift_ms        = 0;
+	uint64_t current_frame = 0;
+};
+
 namespace InputReplay {
 // True while either the PIC-timed or frame-timed replay chain still has
 // events left to dispatch. Safe to call from any thread - locks the
 // same mutexes the dispatch paths already use.
 bool IsActive();
+
+// Safe to call from any thread, same as IsActive() - reads emulation
+// state through the same mutexes the dispatch paths use, the same
+// precedent GET /api/v1/status already sets for GFX_GetRenderedFrameCount:
+// a Bridge Command here would block or time out in exactly the stalled
+// case this is meant to report.
+ReplayStatus GetStatus();
 } // namespace InputReplay
+
+// DELETE /api/v1/input/replay: drain both chains, cancel any pending PIC
+// event for the PIC-timed one (PIC_RemoveEvents must run on the
+// emulation thread - pic_input_handler already takes pending_mutex
+// there, so this is not a new lock-ordering risk), and clear the
+// titlebar/OSD replay flags regardless of which chain (if either) was
+// actually active.
+class ReplayCancelCommand : public Command {
+public:
+	void Execute() override;
+	static void Delete(const httplib::Request& req, httplib::Response& res);
+
+	bool cancelled_pic   = false;
+	bool cancelled_frame = false;
+};
+
+struct ReplayHandlers {
+	static void GetStatus(const httplib::Request&, httplib::Response& res);
+};
 
 } // namespace Webserver
 

@@ -123,12 +123,13 @@ json BuildCapabilitiesBlock()
 	memory_limits["max_dos_allocations"] = AllocationRegistry::MaxEntries;
 
 	json input_limits;
-	input_limits["max_events"]           = MaxInputEvents;
-	input_limits["max_typed_text_chars"] = MaxTypedTextChars;
-	input_limits["max_event_time_ms"]    = MaxEventTimeMs;
-	input_limits["max_event_frame"]      = MaxEventFrame;
-	input_limits["min_typing_cps"]       = MinTypingCps;
-	input_limits["max_typing_cps"]       = MaxTypingCps;
+	input_limits["max_events"]                = MaxInputEvents;
+	input_limits["max_typed_text_chars"]      = MaxTypedTextChars;
+	input_limits["max_event_time_ms"]         = MaxEventTimeMs;
+	input_limits["max_event_frame"]           = MaxEventFrame;
+	input_limits["min_typing_cps"]            = MinTypingCps;
+	input_limits["max_typing_cps"]            = MaxTypingCps;
+	input_limits["replay_stall_threshold_ms"] = ReplayStallThresholdMs;
 
 	json cpu_control_limits;
 	cpu_control_limits["cycles_min"] = CpuCyclesMin;
