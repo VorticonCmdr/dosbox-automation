@@ -6,6 +6,7 @@
 #include "bridge.h"
 #include "webserver.h"
 
+#include <algorithm>
 #include <limits>
 #include <mutex>
 
@@ -49,6 +50,11 @@ std::vector<McbBlock> WalkMcbChain(const uint16_t start_segment,
 	return chain;
 }
 
+bool McbChainTruncated(const std::vector<McbBlock>& chain)
+{
+	return chain.empty() || !chain.back().is_last;
+}
+
 static McbBlock ReadMcbFromGuest(const uint16_t segment)
 {
 	DOS_MCB mcb(segment);
@@ -71,6 +77,7 @@ void DosInternalsCommand::Execute()
 	first_shell        = PhysicalMake(DOS_FIRST_SHELL, 0);
 
 	memory_map = WalkMcbChain(dos.firstMCB, ReadMcbFromGuest, 1000);
+	memory_map_truncated = McbChainTruncated(memory_map);
 
 	LOG_DEBUG("API: DosInternalsCommand()");
 }
@@ -97,9 +104,20 @@ void DosInternalsCommand::Get(const httplib::Request&, httplib::Response& res)
 		entry["isLast"]     = b.is_last;
 		map.push_back(entry);
 	}
-	j["memoryMap"] = map;
+	j["memoryMap"]          = map;
+	j["memoryMapTruncated"] = cmd.memory_map_truncated;
 
 	send_json(res, j);
+}
+
+std::string_view AreaName(const MemoryArea area)
+{
+	switch (area) {
+	case MemoryArea::Conv: return "CONV";
+	case MemoryArea::Uma: return "UMA";
+	case MemoryArea::Xms: return "XMS";
+	}
+	return "UNKNOWN";
 }
 
 AllocationRegistry& AllocationRegistry::Instance()
@@ -114,16 +132,34 @@ bool AllocationRegistry::IsFull() const
 	return live_addrs.size() >= MaxEntries;
 }
 
-void AllocationRegistry::Add(const uint32_t addr)
+void AllocationRegistry::Add(const uint32_t addr, const uint32_t size,
+                             const MemoryArea area, const uint16_t owner_psp)
 {
 	std::lock_guard<std::mutex> lock(mtx);
-	live_addrs.insert(addr);
+	live_addrs[addr] = AllocationInfo{size, area, owner_psp};
 }
 
-bool AllocationRegistry::Remove(const uint32_t addr)
+std::optional<AllocationInfo> AllocationRegistry::Remove(const uint32_t addr)
 {
 	std::lock_guard<std::mutex> lock(mtx);
-	return live_addrs.erase(addr) > 0;
+	auto it = live_addrs.find(addr);
+	if (it == live_addrs.end()) {
+		return std::nullopt;
+	}
+	auto info = it->second;
+	live_addrs.erase(it);
+	return info;
+}
+
+std::vector<std::pair<uint32_t, AllocationInfo>> AllocationRegistry::List() const
+{
+	std::lock_guard<std::mutex> lock(mtx);
+	std::vector<std::pair<uint32_t, AllocationInfo>> result(live_addrs.begin(),
+	                                                        live_addrs.end());
+	std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+		return a.first < b.first;
+	});
+	return result;
 }
 
 void AllocMemoryCommand::AllocDos()
@@ -185,6 +221,8 @@ void AllocMemoryCommand::AllocDos()
 	} else if (blocks * DosBlockSize < bytes) {
 		DOS_FreeMemory(segment);
 		addr = 0;
+	} else {
+		allocated_bytes = static_cast<uint32_t>(blocks) * DosBlockSize;
 	}
 }
 
@@ -194,7 +232,8 @@ void AllocMemoryCommand::AllocXms()
 	auto handle    = MEM_AllocatePages(num_pages, true);
 
 	// Returns 0 on error or out of memory, nullptr is handled as error below.
-	addr = handle * MEM_PAGE_SIZE;
+	addr            = handle * MEM_PAGE_SIZE;
+	allocated_bytes = static_cast<uint32_t>(num_pages) * MEM_PAGE_SIZE;
 	LOG_DEBUG("API: AllocMemoryCommand(%d), handle=%d: %d bytes at %p (XMS/page allocator)",
 	          bytes,
 	          handle,
@@ -207,7 +246,8 @@ void AllocMemoryCommand::Execute()
 	if (AllocationRegistry::Instance().IsFull()) {
 		// Refuse rather than mint an address the registry cannot
 		// track: FreeMemoryCommand would never be able to free it.
-		addr = 0;
+		addr          = 0;
+		registry_full = true;
 		return;
 	}
 
@@ -218,7 +258,14 @@ void AllocMemoryCommand::Execute()
 	}
 
 	if (addr) {
-		AllocationRegistry::Instance().Add(addr);
+		// dos.psp() is stable to read here: AllocDos/AllocXms never
+		// change it, they only read it (AllocDos indirectly, inside
+		// DOS_AllocateMemory). Meaningless for Xms - MEM_AllocatePages
+		// has no concept of a PSP owner - so left at its default (0)
+		// there; FreeMemoryCommand only consults it for Conv/Uma.
+		const uint16_t owner_psp = (area == MemoryArea::Xms) ? 0
+		                                                     : dos.psp();
+		AllocationRegistry::Instance().Add(addr, allocated_bytes, area, owner_psp);
 	}
 }
 
@@ -296,18 +343,56 @@ void AllocMemoryCommand::Post(const httplib::Request& req, httplib::Response& re
 		send_json(res, j);
 	} else {
 		res.status = httplib::StatusCode::ServiceUnavailable_503;
+		json err;
+		// Structured error_code/retryable alongside the message,
+		// matching the shape the centralized exception handler gives
+		// every other route (webserver.cpp's send_error) - this path
+		// can't reuse that helper directly (it's file-local there), but
+		// dosbox-mcp's DosboxClient._handle() depends on both fields
+		// being present to tell this failure's two causes apart
+		// programmatically, not just in the free-text message. Neither
+		// cause clears on its own, so retryable stays false for both -
+		// a caller must free something (registry_full) or free up guest
+		// memory (insufficient_memory) before retrying, not just wait.
+		if (cmd.registry_full) {
+			err["error"] = "allocation registry is full (" +
+			               std::to_string(AllocationRegistry::MaxEntries) +
+			               " live entries) - free some allocations first";
+			err["error_code"] = "registry_full";
+		} else {
+			err["error"] = "insufficient free memory for this allocation";
+			err["error_code"] = "insufficient_memory";
+		}
+		err["retryable"] = false;
+		send_json(res, err);
 	}
 }
 
 void FreeMemoryCommand::Execute()
 {
-	if (!AllocationRegistry::Instance().Remove(addr)) {
+	const auto removed = AllocationRegistry::Instance().Remove(addr);
+	if (!removed) {
 		// Never allocated through this API (or already freed): never
 		// reach DOS_FreeMemory/MEM_ReleasePages with an address the
 		// API did not mint, whether that address is simply wrong,
 		// out of range, or a double free.
 		success = false;
 		return;
+	}
+
+	if (removed->area != MemoryArea::Xms) {
+		// DOS_FreeMemory's own segment-to-MCB relationship
+		// (dos_memory.cpp): the MCB header sits one paragraph before
+		// the data segment it returned. Re-read who currently owns it
+		// - see AllocationInfo::owner_psp for why this can have
+		// changed since allocation without this registry ever
+		// hearing about it.
+		const DOS_MCB mcb(static_cast<uint16_t>(addr / DosBlockSize) - 1);
+		if (mcb.GetPSPSeg() != removed->owner_psp) {
+			owner_changed = true;
+			success       = false;
+			return;
+		}
 	}
 
 	if (addr < XMS_START * MEM_PAGE_SIZE) {
@@ -338,7 +423,101 @@ void FreeMemoryCommand::Post(const httplib::Request& req, httplib::Response& res
 
 	if (!cmd.success) {
 		res.status = httplib::StatusCode::BadRequest_400;
+		json err;
+		// See AllocMemoryCommand::Post's identical comment on why
+		// error_code/retryable are added by hand here rather than via
+		// the (file-local) send_error helper.
+		if (cmd.owner_changed) {
+			err["error"] =
+			        "addr's owner has changed since it was allocated - "
+			        "the program it belonged to has likely exited and "
+			        "DOS has since reused this memory for a different, "
+			        "currently-running program; freeing it now would "
+			        "corrupt that program's memory, so this has been "
+			        "refused";
+			err["error_code"] = "owner_changed";
+		} else {
+			err["error"] =
+			        "addr was not allocated through this API, was "
+			        "already freed, or the engine could not free it";
+			err["error_code"] = "not_allocated";
+		}
+		err["retryable"] = false;
+		send_json(res, err);
 	}
+}
+
+void MemoryAllocationsCommand::Execute()
+{
+	allocations = AllocationRegistry::Instance().List();
+
+	const auto conv_chain = WalkMcbChain(dos.firstMCB, ReadMcbFromGuest, 1000);
+	conventional_truncated = McbChainTruncated(conv_chain);
+	for (const auto& block : conv_chain) {
+		if (block.psp_segment == MCB_FREE) {
+			const auto free_bytes = static_cast<uint32_t>(block.size_paras) *
+			                        DosBlockSize;
+			conventional_free_bytes += free_bytes;
+			conventional_largest_block_bytes = std::max(
+			        conventional_largest_block_bytes, free_bytes);
+		}
+	}
+
+	// GetStartOfUMBChain() reads UmbStartSegment when a UMB chain is
+	// linked, or 0xffff when it isn't - nothing in the engine ever
+	// writes a third value there, so require exact equality rather than
+	// just "not 0xffff", matching DOS_AllocateMemory/
+	// DOS_FreeProcessMemory/DOS_LinkUMBsToMemChain's own identical
+	// check (dos_memory.cpp). A guest-corrupted or client-mem_write'd
+	// value would otherwise pass WalkMcbChain a segment that is not a
+	// real chain at all - WalkMcbChain can't tell a coincidentally
+	// type-byte-matching garbage read from a genuine MCB, so it would
+	// silently fold fabricated bytes into umb_free_bytes rather than
+	// failing safe.
+	if (const uint16_t umb_start = dos_infoblock.GetStartOfUMBChain();
+	    umb_start == UmbStartSegment) {
+		const auto umb_chain = WalkMcbChain(umb_start, ReadMcbFromGuest, 1000);
+		umb_truncated = McbChainTruncated(umb_chain);
+		for (const auto& block : umb_chain) {
+			if (block.psp_segment == MCB_FREE) {
+				const auto free_bytes = static_cast<uint32_t>(
+				                                block.size_paras) *
+				                        DosBlockSize;
+				umb_free_bytes += free_bytes;
+			}
+		}
+	}
+
+	xms_free_bytes = MEM_FreeTotal() * MEM_PAGE_SIZE;
+
+	LOG_DEBUG("API: MemoryAllocationsCommand(): %zu live allocations",
+	          allocations.size());
+}
+
+void MemoryAllocationsCommand::Get(const httplib::Request&, httplib::Response& res)
+{
+	MemoryAllocationsCommand cmd;
+	cmd.WaitForCompletion();
+
+	json list = json::array();
+	for (const auto& [addr, info] : cmd.allocations) {
+		json entry;
+		entry["addr"] = addr;
+		entry["size"] = info.size;
+		entry["area"] = std::string(AreaName(info.area));
+		list.push_back(entry);
+	}
+
+	json j;
+	j["allocations"]           = list;
+	j["conventionalFreeBytes"] = cmd.conventional_free_bytes;
+	j["conventionalLargestBlockBytes"] = cmd.conventional_largest_block_bytes;
+	j["conventionalTruncated"] = cmd.conventional_truncated;
+	j["umbFreeBytes"]          = cmd.umb_free_bytes;
+	j["umbTruncated"]          = cmd.umb_truncated;
+	j["xmsFreeBytes"]          = cmd.xms_free_bytes;
+
+	send_json(res, j);
 }
 
 } // namespace Webserver

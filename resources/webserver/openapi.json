@@ -291,6 +291,10 @@
                       "items": {
                         "$ref": "#/components/schemas/McbBlock"
                       }
+                    },
+                    "memoryMapTruncated": {
+                      "type": "boolean",
+                      "description": "True if the chain walk stopped before a proper terminating block - either a hard cap of 1000 blocks was hit, or an invalid MCB type byte aborted it early. When true, memoryMap does not cover the whole chain."
                     }
                   }
                 },
@@ -308,7 +312,8 @@
                       "filename": "COMMAND",
                       "isLast": false
                     }
-                  ]
+                  ],
+                  "memoryMapTruncated": false
                 }
               }
             }
@@ -362,7 +367,14 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "503": {
-            "description": "Allocation failed."
+            "description": "Allocation failed - either no free block was large enough, or the allocation registry (mem_allocations) is already at its entry cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -402,6 +414,46 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/allocations": {
+      "get": {
+        "tags": [
+          "Memory"
+        ],
+        "summary": "Live allocations and free-memory totals",
+        "operationId": "getMemoryAllocations",
+        "description": "Lists every allocation memory/allocate has made and not yet freed, plus free-memory totals for conventional, UMB, and XMS. Not part of dos/internals, which exists only to hand out pointers.",
+        "responses": {
+          "200": {
+            "description": "Allocations and free-memory totals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryAllocations"
+                },
+                "example": {
+                  "allocations": [
+                    {
+                      "addr": 1048576,
+                      "size": 4096,
+                      "area": "CONV"
+                    }
+                  ],
+                  "conventionalFreeBytes": 634880,
+                  "conventionalLargestBlockBytes": 634880,
+                  "conventionalTruncated": false,
+                  "umbFreeBytes": 0,
+                  "umbTruncated": false,
+                  "xmsFreeBytes": 66060288
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -2410,14 +2462,12 @@
       "MemoryAllocate": {
         "type": "object",
         "required": [
-          "size",
-          "area",
-          "strategy"
+          "size"
         ],
         "properties": {
           "size": {
             "type": "integer",
-            "description": "Bytes to allocate."
+            "description": "Bytes to allocate (1-65535)."
           },
           "area": {
             "type": "string",
@@ -2425,7 +2475,8 @@
               "CONV",
               "UMA",
               "XMS"
-            ]
+            ],
+            "description": "Defaults to CONV if omitted."
           },
           "strategy": {
             "type": "string",
@@ -2434,7 +2485,61 @@
               "FIRST_FIT",
               "LAST_FIT"
             ],
-            "description": "The XMS allocator only supports BEST_FIT."
+            "description": "Defaults to BEST_FIT if omitted. The XMS allocator only supports BEST_FIT."
+          }
+        }
+      },
+      "MemoryAllocations": {
+        "type": "object",
+        "description": "Free-memory totals plus every allocation this API has made and not yet freed.",
+        "properties": {
+          "allocations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "addr": {
+                  "type": "integer",
+                  "description": "Physical address, as returned by memory/allocate."
+                },
+                "size": {
+                  "type": "integer",
+                  "description": "Bytes actually reserved (paragraph/page-rounded), not necessarily the exact size requested."
+                },
+                "area": {
+                  "type": "string",
+                  "enum": [
+                    "CONV",
+                    "UMA",
+                    "XMS"
+                  ]
+                }
+              }
+            }
+          },
+          "conventionalFreeBytes": {
+            "type": "integer",
+            "description": "Total free conventional memory, summed across every free MCB block."
+          },
+          "conventionalLargestBlockBytes": {
+            "type": "integer",
+            "description": "The single largest free conventional block - what actually bounds the next allocation, since a request larger than this fails even if conventionalFreeBytes is bigger."
+          },
+          "conventionalTruncated": {
+            "type": "boolean",
+            "description": "True if the conventional MCB chain walk was cut short (cap or corrupt chain) - the free-byte totals above may then be an undercount."
+          },
+          "umbFreeBytes": {
+            "type": "integer",
+            "description": "Total free upper memory block space, 0 if no UMB chain is linked."
+          },
+          "umbTruncated": {
+            "type": "boolean",
+            "description": "Same meaning as conventionalTruncated, for the UMB chain walk."
+          },
+          "xmsFreeBytes": {
+            "type": "integer",
+            "description": "Free space in the page allocator pool the XMS area allocates from."
           }
         }
       },

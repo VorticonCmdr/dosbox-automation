@@ -192,6 +192,7 @@ static void setup_api_handlers()
 
 	server.Post("/api/v1/memory/allocate", AllocMemoryCommand::Post);
 	server.Post("/api/v1/memory/free", FreeMemoryCommand::Post);
+	server.Get("/api/v1/memory/allocations", MemoryAllocationsCommand::Get);
 	server.Post("/api/v1/memory/search", SearchMemoryCommand::Post);
 	server.Post("/api/v1/memory/scan", ScanMemoryCommand::Post);
 	server.Post("/api/v1/memory/snapshot", MemorySnapshotHandlers::Post);

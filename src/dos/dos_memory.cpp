@@ -18,9 +18,6 @@ enum class McbFaultStrategy { Deny, Repair, Report, Allow };
 constexpr uint8_t middle_mcb_type = 0x4d; // 'M', middle or member of a MCB chain
 constexpr uint8_t ending_mcb_type = 0x5a; // 'Z', last entry of the MCB chain
 
-// Upper member block starting segment
-constexpr uint16_t umb_start_seg = 0x9fff;
-
 static uint16_t allocation_strategy = 0x00;
 
 static auto mcb_fault_strategy = McbFaultStrategy::Repair;
@@ -121,7 +118,7 @@ void DOS_FreeProcessMemory(uint16_t pspseg) {
 	}
 
 	uint16_t umb_start=dos_infoblock.GetStartOfUMBChain();
-	if (umb_start == umb_start_seg) {
+	if (umb_start == UmbStartSegment) {
 		DOS_MCB umb_mcb(umb_start);
 
 		faults = 0;
@@ -136,8 +133,9 @@ void DOS_FreeProcessMemory(uint16_t pspseg) {
 			umb_start += umb_mcb.GetSize() + 1;
 			umb_mcb.SetPt(umb_start);
 		}
-	} else if (umb_start != 0xffff)
+	} else if (umb_start != 0xffff) {
 		LOG(LOG_DOSMISC, LOG_ERROR)("Corrupt UMB chain: %x", umb_start);
+	}
 
 	DOS_CompressMemory();
 }
@@ -164,11 +162,12 @@ bool DOS_AllocateMemory(uint16_t * segment,uint16_t * blocks) {
 	uint16_t mcb_segment=dos.firstMCB;
 
 	uint16_t umb_start=dos_infoblock.GetStartOfUMBChain();
-	if (umb_start == umb_start_seg) {
+	if (umb_start == UmbStartSegment) {
 		/* start with UMBs if requested (bits 7 or 6 set) */
 		if (mem_strat&0xc0) mcb_segment=umb_start;
-	} else if (umb_start != 0xffff)
+	} else if (umb_start != 0xffff) {
 		LOG(LOG_DOSMISC, LOG_ERROR)("Corrupt UMB chain: %x", umb_start);
+	}
 
 	DOS_MCB mcb(0);
 	DOS_MCB mcb_next(0);
@@ -223,7 +222,7 @@ bool DOS_AllocateMemory(uint16_t * segment,uint16_t * blocks) {
 		}
 		/* Onward to the next MCB if there is one */
 		if (mcb.GetType() == ending_mcb_type) {
-			if ((mem_strat & 0x80) && (umb_start == umb_start_seg)) {
+			if ((mem_strat & 0x80) && (umb_start == UmbStartSegment)) {
 				/* bit 7 set: try high memory first, then low */
 				mcb_segment=dos.firstMCB;
 				mem_strat&=(~0xc0);
@@ -386,7 +385,7 @@ void DOS_BuildUMBChain(bool umb_active, bool ems_active)
 		uint16_t first_umb_size = 0x2000;
 		if(ems_active) first_umb_size = 0x1000;
 
-		dos_infoblock.SetStartOfUMBChain(umb_start_seg);
+		dos_infoblock.SetStartOfUMBChain(UmbStartSegment);
 		dos_infoblock.SetUMBChainState(0);		// UMBs not linked yet
 
 		DOS_MCB umb_mcb(first_umb_seg);
@@ -420,7 +419,7 @@ void DOS_BuildUMBChain(bool umb_active, bool ems_active)
 bool DOS_LinkUMBsToMemChain(uint16_t linkstate) {
 	/* Get start of UMB-chain */
 	uint16_t umb_start=dos_infoblock.GetStartOfUMBChain();
-	if (umb_start != umb_start_seg) {
+	if (umb_start != UmbStartSegment) {
 		if (umb_start!=0xffff) LOG(LOG_DOSMISC,LOG_ERROR)("Corrupt UMB chain: %x",umb_start);
 		return false;
 	}
@@ -535,7 +534,9 @@ void DOS_SetupMemory(void) {
 
 			// The size from the MCB entry itself must be subtracted from the total size.
 			const auto reserved_size = application_segment - pcjr_start - mcb_entry_size;
-			constexpr auto application_size = umb_start_seg - application_segment - mcb_entry_size;
+			constexpr auto application_size = UmbStartSegment -
+			                                  application_segment -
+			                                  mcb_entry_size;
 
 			DOS_MCB reserved(pcjr_start);
 			reserved.SetPSPSeg(MCB_DOS);

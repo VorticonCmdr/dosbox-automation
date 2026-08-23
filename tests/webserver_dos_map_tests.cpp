@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 using Webserver::McbBlock;
+using Webserver::McbChainTruncated;
 using Webserver::WalkMcbChain;
 
 namespace {
@@ -61,6 +62,41 @@ TEST(DosMap, SingleEndingBlock)
 	ASSERT_EQ(chain.size(), 1u);
 	EXPECT_TRUE(chain[0].is_last);
 	EXPECT_EQ(chain[0].filename, "FREE");
+}
+
+TEST(McbChainTruncatedTest, FalseForAProperlyTerminatedChain)
+{
+	std::vector<McbBlock> chain = {
+	        {0x0100, 0x4D, 0x0008, 0x000B, "COMMAND", false},
+	        {0x010C, 0x5A, 0x0000, 0x0010,        "",  true},
+	};
+	EXPECT_FALSE(McbChainTruncated(chain));
+}
+
+TEST(McbChainTruncatedTest, TrueWhenTheWalkHitTheMaxBlocksCap)
+{
+	auto reader = [&](uint16_t) -> McbBlock {
+		return {0x0100, 0x4D, 0x0008, 0x0001, "", false};
+	};
+	auto chain = WalkMcbChain(0x0100, reader, 10);
+	EXPECT_TRUE(McbChainTruncated(chain));
+}
+
+TEST(McbChainTruncatedTest, TrueWhenAnInvalidTypeByteAbortedTheWalk)
+{
+	std::vector<McbBlock> synthetic = {
+	        {0x0100, 0x4D, 0x0008, 0x000B, "", false},
+	        {0x010C, 0x00, 0x0000, 0x0010, "", false},
+	};
+	size_t idx  = 0;
+	auto reader = [&](uint16_t) -> McbBlock { return synthetic[idx++]; };
+	auto chain  = WalkMcbChain(0x0100, reader, 100);
+	EXPECT_TRUE(McbChainTruncated(chain));
+}
+
+TEST(McbChainTruncatedTest, TrueForAnEmptyChain)
+{
+	EXPECT_TRUE(McbChainTruncated({}));
 }
 
 } // namespace
