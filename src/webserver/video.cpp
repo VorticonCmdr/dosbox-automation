@@ -108,6 +108,95 @@ static std::vector<uint8_t> convert_to_rgb888(const RenderedImage& image)
 	return rgb;
 }
 
+RenderedImage CropView(const RenderedImage& image, const int x, const int y,
+                       const int w, const int h)
+{
+	const auto frame_w = image.params.width;
+	const auto frame_h = image.params.height;
+
+	if (w < 1 || h < 1) {
+		throw std::invalid_argument("crop_w and crop_h must be at least 1");
+	}
+	if (x < 0 || y < 0 || x > frame_w - w || y > frame_h - h) {
+		throw std::invalid_argument(
+		        "crop rectangle (" + std::to_string(x) + "," +
+		        std::to_string(y) + "," + std::to_string(w) + "," +
+		        std::to_string(h) + ") does not fit inside the " +
+		        std::to_string(frame_w) + "x" +
+		        std::to_string(frame_h) + " frame");
+	}
+
+	// Sharing image_data/pitch/palette rather than deep-copying: every
+	// row/column this view can ever address is a strict subset of what
+	// the bounds check above already proved lies inside the original
+	// allocation, so no new bounds reasoning is needed for the pointer
+	// rebase below.
+	RenderedImage view         = image;
+	const auto bytes_per_pixel = static_cast<int>(
+	        (get_bits_per_pixel(image.params.pixel_format) + 7) / 8);
+	view.image_data += static_cast<ptrdiff_t>(y) * image.pitch +
+	                   static_cast<ptrdiff_t>(x) * bytes_per_pixel;
+	view.params.width  = w;
+	view.params.height = h;
+	return view;
+}
+
+// Downscales `image` by an integer divisor with a box filter (each
+// divisor x divisor block of source pixels averages into one output
+// pixel), applied to the RGB888 buffer rather than the native pixel
+// format - one implementation regardless of video mode. divisor <= 1
+// is a no-op copy.
+Rgb888Buffer prepare_rgb888(const RenderedImage& image, const int divisor)
+{
+	auto rgb     = convert_to_rgb888(image);
+	const auto w = image.params.width;
+	const auto h = image.params.height;
+
+	if (divisor <= 1) {
+		return Rgb888Buffer{std::move(rgb), w, h};
+	}
+
+	const auto out_w = w / divisor;
+	const auto out_h = h / divisor;
+	if (out_w < 1 || out_h < 1) {
+		throw std::invalid_argument("scale is too large for this frame's size");
+	}
+
+	Rgb888Buffer out;
+	out.width  = out_w;
+	out.height = out_h;
+	out.pixels.resize(static_cast<size_t>(out_w) * out_h * 3);
+
+	for (int y = 0; y < out_h; y++) {
+		auto* dst_row = out.pixels.data() +
+		                static_cast<size_t>(y) * out_w * 3;
+		for (int x = 0; x < out_w; x++) {
+			uint32_t sum[3] = {0, 0, 0};
+			for (int dy = 0; dy < divisor; dy++) {
+				const auto* src_row = rgb.data() +
+				                      static_cast<size_t>(
+				                              y * divisor + dy) *
+				                              w * 3;
+				for (int dx = 0; dx < divisor; dx++) {
+					const auto* px = src_row +
+					                 static_cast<size_t>(
+					                         x * divisor + dx) *
+					                         3;
+					sum[0] += px[0];
+					sum[1] += px[1];
+					sum[2] += px[2];
+				}
+			}
+			const auto n = static_cast<uint32_t>(divisor * divisor);
+			auto* dst    = dst_row + x * 3;
+			dst[0]       = static_cast<uint8_t>(sum[0] / n);
+			dst[1]       = static_cast<uint8_t>(sum[1] / n);
+			dst[2]       = static_cast<uint8_t>(sum[2] / n);
+		}
+	}
+	return out;
+}
+
 namespace {
 struct JpegErrorMgr {
 	struct jpeg_error_mgr pub  = {};
@@ -125,11 +214,10 @@ static void jpeg_error_exit(j_common_ptr cinfo)
 	std::longjmp(err->setjmp_buffer, 1);
 }
 
-static std::string encode_jpeg(const RenderedImage& image, int quality = 98)
+static std::string encode_jpeg(Rgb888Buffer rgb, int quality = 98)
 {
-	auto rgb     = convert_to_rgb888(image);
-	const auto w = image.params.width;
-	const auto h = image.params.height;
+	const auto w = rgb.width;
+	const auto h = rgb.height;
 
 	struct jpeg_compress_struct cinfo = {};
 	JpegErrorMgr jerr                 = {};
@@ -144,8 +232,9 @@ static std::string encode_jpeg(const RenderedImage& image, int quality = 98)
 
 	// setjmp/longjmp is confined to this function's single scope: rgb
 	// (the only local with a non-trivial destructor) is constructed
-	// above this point and destroyed by encode_jpeg's normal return or
-	// unwind, never skipped by the jump target below.
+	// above this point (by the caller, moved in as a parameter) and
+	// destroyed by encode_jpeg's normal return or unwind, never skipped
+	// by the jump target below.
 	if (setjmp(jerr.setjmp_buffer)) {
 		jpeg_destroy_compress(&cinfo);
 		free(buf);
@@ -164,7 +253,7 @@ static std::string encode_jpeg(const RenderedImage& image, int quality = 98)
 	jpeg_start_compress(&cinfo, TRUE);
 
 	while (cinfo.next_scanline < cinfo.image_height) {
-		auto* row = rgb.data() + cinfo.next_scanline * w * 3;
+		auto* row = rgb.pixels.data() + cinfo.next_scanline * w * 3;
 		jpeg_write_scanlines(&cinfo, &row, 1);
 	}
 
@@ -182,11 +271,10 @@ static void write_png_to_buffer(png_structp png_ptr, png_bytep data, png_size_t 
 	out->append(reinterpret_cast<char*>(data), length);
 }
 
-static std::string encode_png(const RenderedImage& image)
+static std::string encode_png(Rgb888Buffer rgb, int level = 6)
 {
-	auto rgb     = convert_to_rgb888(image);
-	const auto w = image.params.width;
-	const auto h = image.params.height;
+	const auto w = rgb.width;
+	const auto h = rgb.height;
 
 	std::string result;
 
@@ -208,11 +296,11 @@ static std::string encode_png(const RenderedImage& image)
 	             PNG_COMPRESSION_TYPE_DEFAULT,
 	             PNG_FILTER_TYPE_DEFAULT);
 
-	png_set_compression_level(png_ptr, 1);
+	png_set_compression_level(png_ptr, level);
 	png_write_info(png_ptr, info_ptr);
 
 	for (int y = 0; y < h; y++) {
-		auto* row = rgb.data() + y * w * 3;
+		auto* row = rgb.pixels.data() + y * w * 3;
 		png_write_row(png_ptr, row);
 	}
 
@@ -222,16 +310,25 @@ static std::string encode_png(const RenderedImage& image)
 	return result;
 }
 
-static std::string encode_raw(const RenderedImage& image)
+std::string EncodeRaw(const RenderedImage& image)
 {
 	const auto w      = static_cast<uint32_t>(image.params.width);
 	const auto h      = static_cast<uint32_t>(image.params.height);
-	const auto pitch  = static_cast<int32_t>(image.pitch);
 	const auto pf     = static_cast<uint8_t>(image.params.pixel_format);
 	const auto is_pal = image.is_paletted();
 	const uint16_t pal_count = is_pal ? 256 : 0;
 
-	const auto data_size    = static_cast<size_t>(h * std::abs(pitch));
+	// Always tightly packed (width * bytes_per_pixel, no source
+	// padding), and always the row count actually copied below -
+	// distinct from image.pitch, which is the source's own row
+	// stride and, for a horizontally cropped view (CropView), wider
+	// than what a single row of this output actually needs.
+	const auto bytes_per_pixel = static_cast<uint32_t>(
+	        (get_bits_per_pixel(image.params.pixel_format) + 7) / 8);
+	const auto row_bytes = w * bytes_per_pixel;
+	const auto pitch     = static_cast<int32_t>(row_bytes);
+
+	const auto data_size    = static_cast<size_t>(h) * row_bytes;
 	const auto header_size  = sizeof(w) + sizeof(h) + sizeof(pitch) +
 	                          sizeof(pf) + sizeof(pal_count);
 	const auto palette_size = static_cast<size_t>(pal_count * 3);
@@ -259,7 +356,16 @@ static std::string encode_raw(const RenderedImage& image)
 		}
 	}
 
-	std::memcpy(p, image.image_data, data_size);
+	// Row by row, using the source's own pitch as the stride between
+	// rows: a cropped view's pitch is still the original (wider) row
+	// stride, so a single contiguous copy would pull in the next
+	// row's leading bytes instead of stopping at row_bytes.
+	for (uint32_t y = 0; y < h; y++) {
+		const auto* src_row = image.image_data +
+		                      static_cast<ptrdiff_t>(y) * image.pitch;
+		std::memcpy(p, src_row, row_bytes);
+		p += row_bytes;
+	}
 
 	return result;
 }
@@ -396,8 +502,8 @@ void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res
 	// (num_param() on a malformed 'quality' being the likely case, and
 	// the most likely request to carry a typo given how often this
 	// route is polled). Validated regardless of whether the request
-	// ends up a 304: a malformed quality is the caller's mistake either
-	// way.
+	// ends up a 304: a malformed parameter is the caller's mistake
+	// either way.
 	auto format = req.get_param_value("format");
 
 	if (format.empty()) {
@@ -415,23 +521,76 @@ void VideoHandlers::GetFrame(const httplib::Request& req, httplib::Response& res
 		quality = num_param<int>(req, Source::Param, "quality", 1, 100);
 	}
 
+	// A separate knob from 'quality': PNG is lossless regardless of
+	// level, this only trades encode time for size, so conflating it
+	// with jpeg's visual-fidelity 'quality' would be misleading.
+	int png_level = 6;
+	if (format == "png" && req.has_param("png_level")) {
+		png_level = num_param<int>(req, Source::Param, "png_level", 0, 9);
+	}
+
+	int scale = 1;
+	if (req.has_param("scale")) {
+		scale = num_param<int>(req, Source::Param, "scale", 1, 8);
+		if (scale != 1 && scale != 2 && scale != 4 && scale != 8) {
+			throw std::invalid_argument("scale must be 1, 2, 4, or 8");
+		}
+		// scale=1 is a no-op regardless of format (prepare_rgb888 never
+		// runs for format=raw either way) - only a real scale request
+		// is incompatible with raw's native, unconverted pixel data.
+		if (scale != 1 && format == "raw") {
+			throw std::invalid_argument(
+			        "scale is not supported for format=raw");
+		}
+	}
+
+	const bool has_crop = req.has_param("crop_x") || req.has_param("crop_y") ||
+	                      req.has_param("crop_w") || req.has_param("crop_h");
+	int crop_x = 0;
+	int crop_y = 0;
+	int crop_w = 0;
+	int crop_h = 0;
+	if (has_crop) {
+		if (!(req.has_param("crop_x") && req.has_param("crop_y") &&
+		      req.has_param("crop_w") && req.has_param("crop_h"))) {
+			throw std::invalid_argument(
+			        "crop_x, crop_y, crop_w and crop_h must all be "
+			        "given together");
+		}
+		// A generous, format-independent sanity ceiling - the real
+		// bound (the acquired frame's own width/height) isn't known
+		// until after acquisition below, and is enforced there by
+		// CropView.
+		crop_x = num_param<int>(req, Source::Param, "crop_x", 0, 65535);
+		crop_y = num_param<int>(req, Source::Param, "crop_y", 0, 65535);
+		crop_w = num_param<int>(req, Source::Param, "crop_w", 1, 65535);
+		crop_h = num_param<int>(req, Source::Param, "crop_h", 1, 65535);
+	}
+
 	auto acquired = AcquireFrame(req, res);
 	if (!acquired) {
 		return;
 	}
 
-	FrameGuard guard{acquired->image};
+	FrameGuard guard{acquired->image}; // owns and frees the real allocation
 	res.set_header("ETag", quote_etag(acquired->hash));
-	const auto& frame = acquired->image;
+
+	// `view` may alias `acquired->image` directly (no crop) or share
+	// its allocation through a narrower window (CropView, crop given) -
+	// either way it must never itself be free()d; `guard` above owns
+	// the real allocation regardless of which view is encoded below.
+	const RenderedImage view =
+	        has_crop ? CropView(acquired->image, crop_x, crop_y, crop_w, crop_h)
+	                 : acquired->image;
 
 	if (format == "png") {
-		auto data = encode_png(frame);
+		auto data = encode_png(prepare_rgb888(view, scale), png_level);
 		res.set_content(std::move(data), "image/png");
 	} else if (format == "raw") {
-		auto data = encode_raw(frame);
+		auto data = EncodeRaw(view);
 		res.set_content(std::move(data), "application/octet-stream");
 	} else {
-		auto data = encode_jpeg(frame, quality);
+		auto data = encode_jpeg(prepare_rgb888(view, scale), quality);
 		res.set_content(std::move(data), "image/jpeg");
 	}
 }

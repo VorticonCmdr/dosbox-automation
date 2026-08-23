@@ -52,6 +52,7 @@ add_executable(dosbox_tests
     webserver_cpu_write_tests.cpp
     webserver_frame_tap_tests.cpp
     webserver_video_etag_tests.cpp
+    webserver_video_frame_params_tests.cpp
     webserver_bridge_tests.cpp
     webserver_wait_tests.cpp
     webserver_capabilities_tests.cpp

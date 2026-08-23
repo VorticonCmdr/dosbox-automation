@@ -632,6 +632,111 @@ def test_frame_capture_to_file(dosbox, tmp_path):
     assert img.height == 400
 
 
+def test_frame_mode_rendered(dosbox):
+    # Post-shader capture: a different pipeline stage than the default
+    # (raw/native DOS framebuffer), reachable even headless since the
+    # present loop still runs.
+    r = dosbox.frame(fmt="png", mode="rendered")
+    assert r.status_code == 200
+    img = Image.open(BytesIO(r.content))
+    assert img.width > 0
+    assert img.height > 0
+
+
+def test_frame_mode_rejects_unknown_value(dosbox):
+    r = dosbox.frame(fmt="png", mode="bogus")
+    assert r.status_code == 400
+    assert r.json()["error_code"] == "invalid_argument"
+
+
+def test_frame_png_level_parameter(dosbox):
+    r_fast = dosbox.frame(fmt="png", png_level=0)
+    r_small = dosbox.frame(fmt="png", png_level=9)
+    assert r_fast.status_code == 200
+    assert r_small.status_code == 200
+    assert r_fast.content[:4] == b"\x89PNG"
+    assert len(r_small.content) < len(r_fast.content)
+
+
+def test_frame_png_level_default_is_smaller_than_level_one(dosbox):
+    # The old hardcoded default (level 1); the new default (6, no
+    # explicit png_level) must actually be smaller, not just accepted.
+    r_old_default = dosbox.frame(fmt="png", png_level=1)
+    r_new_default = dosbox.frame(fmt="png")
+    assert len(r_new_default.content) < len(r_old_default.content)
+
+
+def test_frame_scale_downsamples_by_the_exact_divisor(dosbox):
+    info = dosbox.frame_info().json()
+    r = dosbox.frame(fmt="png", scale=2)
+    assert r.status_code == 200
+    img = Image.open(BytesIO(r.content))
+    assert img.width == info["width"] // 2
+    assert img.height == info["height"] // 2
+
+
+def test_frame_scale_rejects_a_non_divisor_value(dosbox):
+    r = dosbox.frame(fmt="png", scale=3)
+    assert r.status_code == 400
+    assert r.json()["error_code"] == "invalid_argument"
+
+
+def test_frame_scale_rejects_raw_format(dosbox):
+    r = dosbox.frame(fmt="raw", scale=2)
+    assert r.status_code == 400
+    assert r.json()["error_code"] == "invalid_argument"
+
+
+def test_frame_scale_one_is_accepted_for_raw_format(dosbox):
+    # scale=1 is a no-op regardless of format - only a real scale
+    # request is incompatible with raw's unconverted pixel data.
+    r = dosbox.frame(fmt="raw", scale=1)
+    assert r.status_code == 200
+
+
+def test_frame_crop_returns_exactly_the_requested_rectangle(dosbox):
+    r = dosbox.frame(fmt="png", crop=(10, 5, 100, 50))
+    assert r.status_code == 200
+    img = Image.open(BytesIO(r.content))
+    assert img.width == 100
+    assert img.height == 50
+
+
+def test_frame_crop_rejects_a_rectangle_that_does_not_fit(dosbox):
+    info = dosbox.frame_info().json()
+    r = dosbox.frame(fmt="png", crop=(info["width"] - 1, 0, 100, 10))
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error_code"] == "invalid_argument"
+    assert "does not fit" in body["error"]
+
+
+def test_frame_crop_applies_to_raw_format_too(dosbox):
+    r = dosbox.frame(fmt="raw", crop=(0, 0, 8, 4))
+    assert r.status_code == 200
+    header_size = struct.calcsize("<IIiBH")
+    width, height, pitch, pf, pal_count = struct.unpack_from("<IIiBH", r.content)
+    assert width == 8
+    assert height == 4
+    # Tightly packed now (no source row padding carried through): pitch
+    # is exactly width * bytes-per-pixel for whichever pixel format this
+    # frame actually is, and the body's exact byte count follows from
+    # that - not just bounded above by the widest possible format.
+    bytes_per_pixel = -(-pf // 8)  # ceil(bits / 8), matching get_bits_per_pixel
+    assert pitch == width * bytes_per_pixel
+    palette_size = pal_count * 3
+    data_size = height * pitch
+    assert len(r.content) == header_size + palette_size + data_size
+
+
+def test_frame_crop_and_scale_compose(dosbox):
+    r = dosbox.frame(fmt="png", crop=(0, 0, 200, 100), scale=2)
+    assert r.status_code == 200
+    img = Image.open(BytesIO(r.content))
+    assert img.width == 100
+    assert img.height == 50
+
+
 # ---------------------------------------------------------------------------
 # Video capture compression levels
 # ---------------------------------------------------------------------------

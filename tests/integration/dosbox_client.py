@@ -170,8 +170,22 @@ class DosboxClient:
 
     # --- Video ---
 
-    def frame(self, fmt: str = "jpeg", quality: int = 98) -> requests.Response:
+    def frame(self, fmt: str = "jpeg", quality: int = 98, mode: str = None,
+              png_level: int = None, scale: int = None,
+              crop: tuple[int, int, int, int] = None) -> requests.Response:
         params = {"format": fmt, "quality": str(quality)}
+        if mode is not None:
+            params["mode"] = mode
+        if png_level is not None:
+            params["png_level"] = str(png_level)
+        if scale is not None:
+            params["scale"] = str(scale)
+        if crop is not None:
+            x, y, w, h = crop
+            params["crop_x"] = str(x)
+            params["crop_y"] = str(y)
+            params["crop_w"] = str(w)
+            params["crop_h"] = str(h)
         return self._get("/api/v1/video/frame", params=params)
 
     def frame_info(self) -> requests.Response:
