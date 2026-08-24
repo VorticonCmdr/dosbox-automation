@@ -157,6 +157,24 @@ std::optional<TokenScope> RequiredScopeFor(const std::string& method,
 // it beyond what was written in the config file.
 std::optional<std::set<TokenScope>> ParseTokenScopes(const std::string& value);
 
+// Set once at startup (run()) from webserver_token_scopes - nullopt for
+// unrestricted. Read from two places that never share a call path: the
+// pre-routing handler for HTTP requests, and the Lua API
+// (lua_api.cpp) for a running script, which never passes through HTTP
+// routing at all and would otherwise bypass scoping entirely. Mutex-
+// guarded rather than relying on startup ordering to make this safe by
+// construction, not by argument.
+void SetGrantedTokenScopes(std::optional<std::set<TokenScope>> scopes);
+
+// True when `scope` is currently permitted: always true if scoping was
+// never configured (SetGrantedTokenScopes(nullopt), the default), else
+// true only if `scope` is in the granted set. The Lua API's
+// guest-reaching functions (key/type/mouse_*, mem_write, mount_lock,
+// capture_start/stop, screen_text and friends) each call this with
+// their own required scope before doing anything, the same way an
+// equivalent REST route would be checked by RequiredScopeFor.
+bool ScopeAllowed(TokenScope scope);
+
 // The JSON error shape and HTTP status a caught exception maps to.
 // `message` stays a plain, caller-facing string; `code` and `retryable`
 // are additive fields a caller can key logic off without parsing it.

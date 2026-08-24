@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -463,6 +464,24 @@ std::optional<std::set<TokenScope>> ParseTokenScopes(const std::string& value)
 	return granted;
 }
 
+namespace {
+std::mutex granted_scopes_mutex;
+std::optional<std::set<TokenScope>> granted_scopes_storage;
+} // namespace
+
+void SetGrantedTokenScopes(std::optional<std::set<TokenScope>> scopes)
+{
+	const std::lock_guard<std::mutex> lock(granted_scopes_mutex);
+	granted_scopes_storage = std::move(scopes);
+}
+
+bool ScopeAllowed(const TokenScope scope)
+{
+	const std::lock_guard<std::mutex> lock(granted_scopes_mutex);
+	return !granted_scopes_storage.has_value() ||
+	       granted_scopes_storage->count(scope) > 0;
+}
+
 // httplib's own path pattern matches segment-by-segment, with a ':name'
 // segment accepting any single non-empty path segment - this reimplements
 // just that subset so scope lookup can classify a route before httplib's
@@ -799,6 +818,9 @@ static void run(const std::string addr, const int port,
 {
 	const auto config_home = (get_config_dir() / DefaultWebserverDir).string();
 	const auto granted_scopes = ParseTokenScopes(token_scopes_setting);
+	// Also published for the Lua API (lua_api.cpp), which never passes
+	// through the pre-routing handler below - see ScopeAllowed's comment.
+	SetGrantedTokenScopes(granted_scopes);
 
 	// Channel A: a launcher can supply the token via env var so it
 	// never needs to scrape stderr or read a file.
@@ -950,13 +972,13 @@ static void init_config_settings(SectionProp& section)
 	        "only observe the screen and send input, never write memory, load\n"
 	        "scripts, use the debugger, or shut the machine down.\n"
 	        "\n"
-	        "This only restricts the REST API. A Lua script started via\n"
-	        "script/load and script/start runs on the emulation thread and\n"
-	        "reaches memory, input, and capture directly - it is not an HTTP\n"
-	        "request, so this setting cannot scope what it does. Granting the\n"
-	        "'script' scope is equivalent to granting write, input, media,\n"
-	        "debug, and control together; withhold it for a token that must\n"
-	        "not have those.");
+	        "A running Lua script (script/load, script/start) is held to the\n"
+	        "same grant: dosbox.mem_write needs write, dosbox.key/type/\n"
+	        "mouse_* need input, dosbox.screen_text/capture_start/stop need\n"
+	        "media, dosbox.mount_lock needs control. Granting 'script' alone\n"
+	        "only lets a script load and run - not what it does once running.\n"
+	        "dosbox.osd/log/debugmsg/abort are never gated: host-side only,\n"
+	        "they never reach guest memory, input, or captured output.");
 
 	auto osd = section.AddBool("webserver_osd", OnlyAtStart, true);
 	osd->SetHelp(

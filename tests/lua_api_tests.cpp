@@ -7,9 +7,12 @@
 #include "lua/lua_debug_log.h"
 #include "lua/lua_engine.h"
 #include "webserver/input.h"
+#include "webserver/webserver.h"
 
 #include "hardware/input/keyboard.h"
 
+#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -372,6 +375,149 @@ TEST_F(LuaApiTest, WaitForTextTimesOut)
 
 	// Should complete after timeout, not error.
 	EXPECT_EQ(state, Lua::ScriptState::Completed);
+}
+
+// -- Token scopes (4.7 follow-up) --
+//
+// script/load and script/start are REST routes gated on the 'script'
+// scope like any other, but once running, a script never passes
+// through the pre-routing handler again - dosbox.* calls reach guest
+// state directly. These tests prove 'script' alone is not a blanket
+// grant: each guest-reaching function must also honor whatever
+// webserver_token_scopes configured, exactly like its REST equivalent.
+//
+// Webserver::SetGrantedTokenScopes is a process-wide global (the same
+// one the real pre-routing handler reads) - every test here resets it
+// in SetUp/TearDown so it can't leak into unrelated tests elsewhere in
+// this binary, the same discipline already used for FreezeRegistry and
+// RecordingStore.
+
+class LuaApiScopeTest : public LuaApiTest {
+protected:
+	void SetUp() override
+	{
+		LuaApiTest::SetUp();
+		Webserver::SetGrantedTokenScopes(std::nullopt);
+	}
+
+	void TearDown() override
+	{
+		Webserver::SetGrantedTokenScopes(std::nullopt);
+		LuaApiTest::TearDown();
+	}
+};
+
+struct GatedLuaCall {
+	std::string script;
+	Webserver::TokenScope scope;
+	std::string scope_name;
+};
+
+// One entry per guest-reaching dosbox.* function - every RequireScope
+// call site added in lua_api.cpp needs to be proven individually, since
+// a wrong or missing scope on any single one is a silent security gap,
+// not a crash.
+const std::vector<GatedLuaCall>& GatedLuaCalls()
+{
+	static const std::vector<GatedLuaCall> calls = {
+	        {"dosbox.key('KBD_enter', true)",   Webserver::TokenScope::Input,   "input"},
+	        {             "dosbox.type('x')",   Webserver::TokenScope::Input,   "input"},
+	        {  "dosbox.mouse_move(1.0, 1.0)",   Webserver::TokenScope::Input,   "input"},
+	        {   "dosbox.mouse_click('left')",   Webserver::TokenScope::Input,   "input"},
+	        {     "dosbox.mem_read(0, 0, 1)",    Webserver::TokenScope::Read,    "read"},
+	        {  "dosbox.mem_write(0, 0, 'x')",   Webserver::TokenScope::Write,   "write"},
+	        {   "dosbox.mem_read_byte(0, 0)",    Webserver::TokenScope::Read,    "read"},
+	        {   "dosbox.mem_read_word(0, 0)",    Webserver::TokenScope::Read,    "read"},
+	        {         "dosbox.screen_text()",   Webserver::TokenScope::Media,   "media"},
+	        {     "dosbox.screen_match('x')",   Webserver::TokenScope::Media,   "media"},
+	        {        "dosbox.is_text_mode()",   Webserver::TokenScope::Media,   "media"},
+	        { "dosbox.wait_for_text('x', 1)",   Webserver::TokenScope::Media,   "media"},
+	        {          "dosbox.mount_lock()", Webserver::TokenScope::Control, "control"},
+	        {       "dosbox.capture_start()",   Webserver::TokenScope::Media,   "media"},
+	        {        "dosbox.capture_stop()",   Webserver::TokenScope::Media,   "media"},
+	};
+	return calls;
+}
+
+TEST_F(LuaApiScopeTest, EveryGatedFunctionDeniesWithoutItsScope)
+{
+	for (const auto& call : GatedLuaCalls()) {
+		// Grant every scope except the one this call needs, so a wrong
+		// classification (too permissive) would still be caught, not
+		// masked by an otherwise-empty grant.
+		std::set<Webserver::TokenScope> granted = {
+		        Webserver::TokenScope::Read,
+		        Webserver::TokenScope::Write,
+		        Webserver::TokenScope::Input,
+		        Webserver::TokenScope::Script,
+		        Webserver::TokenScope::Media,
+		        Webserver::TokenScope::Debug,
+		        Webserver::TokenScope::Control,
+		};
+		granted.erase(call.scope);
+		Webserver::SetGrantedTokenScopes(granted);
+
+		const auto state = RunToCompletion(call.script);
+		EXPECT_EQ(state, Lua::ScriptState::Error) << call.script;
+		EXPECT_NE(coroutine.ErrorMessage().find("token lacks the '" +
+		                                        call.scope_name + "' scope"),
+		          std::string::npos)
+		        << call.script << ": " << coroutine.ErrorMessage();
+	}
+}
+
+TEST_F(LuaApiScopeTest, EveryGatedFunctionAllowedWithOnlyItsOwnScope)
+{
+	for (const auto& call : GatedLuaCalls()) {
+		Webserver::SetGrantedTokenScopes(
+		        std::set<Webserver::TokenScope>{call.scope});
+
+		const auto state = RunToCompletion(call.script);
+		// type()/wait_for_text() can still legitimately yield/timeout
+		// with no guest present; the point here is only that none of
+		// them are rejected for scope, so a lingering Running state
+		// (never reached Completed/Error within the frame budget) is
+		// as acceptable a pass as Completed - only Error carrying the
+		// scope-denial message would mean the grant didn't take.
+		if (state == Lua::ScriptState::Error) {
+			EXPECT_EQ(coroutine.ErrorMessage().find("token lacks the '"),
+			          std::string::npos)
+			        << call.script << ": " << coroutine.ErrorMessage();
+		}
+	}
+}
+
+TEST_F(LuaApiScopeTest, HostOnlyFunctionsAreNeverGated)
+{
+	// osd/osd_clear/log/debugmsg/abort never reach the guest or return
+	// guest data - RequireScope deliberately isn't called from them.
+	Webserver::SetGrantedTokenScopes(std::set<Webserver::TokenScope>{});
+
+	EXPECT_EQ(RunToCompletion("dosbox.osd('hi')"), Lua::ScriptState::Completed);
+	EXPECT_EQ(RunToCompletion("dosbox.osd_clear()"), Lua::ScriptState::Completed);
+	EXPECT_EQ(RunToCompletion("dosbox.log('hi')"), Lua::ScriptState::Completed);
+	EXPECT_EQ(RunToCompletion("dosbox.debugmsg('hi')"),
+	          Lua::ScriptState::Completed);
+}
+
+TEST_F(LuaApiScopeTest, EverythingAllowedWhenUnrestricted)
+{
+	// Same tolerant check as EveryGatedFunctionAllowedWithOnlyItsOwnScope:
+	// mem_write's own out-of-range check can still fire depending on
+	// whether some earlier DOSBoxTestFixture-based test in this binary
+	// has initialized MEM_TotalPages() - unrelated to scoping, which is
+	// the only thing this test is about.
+	Webserver::SetGrantedTokenScopes(std::nullopt);
+	for (const auto* script : {"dosbox.key('KBD_enter', true)",
+	                           "dosbox.mem_write(0, 0, 'x')",
+	                           "dosbox.mount_lock()"}) {
+		const auto state = RunToCompletion(script);
+		if (state == Lua::ScriptState::Error) {
+			EXPECT_EQ(coroutine.ErrorMessage().find("token lacks the '"),
+			          std::string::npos)
+			        << script << ": " << coroutine.ErrorMessage();
+		}
+	}
 }
 
 // --- InputType expansion tests ---

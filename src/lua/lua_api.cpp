@@ -17,6 +17,7 @@
 #include "hardware/memory.h"
 #include "ints/int10.h"
 #include "misc/logging.h"
+#include "webserver/webserver.h"
 
 extern "C" {
 #include "lauxlib.h"
@@ -55,6 +56,27 @@ static uint64_t CurrentFrame(lua_State* L)
 {
 	auto* co = GetCoroutine(L);
 	return co ? co->CurrentFrame() : 0;
+}
+
+// A running script never passes through the webserver's pre-routing
+// handler - script/load and script/start are REST routes gated on the
+// 'script' scope like any other, but once running, dosbox.* calls
+// reach memory/input/capture directly on the emulation thread. Every
+// function below that reaches guest state or captured output calls
+// this first with the same scope an equivalent REST route would
+// require (RequiredScopeFor in webserver.cpp), so 'script' alone is
+// not a blanket grant of everything else. Host-only functions (osd,
+// log, debugmsg, abort) are deliberately never gated - they never
+// reach the guest or return guest data.
+static void RequireScope(lua_State* L, const Webserver::TokenScope scope,
+                         const char* fn_name)
+{
+	if (!Webserver::ScopeAllowed(scope)) {
+		luaL_error(L,
+		           "%s: token lacks the '%s' scope",
+		           fn_name,
+		           Webserver::TokenScopeName(scope).c_str());
+	}
 }
 
 // -- Key name map (shared with webserver/input.cpp) --
@@ -181,6 +203,7 @@ static const std::unordered_map<std::string, MouseButtonId> button_name_map = {
 // dosbox.key(name, pressed)
 static int LuaKey(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Input, "key");
 	const char* name = luaL_checkstring(L, 1);
 	luaL_checktype(L, 2, LUA_TBOOLEAN);
 	const bool pressed = lua_toboolean(L, 2);
@@ -212,6 +235,7 @@ static int LuaKey(lua_State* L)
 // gated on i8042 buffer headroom. Call wait_for_text after.
 static int LuaType(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Input, "type");
 	const char* text = luaL_checkstring(L, 1);
 
 	OSD_ShowCommand(std::string("type: ") + text, CurrentFrame(L));
@@ -241,6 +265,7 @@ static int LuaType(lua_State* L)
 // dosbox.mouse_move(dx, dy)
 static int LuaMouseMove(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Input, "mouse_move");
 	const auto dx = static_cast<float>(luaL_checknumber(L, 1));
 	const auto dy = static_cast<float>(luaL_checknumber(L, 2));
 
@@ -260,6 +285,7 @@ static int LuaMouseMove(lua_State* L)
 // dosbox.mouse_click(button)
 static int LuaMouseClick(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Input, "mouse_click");
 	const char* name = luaL_checkstring(L, 1);
 
 	auto it = button_name_map.find(name);
@@ -293,7 +319,7 @@ static void ValidateMemRange(lua_State* L, uint32_t addr, size_t len)
 {
 	const uint64_t mem_total = static_cast<uint64_t>(MEM_TotalPages()) *
 	                           MemPageSize;
-	const uint64_t end = static_cast<uint64_t>(addr) + len;
+	const uint64_t end       = static_cast<uint64_t>(addr) + len;
 	if (end > mem_total) {
 		luaL_error(L,
 		           "memory access out of range: 0x%x + %d",
@@ -305,6 +331,7 @@ static void ValidateMemRange(lua_State* L, uint32_t addr, size_t len)
 // dosbox.mem_read(seg, off, len) -> string
 static int LuaMemRead(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Read, "mem_read");
 	const auto addr = ResolveAddress(L, 1, 2);
 	const auto len  = static_cast<size_t>(luaL_checkinteger(L, 3));
 
@@ -334,6 +361,7 @@ static int LuaMemRead(lua_State* L)
 // dosbox.mem_write(seg, off, data)
 static int LuaMemWrite(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Write, "mem_write");
 	const auto addr  = ResolveAddress(L, 1, 2);
 	size_t len       = 0;
 	const char* data = luaL_checklstring(L, 3, &len);
@@ -361,6 +389,7 @@ static int LuaMemWrite(lua_State* L)
 // dosbox.mem_read_byte(seg, off) -> integer
 static int LuaMemReadByte(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Read, "mem_read_byte");
 	const auto addr = ResolveAddress(L, 1, 2);
 	ValidateMemRange(L, addr, 1);
 	lua_pushinteger(L, mem_readb(addr));
@@ -370,6 +399,7 @@ static int LuaMemReadByte(lua_State* L)
 // dosbox.mem_read_word(seg, off) -> integer
 static int LuaMemReadWord(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Read, "mem_read_word");
 	const auto addr = ResolveAddress(L, 1, 2);
 	ValidateMemRange(L, addr, 2);
 	lua_pushinteger(L, mem_readw(addr));
@@ -413,7 +443,7 @@ std::string ReadScreenText()
 			const PhysPt addr = page_base +
 			                    static_cast<uint32_t>(
 			                            (row * cols + col) * 2);
-			const uint8_t ch = mem_readb(addr);
+			const uint8_t ch  = mem_readb(addr);
 			result += static_cast<char>(ch);
 		}
 		result += '\n';
@@ -425,6 +455,7 @@ std::string ReadScreenText()
 // dosbox.screen_text() -> string
 static int LuaScreenText(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Media, "screen_text");
 	const auto text = ReadScreenText();
 	lua_pushlstring(L, text.data(), text.size());
 
@@ -464,6 +495,7 @@ bool MatchSubstring(const std::string& haystack, const std::string& needle,
 // dosbox.screen_match(pattern [, {ignorecase=true}]) -> bool
 static int LuaScreenMatch(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Media, "screen_match");
 	const char* pattern = luaL_checkstring(L, 1);
 	bool ignorecase     = false;
 
@@ -494,6 +526,7 @@ static int LuaScreenMatch(lua_State* L)
 // dosbox.is_text_mode() -> bool
 static int LuaIsTextMode(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Media, "is_text_mode");
 	const bool text_mode = IsTextMode();
 	lua_pushboolean(L, text_mode);
 
@@ -512,6 +545,7 @@ static int LuaIsTextMode(lua_State* L)
 // Returns true if found, false on timeout.
 static int LuaWaitForText(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Media, "wait_for_text");
 	const char* pattern = luaL_checkstring(L, 1);
 	const auto timeout  = static_cast<int64_t>(luaL_checkinteger(L, 2));
 	bool ignorecase     = false;
@@ -551,10 +585,10 @@ static int LuaWaitForText(lua_State* L)
 
 	// Check immediately before yielding. Scope the screen-text buffer so it
 	// is destroyed before the yield below: lua_yield leaves this frame by a
-	// non-local exit (longjmp, since Lua is built as C). glibc longjmp skips
-	// C++ destructors, so a live local here would leak; MSVC longjmp unwinds
-	// but can double-free it. Keeping the yielding frame free of live
-	// destructibles is correct on both (aug-zj8l).
+	// non-local exit (longjmp, since Lua is built as C). glibc longjmp
+	// skips C++ destructors, so a live local here would leak; MSVC longjmp
+	// unwinds but can double-free it. Keeping the yielding frame free of
+	// live destructibles is correct on both (aug-zj8l).
 	{
 		const auto text = ReadScreenText();
 		if (MatchSubstring(text, pattern, ignorecase)) {
@@ -591,6 +625,7 @@ static int LuaWaitForText(lua_State* L)
 // dosbox.mount_lock()
 static int LuaMountLock(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Control, "mount_lock");
 	MountPolicy::Lock();
 
 	auto* dl = GetDebugLog(L);
@@ -766,6 +801,7 @@ static int LuaAbort(lua_State* L)
 // (post-shader output as shown on screen)
 static int LuaCaptureStart(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Media, "capture_start");
 	auto mode = VideoCaptureMode::Raw;
 
 	const char* mode_str = luaL_optstring(L, 1, "raw");
@@ -788,6 +824,7 @@ static int LuaCaptureStart(lua_State* L)
 // dosbox.capture_stop() - stop ZMBV video recording
 static int LuaCaptureStop(lua_State* L)
 {
+	RequireScope(L, Webserver::TokenScope::Media, "capture_stop");
 	OSD_ShowCommand("capture_stop", CurrentFrame(L));
 	CAPTURE_StopVideoCapture();
 
