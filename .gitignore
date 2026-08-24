@@ -18,6 +18,8 @@ missed.txt
 
 # Default CMake build dir
 /build
+# Local debugger-preset build dir (not a CMake default; kept out the same way)
+/build-debugger
 
 # Meson subprojects (build-time deps)
 /subprojects
