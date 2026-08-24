@@ -171,37 +171,89 @@ static bool PathEquals(const std::string& a, const std::string& b)
 #endif
 }
 
+// True if `str` names `prefix` itself, or something inside it (a path
+// separator must follow the prefix, so "/etc" matches "/etc/shadow" but not
+// "/etcetera").
+static bool PathIsEqualOrUnder(const std::string& str, const std::string& prefix)
+{
+	if (PathEquals(str, prefix)) {
+		return true;
+	}
+	if (str.size() > prefix.size() && PathStartsWith(str, prefix)) {
+		const auto next = str[prefix.size()];
+#if defined(WIN32)
+		return next == '\\' || next == '/';
+#else
+		return next == '/';
+#endif
+	}
+	return false;
+}
+
+// SystemPaths() lists real directory names (e.g. "/etc"). On macOS several
+// of these are themselves symlinks into /private (e.g. /etc -> /private/etc).
+// Real callers (ValidateDirectoryMount) always canonicalize before calling
+// IsUnderSystemPath(), so on macOS the input they pass has already resolved
+// to /private/etc - comparing against the literal list alone would silently
+// let it past the guard. Both forms are kept: the literal entries (matching
+// what SystemPaths() documents and what callers/tests may pass directly)
+// plus their canonical resolution where it differs (falling back to just the
+// literal if the entry doesn't exist on this platform, e.g. /snap on macOS).
+static const std::vector<std::filesystem::path>& CanonicalSystemPaths()
+{
+	static const std::vector<std::filesystem::path> canonical_paths = [] {
+		std::vector<std::filesystem::path> result;
+		for (const auto& sys_path : SystemPaths()) {
+			result.push_back(sys_path);
+			std::error_code ec;
+			auto resolved = std::filesystem::canonical(sys_path, ec);
+			if (!ec && resolved != sys_path) {
+				result.push_back(resolved);
+			}
+		}
+		return result;
+	}();
+	return canonical_paths;
+}
+
+// macOS routes its OS-managed temp directory through /var (e.g.
+// /var/folders/xx/.../T), which the canonicalized SystemPaths() list above
+// would otherwise treat as protected once /var resolves to /private/var.
+// /tmp is deliberately absent from SystemPaths() on Linux for the same
+// reason - it's mountable scratch space by design, not a protected system
+// location - so the resolved OS temp directory is exempted here to keep
+// that same intent on macOS.
+static const std::filesystem::path& CanonicalTempDir()
+{
+	static const std::filesystem::path temp_dir = [] {
+		std::error_code ec;
+		const auto raw = std::filesystem::temp_directory_path(ec);
+		if (ec) {
+			return std::filesystem::path();
+		}
+		auto resolved = std::filesystem::canonical(raw, ec);
+		return ec ? raw : resolved;
+	}();
+	return temp_dir;
+}
+
 bool IsUnderSystemPath(const std::filesystem::path& canonical_path)
 {
 	if (IsBareRoot(canonical_path)) {
 		return true;
 	}
 
-	const auto& system_paths = SystemPaths();
 	const auto canonical_str = canonical_path.string();
 
-	for (const auto& sys_path : system_paths) {
-		const auto sys_str = sys_path.string();
+	const auto& temp_dir = CanonicalTempDir();
+	if (!temp_dir.empty() &&
+	    PathIsEqualOrUnder(canonical_str, temp_dir.string())) {
+		return false;
+	}
 
-		if (PathEquals(canonical_str, sys_str)) {
+	for (const auto& sys_path : CanonicalSystemPaths()) {
+		if (PathIsEqualOrUnder(canonical_str, sys_path.string())) {
 			return true;
-		}
-
-		// Check prefix: canonical must start with sys_path followed
-		// by a path separator, so "/etc" blocks "/etc/shadow" but
-		// not "/etcetera"
-		if (canonical_str.size() > sys_str.size() &&
-		    PathStartsWith(canonical_str, sys_str)) {
-			const auto next = canonical_str[sys_str.size()];
-#if defined(WIN32)
-			if (next == '\\' || next == '/') {
-				return true;
-			}
-#else
-			if (next == '/') {
-				return true;
-			}
-#endif
 		}
 	}
 	return false;

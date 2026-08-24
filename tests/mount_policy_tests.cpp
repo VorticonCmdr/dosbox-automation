@@ -37,7 +37,24 @@ protected:
 			std::error_code ec   = {};
 			if (fs::create_directory(candidate, ec) && !ec) {
 				fs::permissions(candidate, fs::perms::owner_all, ec);
-				return candidate;
+				// std::filesystem::temp_directory_path() resolves to a
+				// path that itself sits behind a symlink on macOS
+				// (/var -> /private/var), unrelated to whatever this
+				// test actually wants to check. HasSymlinkComponent()
+				// deliberately treats *any* symlink in a raw path as
+				// hostile (mount_policy.cpp's own comment: checking the
+				// canonical result "would miss them") - correct for a
+				// real mount request, but it means every raw path built
+				// from a non-canonical tmp_dir here would spuriously
+				// trip that check regardless of what this fixture's own
+				// tests create. Canonicalizing once, at the root, keeps
+				// every path built from tmp_dir afterward symlink-free
+				// unless a test deliberately creates one further down
+				// (CreateSymlink) - which is the only case that should
+				// ever make HasSymlinkComponent true here.
+				auto canonical_ec  = std::error_code();
+				const auto resolved = fs::canonical(candidate, canonical_ec);
+				return canonical_ec ? candidate : resolved;
 			}
 		}
 		return {};
@@ -404,9 +421,12 @@ TEST_F(MountPolicyTest, DirMountOwnerTrustedSkipsWhitelist)
 #if !defined(WIN32)
 TEST_F(MountPolicyTest, DirMountSystemPathRejectedEvenOwnerTrusted)
 {
-	// /etc exists on the system, not in our temp dir
+	// /usr exists on the system, not in our temp dir. Deliberately not
+	// /etc: on macOS /etc is itself a symlink (-> /private/etc), so it
+	// gets caught by the earlier HasSymlinkComponent() check instead of
+	// the SystemPath check this test targets.
 	const auto verdict = MountPolicy::ValidateDirectoryMount(
-	        fs::path("/etc"), fs::path("/etc"), {}, DirMountPolicy::OwnerTrusted);
+	        fs::path("/usr"), fs::path("/usr"), {}, DirMountPolicy::OwnerTrusted);
 
 	EXPECT_FALSE(verdict.allowed);
 	EXPECT_EQ(verdict.reason, DenyReason::SystemPath);
@@ -476,15 +496,17 @@ TEST_F(MountPolicyTest, BundledDrivesRootAllowedAsBase)
 #if !defined(WIN32)
 TEST_F(MountPolicyTest, BundledDrivesBaseDoesNotOpenSystemPaths)
 {
-	// Even with drives/ in allowed_bases, /etc is still blocked by
-	// IsUnderSystemPath which runs before the whitelist check.
+	// Even with drives/ in allowed_bases, /usr is still blocked by
+	// IsUnderSystemPath which runs before the whitelist check. Not /etc:
+	// on macOS it's itself a symlink and gets caught by the earlier
+	// HasSymlinkComponent() check instead.
 	const auto anchor = CreateDir("conf");
 	const auto drives = CreateDir("drives");
 
 	const std::vector<fs::path> bases = {fs::canonical(drives)};
 
 	const auto verdict = MountPolicy::ValidateDirectoryMount(
-	        fs::path("/etc"), anchor, bases, DirMountPolicy::WhitelistEnforced);
+	        fs::path("/usr"), anchor, bases, DirMountPolicy::WhitelistEnforced);
 	EXPECT_FALSE(verdict.allowed);
 	EXPECT_EQ(verdict.reason, DenyReason::SystemPath);
 }
