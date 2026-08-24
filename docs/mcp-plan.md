@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.5, 4.6 done. Rest of tier 4 outstanding.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.4, 4.5, 4.6 done. Rest of tier 4 outstanding.**
 
 ---
 
@@ -1081,9 +1081,29 @@ The gaps, in rough priority:
 - The bridge has no live-engine lane at all. The engine's harness (`conftest.py`) is good and is not packaged, importable or published, so the bridge cannot reuse it.
 
 ### 4.4 CI
-**Both. Effort: M.**
+**Both. Effort: M. Status: done, cross-repo live-engine lane deferred as a follow-up.**
 
 The engine's four workflows only deploy the website. The bridge repo has no `.github` at all. Nothing runs gtest, `run-e2e.py`, pytest, ruff or bandit automatically, and nothing runs the two repos against each other.
+
+**Shipped: a CI workflow per repo. The cross-repo lane (build the engine, run the bridge's live tests against it) is out of scope for this pass - see below.**
+
+Engine (`.github/workflows/ci.yml`, plus a trimmed `.github/actions/setup-vcpkg`):
+- `build_and_test`: matrix of the plain debug build and a `-DOPT_DEBUGGER=ON` build, both on `debug-linux-vcpkg`, both `ctest`-ed and gated on `count-warnings.py` at `max_warnings: 0`. `run-e2e.py` isn't wired in yet - it needs game disk images and a headless-launch harness this pass didn't build; that's 4.3 territory (the plan's own item 4.3 gap list already covers extending its coverage).
+- `format`: runs `format-commit.sh --diff` against the PR's merge-base with `main`, not the whole tree - matches the tool's own single-purpose design (touched lines only) and the project's per-directory `.clang-format` scoping (`src/libs/` keeps vendored style).
+- `setup-vcpkg` is a trimmed, Linux-only restoration of the composite action deleted in `c630200d9` (`remove upstream CI infrastructure`) - same baseline-checkout-plus-binary-cache shape, Windows/macOS branches and the release-packaging half of the old `linux.yml` (multi-compiler matrix, arm64, external deps zips) dropped as out of scope for this item.
+- The apt package list (`extras/linux/ubuntu-24.04-packages.txt`) is X11/audio/wayland *headers* for vcpkg's own SDL3 port to build against, not a full dependency set - SDL3, Lua, sol2, mt32emu, iir1, asio all come from vcpkg per `vcpkg.json`, which is exactly why the workflow uses the `-vcpkg` preset rather than plain `debug-linux`.
+
+Bridge (`.github/workflows/ci.yml`, new `.github/` tree):
+- `test`: `uv sync --extra dev` + `pytest -q`, matrixed over Python 3.11 and 3.13 (the `requires-python` floor and the newest supported minor).
+- `lint`: `ruff check .` and `bandit -r dosbox_mcp -ll`.
+- `ruff`'s own unconfigured default in this version pulls in a much wider rule set than the classic `E4/E7/E9/F` (pylint- and tryceratops-derived rules included) and picks up new codes on every ruff upgrade with no code change on this side. Pinned `[tool.ruff.lint] select = ["E4", "E7", "E9", "F"]` in `pyproject.toml` - real-bug rules, not style opinions - so a ruff version bump can't turn CI red by itself. The wider default surfaced 84 pre-existing findings (73 of them one mechanical rule, `PLR0402` "use `from mcp import types`" instead of `import mcp.types as types`, which is also the MCP SDK's own idiomatic form); deliberately not fixed here - a 73-site style rewrite is a separate logical change under this repo's own commit rules, not something to fold into a CI-wiring commit.
+- `bandit -ll` (medium/high severity only) rather than a suppression: the one default-severity finding is `B101` (`assert` used) on an internal invariant in `server.py`, bandit's best-known false positive. The repo already uses targeted `# nosec` for its two real `B105` cases in `session.py`; adding a blanket suppression for a rule that's structurally noisy would be the wrong fix.
+
+**A real finding, not a guess:** re-ran the engine's `MountPolicyTest` suite locally and read the actual assertion failures rather than trusting the "environment-specific, unrelated" label 4.2's and 4.6's writeups both carried forward without diagnosing it. Root cause: `MountPolicy::HasSymlinkComponent` and `IsUnderAnyRoot` correctly detect that `std::filesystem::temp_directory_path()` resolves through a symlink on macOS (`/tmp` -> `/private/tmp`), which is exactly what the tests are checking for - the test fixtures build paths under `/tmp`, so on macOS every "no symlink in path" assertion trips on the platform's own temp-dir symlink, not on a code bug. Linux has no such indirection for `/tmp`, so these are expected to pass cleanly on the `ubuntu-24.04` CI runner; the workflow does not exclude them. If a real CI run shows otherwise, that's new information the local finding didn't have - re-open this note rather than assuming the exclusion was simply forgotten.
+
+**Cross-repo lane, deliberately deferred:** building the engine and running the bridge's live tests against it in one workflow has no skeleton on either side to build from - the engine's `conftest.py` harness that item 4.3 already flags as "good and is not packaged, importable or published" is the missing piece, and building it properly is 4.3's job, not 4.4's. Bundling a from-scratch cross-repo lane into this commit risked holding both working per-repo lanes hostage to it. Revisit once 4.3 packages that harness.
+
+**Verification:** validated both workflow and composite-action YAML with a parser (no syntax errors). Ran the bridge's exact CI commands locally against the real venv (`uv sync --extra dev`): `pytest -q` -> 484 passed, 2 skipped (pre-existing, unrelated); `ruff check .` under the pinned `E4/E7/E9/F` select -> clean; `bandit -r dosbox_mcp -ll` -> clean. Could not fully reproduce the engine lane locally - this machine is macOS, the workflow targets a `ubuntu-24.04` GitHub-hosted runner with a preinstalled vcpkg the local environment doesn't have - so the `cmake`/`ctest`/`count-warnings.py` invocations are the same ones the fork's own pre-`c630200d9` `linux.yml` used successfully, not independently re-verified end to end; the first real Actions run on this workflow should be watched rather than assumed green.
 
 ### 4.5 Delete the stale trees
 **Engine. Effort: S. Status: done.**

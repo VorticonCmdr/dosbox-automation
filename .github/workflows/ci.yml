@@ -1,0 +1,98 @@
+name: CI
+
+permissions: read-all
+
+on:
+  push:
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'licenses/**'
+      - 'website/**'
+  pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'licenses/**'
+      - 'website/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    name: ${{ matrix.conf.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        conf:
+          - name: Debug build, GCC
+            cmake_preset: debug-linux-vcpkg
+            cmake_flags: ""
+            max_warnings: 0
+          - name: Debugger build, GCC
+            cmake_preset: debug-linux-vcpkg
+            cmake_flags: "-DOPT_DEBUGGER=ON"
+            max_warnings: 0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up CMake
+        uses: lukka/get-cmake@v4.4.2
+
+      - name: Install system dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y $(cat extras/linux/ubuntu-24.04-packages.txt)
+
+      - name: Set up vcpkg
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          name_os: linux
+          arch: x64
+          compiler: gcc
+
+      - name: Configure
+        run: cmake ${{ matrix.conf.cmake_flags }} --preset ${{ matrix.conf.cmake_preset }}
+
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build --preset ${{ matrix.conf.cmake_preset }} 2>&1 | tee build.log
+
+      - name: Run tests
+        run: ctest -j 4 --preset ${{ matrix.conf.cmake_preset }} --output-on-failure
+
+      - name: Summarize warnings
+        env:
+          MAX_WARNINGS: ${{ matrix.conf.max_warnings }}
+        run: ./scripts/ci/count-warnings.py -lf build.log
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Fetch main for diff base
+        run: git fetch origin main
+
+      - name: Verify formatting of touched files
+        # format-commit.sh only reformats lines a commit actually touched,
+        # so this checks the PR's own diff against main rather than the
+        # whole tree (src/libs/ and other pre-existing code is out of scope
+        # per .claude/rules/code-style.md).
+        run: ./scripts/tools/format-commit.sh --diff "$(git merge-base origin/main HEAD)"
