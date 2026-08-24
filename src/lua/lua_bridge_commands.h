@@ -16,7 +16,9 @@
 #include "libs/json/json.h"
 
 #include <chrono>
+#include <cstddef>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace Lua {
@@ -100,10 +102,15 @@ public:
 };
 
 struct LuaStatusResult {
-	ScriptState state     = ScriptState::Idle;
-	std::string error     = {};
-	uint64_t frame        = 0;
-	std::string name      = {};
+	ScriptState state = ScriptState::Idle;
+	std::string error = {};
+	uint64_t frame    = 0;
+	std::string name  = {};
+	// Empty unless the currently loaded script was loaded with
+	// debug=true - see LuaLogCommand for why this doubles as the gate
+	// on whether a log is available at all, not just whether one
+	// exists on disk from some earlier run.
+	std::string log_path  = {};
 	nlohmann::json output = {};
 };
 
@@ -114,6 +121,27 @@ public:
 
 	LuaStatusResult result = {};
 };
+
+class LuaLogCommand : public Webserver::Command {
+public:
+	void Execute() override;
+	static void Get(const httplib::Request& req, httplib::Response& res);
+
+	// True when the currently loaded script was loaded with debug=true.
+	// log_path can still be empty even when this is true (the debug log
+	// failed to open) - Get() reports that as a distinct error from "no
+	// debug script is loaded" at all.
+	bool debug_script_loaded = false;
+	std::string log_path     = {};
+};
+
+// Bytes kept from the end of the debug log when it exceeds the cap.
+inline constexpr size_t MaxLogTailBytes = 64 * 1024;
+
+// Reads at most the last MaxLogTailBytes of `path`, or nullopt if the
+// file cannot be opened. Exposed for testing; LuaLogCommand::Get is its
+// only production caller.
+std::optional<std::string> ReadLogTail(const std::string& path, bool& truncated);
 
 } // namespace Lua
 

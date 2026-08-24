@@ -38,6 +38,7 @@ add_executable(dosbox_tests
     lua_engine_tests.cpp
     lua_coroutine_tests.cpp
     lua_api_tests.cpp
+    lua_script_log_tests.cpp
     script_validator_tests.cpp
     text_input_tests.cpp
     webserver_mem_search_tests.cpp

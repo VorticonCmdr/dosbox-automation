@@ -267,6 +267,7 @@ static void setup_api_handlers()
 	server.Post("/api/v1/script/start", Lua::LuaStartCommand::Post);
 	server.Post("/api/v1/script/stop", Lua::LuaStopCommand::Post);
 	server.Get("/api/v1/script/status", Lua::LuaStatusCommand::Get);
+	server.Get("/api/v1/script/log", Lua::LuaLogCommand::Get);
 
 	server.Post("/api/v1/capture/video/start", CaptureStartCommand::Post);
 	server.Post("/api/v1/capture/video/stop", CaptureStopCommand::Post);

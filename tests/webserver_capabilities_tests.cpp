@@ -13,6 +13,7 @@
 #include "webserver/wait.h"
 #include "webserver/webserver.h"
 
+#include "lua/lua_bridge_commands.h"
 #include "lua/script_validator.h"
 
 #include <gtest/gtest.h>
@@ -145,6 +146,8 @@ TEST(BuildCapabilitiesBlockTest, LimitsMatchTheSameNamedConstantsTheValidatorsUs
 
 	EXPECT_EQ(capabilities["script"]["limits"]["max_body_bytes"],
 	          Lua::ScriptValidator::MaxBodySize);
+	EXPECT_EQ(capabilities["script"]["limits"]["max_log_tail_bytes"],
+	          Lua::MaxLogTailBytes);
 
 	EXPECT_EQ(capabilities["wait"]["limits"]["max_timeout_ms"], MaxWaitTimeoutMs);
 	EXPECT_EQ(capabilities["wait"]["limits"]["max_pattern_len"], MaxPatternLen);

@@ -39,7 +39,12 @@ bool DebugLog::Open(const std::string& directory, const std::string& script_name
 	             ("lua-debug-" + std::string(timestamp) + "-" + script_name + ".log"))
 	                    .string();
 
-	file = std::fopen(file_path.c_str(), "w");
+	// Binary mode: script/log (lua_bridge_commands.cpp) reads this file
+	// back with a second, independent "rb" handle. Text mode would let
+	// Windows' CRT translate every "\n" Trace() writes into "\r\n" on
+	// disk, so the API's content field would carry an extra \r per line
+	// only on Windows for otherwise byte-identical Trace() calls.
+	file = std::fopen(file_path.c_str(), "wb");
 	if (!file) {
 		file_path.clear();
 		return false;
@@ -60,7 +65,11 @@ void DebugLog::Close()
 		std::fclose(file);
 		file = nullptr;
 	}
-	file_path.clear();
+	// file_path is deliberately left set: FilePath() must keep naming
+	// the log after a script completes and closes it (script/log and
+	// script/status's log_path both read it post-close), and Open()
+	// always overwrites it with a fresh path before the next debug run
+	// starts, so nothing goes stale.
 }
 
 std::string DebugLog::FormatTimestamp() const

@@ -17,6 +17,7 @@
 #include "wait.h"
 #include "webserver.h"
 
+#include "lua/lua_bridge_commands.h"
 #include "lua/lua_engine.h"
 #include "lua/script_validator.h"
 
@@ -147,6 +148,7 @@ json BuildCapabilitiesBlock()
 	script_limits["max_memory_bytes"] = Lua::LuaEngine::DefaultMemoryCapBytes;
 	script_limits["instruction_limit"] = Lua::LuaEngine::DefaultInstructionLimit;
 	script_limits["wall_clock_limit_ms"] = Lua::LuaEngine::DefaultWallClockLimitMs;
+	script_limits["max_log_tail_bytes"] = Lua::MaxLogTailBytes;
 
 	json wait_limits;
 	wait_limits["min_timeout_ms"]     = MinWaitTimeoutMs;

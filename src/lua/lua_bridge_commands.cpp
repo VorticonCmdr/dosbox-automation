@@ -12,6 +12,9 @@
 #include "misc/cross.h"
 #include "misc/logging.h"
 
+#include <cstdio>
+#include <optional>
+
 extern "C" {
 #include "lua.h"
 }
@@ -113,10 +116,16 @@ void LuaLoadCommand::Execute()
 
 	if (params.debug) {
 		const auto log_dir = (get_config_dir() / "logs").string();
-		mgr.Log().Open(log_dir, params.name);
-		if (mgr.Log().IsOpen()) {
+		if (mgr.Log().Open(log_dir, params.name)) {
 			LOG_MSG("LUA: Debug log at %s",
 			        mgr.Log().FilePath().c_str());
+		} else {
+			// Not fatal to the load - the script still runs without
+			// a debug log - but worth a loud log line since
+			// script/log will otherwise silently 404 with no other
+			// explanation.
+			LOG_WARNING("LUA: Failed to open debug log in '%s'",
+			            log_dir.c_str());
 		}
 	} else {
 		mgr.Log().Close();
@@ -127,18 +136,6 @@ void LuaLoadCommand::Execute()
 
 void LuaLoadCommand::Post(const httplib::Request& req, httplib::Response& res)
 {
-	static ScriptRateLimiter rate_limiter;
-	int64_t retry_after_ms = 0;
-	if (rate_limiter.ShouldReject(retry_after_ms)) {
-		res.status = 429;
-		res.set_header("Retry-After",
-		               std::to_string((retry_after_ms + 999) / 1000));
-		json err;
-		err["error"] = "too many requests";
-		Webserver::send_json(res, err);
-		return;
-	}
-
 	const auto ct_check = ScriptValidator::ValidateContentType(
 	        req.get_header_value("Content-Type"));
 	if (!ct_check.ok) {
@@ -168,6 +165,23 @@ void LuaLoadCommand::Post(const httplib::Request& req, httplib::Response& res)
 		res.status = param_check.http_status;
 		json err;
 		err["error"] = param_check.error;
+		Webserver::send_json(res, err);
+		return;
+	}
+
+	// Checked last, after every free (parse-only) rejection: a request
+	// that was always going to 415/413/400 should not also burn the
+	// rate limiter's slot, or a caller fixing a Content-Type typo pays
+	// a second 2-second wait for a request that could never have
+	// succeeded anyway.
+	static ScriptRateLimiter rate_limiter;
+	int64_t retry_after_ms = 0;
+	if (rate_limiter.ShouldReject(retry_after_ms)) {
+		res.status = 429;
+		res.set_header("Retry-After",
+		               std::to_string((retry_after_ms + 999) / 1000));
+		json err;
+		err["error"] = "too many requests";
 		Webserver::send_json(res, err);
 		return;
 	}
@@ -321,6 +335,15 @@ void LuaStatusCommand::Execute()
 	result.error = mgr.Coroutine().ErrorMessage();
 	result.frame = mgr.Coroutine().CurrentFrame();
 	result.name  = mgr.Params().name;
+	// mgr.Engine().HasLoadedScript() rules out the window right after a
+	// *failed* reload: LuaLoadCommand::Execute commits mgr.Params() (and
+	// resets the engine) before LoadScript is known to succeed, so on a
+	// compile error mgr.Params().debug can still be true while nothing
+	// is actually loaded - without this check, log_path would keep
+	// naming a completely unrelated earlier script's log.
+	if (mgr.Params().debug && mgr.Engine().HasLoadedScript()) {
+		result.log_path = mgr.Log().FilePath();
+	}
 
 	// Serialize the dosbox.output table.
 	auto* L = mgr.Engine().GetState();
@@ -355,6 +378,125 @@ void LuaStatusCommand::Get(const httplib::Request&, httplib::Response& res)
 		j["output"] = cmd.result.output;
 	}
 
+	if (!cmd.result.log_path.empty()) {
+		j["log_path"] = cmd.result.log_path;
+	}
+
+	Webserver::send_json(res, j);
+}
+
+// -- LuaLogCommand --
+
+// Deliberately never routed through the Bridge: the emulation thread
+// holds its own FILE* open on this same path and writes to it
+// (DebugLog::Trace), so this independent read handle can observe a
+// torn last line if it lands mid-write. Accepted rather than
+// serializing log reads behind emulation-thread scheduling for what is
+// fundamentally a disk read, not emulator state.
+//
+// `path` must come from trusted, in-process state (ScriptManager's own
+// DebugLog::FilePath()) - never from caller-supplied/HTTP input. This
+// function does no canonicalization, allowed-root check, or rejection
+// of `..`/symlinks; LuaLogCommand::Get is safe only because it never
+// wires request data into `path` in the first place.
+std::optional<std::string> ReadLogTail(const std::string& path, bool& truncated)
+{
+	truncated = false;
+
+	auto* f = std::fopen(path.c_str(), "rb");
+	if (!f) {
+		return std::nullopt;
+	}
+
+	// Plain fseek/ftell truncate to a 32-bit `long` under MSVC even in
+	// 64-bit builds (LLP64) - cross_fseeko/cross_ftello (misc/cross.h)
+	// are this codebase's existing fix for exactly that, already used
+	// for the same reason in support.cpp/makeimg.cpp/bios_disk.cpp.
+	if (cross_fseeko(f, 0, SEEK_END) != 0) {
+		std::fclose(f);
+		return std::nullopt;
+	}
+	const auto size = cross_ftello(f);
+	if (size < 0) {
+		std::fclose(f);
+		return std::nullopt;
+	}
+
+	const auto file_size = static_cast<size_t>(size);
+	const auto start = file_size > MaxLogTailBytes ? file_size - MaxLogTailBytes
+	                                               : 0;
+	truncated = start > 0;
+
+	if (cross_fseeko(f, static_cast<cross_off_t>(start), SEEK_SET) != 0) {
+		std::fclose(f);
+		return std::nullopt;
+	}
+
+	std::string content(file_size - start, '\0');
+	const auto bytes_read = std::fread(content.data(), 1, content.size(), f);
+	content.resize(bytes_read);
+
+	std::fclose(f);
+	return content;
+}
+
+void LuaLogCommand::Execute()
+{
+	auto& mgr = ScriptManager::Instance();
+	// Gated on the currently loaded script's own debug flag AND on a
+	// script actually being loaded right now, not merely on whether a
+	// log file exists on disk: once a non-debug script is loaded, or a
+	// reload fails to compile (LuaLoadCommand::Execute commits
+	// mgr.Params() and resets the engine before LoadScript is known to
+	// succeed), the previous run's log no longer describes what's
+	// currently loaded, even though DebugLog::Close() (deliberately)
+	// leaves FilePath() pointing at it.
+	debug_script_loaded = mgr.Params().debug && mgr.Engine().HasLoadedScript();
+	if (debug_script_loaded) {
+		log_path = mgr.Log().FilePath();
+	}
+}
+
+void LuaLogCommand::Get(const httplib::Request&, httplib::Response& res)
+{
+	LuaLogCommand cmd;
+	cmd.WaitForCompletion(5000);
+
+	if (!cmd.debug_script_loaded) {
+		res.status = 400;
+		json err;
+		err["error"] = "no debug script is loaded";
+		Webserver::send_json(res, err);
+		return;
+	}
+
+	if (cmd.log_path.empty()) {
+		// A debug script genuinely is loaded, but its log never opened
+		// (DebugLog::Open failed - unwritable/full/read-only logs dir);
+		// LuaLoadCommand::Execute doesn't fail the load over this, so
+		// distinguish it from "no debug script is loaded" rather than
+		// reusing that (factually wrong here) message.
+		res.status = 404;
+		json err;
+		err["error"] = "debug log was requested but failed to open on the engine side";
+		Webserver::send_json(res, err);
+		return;
+	}
+
+	bool truncated     = false;
+	const auto content = ReadLogTail(cmd.log_path, truncated);
+	if (!content) {
+		res.status = 404;
+		json err;
+		err["error"] = "debug log file is not readable";
+		Webserver::send_json(res, err);
+		return;
+	}
+
+	json j;
+	j["path"]      = cmd.log_path;
+	j["truncated"] = truncated;
+	j["content"]   = *content;
 	Webserver::send_json(res, j);
 }
 

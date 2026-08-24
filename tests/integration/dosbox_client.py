@@ -388,6 +388,9 @@ class DosboxClient:
     def script_status(self) -> requests.Response:
         return self._get("/api/v1/script/status")
 
+    def script_log(self) -> requests.Response:
+        return self._get("/api/v1/script/log")
+
     def wait_script_done(self, timeout: float = 30.0) -> dict:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
