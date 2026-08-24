@@ -56,7 +56,15 @@ static std_fs::path get_or_create_config_dir()
 	const auto conf_path = resolve_home(
 	        "~/Library/Preferences/" DOSBOX_PROJECT_NAME);
 
-	if (!create_dir_if_not_exist(conf_path)) {
+	// create_directories (recursive), not create_dir_if_not_exist
+	// (single-level): under a real user account ~/Library/Preferences
+	// already exists, but a HOME override to a fresh directory - the
+	// automation test harness's own isolation mechanism - does not have
+	// it yet, and a single-level create_directory then fails with the
+	// intermediate directory missing.
+	std::error_code ec = {};
+	if (!std_fs::is_directory(conf_path, ec) &&
+	    !std_fs::create_directories(conf_path, ec)) {
 		LOG_ERR("CONFIG: Can't create config directory '%s'",
 		        conf_path.string().c_str());
 	}
@@ -76,7 +84,12 @@ static std_fs::path get_or_create_config_dir()
 	if (!xdg_config_home.empty()) {
 		const auto conf_path = std_fs::path(xdg_config_home) /
 		                       DOSBOX_PROJECT_NAME;
-		if (!create_dir_if_not_exist(conf_path)) {
+		// create_directories (recursive): an isolation harness pointing
+		// XDG_CONFIG_HOME at a fresh directory tree (same reasoning as
+		// the macOS branch above) may not have any of it yet.
+		std::error_code ec = {};
+		if (!std_fs::is_directory(conf_path, ec) &&
+		    !std_fs::create_directories(conf_path, ec)) {
 			LOG_ERR("CONFIG: Can't create config directory '%s'",
 			        conf_path.string().c_str());
 		}
@@ -109,7 +122,12 @@ static std_fs::path get_or_create_config_dir()
 
 	const auto conf_path = std_fs::path(appdata_path) / DOSBOX_PROJECT_NAME;
 
-	if (!create_dir_if_not_exist(conf_path)) {
+	// create_directories (recursive), matching the two branches above -
+	// appdata_path itself is created by SHGetSpecialFolderPath(create=1),
+	// but this stays consistent with them rather than relying on that.
+	std::error_code ec = {};
+	if (!std_fs::is_directory(conf_path, ec) &&
+	    !std_fs::create_directories(conf_path, ec)) {
 		LOG_ERR("CONFIG: Can't create config directory '%s'",
 		        conf_path.string().c_str());
 	}
