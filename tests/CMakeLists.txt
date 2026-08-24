@@ -52,6 +52,7 @@ add_executable(dosbox_tests
     webserver_alloc_tests.cpp
     webserver_batch_tests.cpp
     webserver_input_validation_tests.cpp
+    webserver_input_sequence_tests.cpp
     webserver_error_tests.cpp
     webserver_io_port_tests.cpp
     webserver_cpu_write_tests.cpp
