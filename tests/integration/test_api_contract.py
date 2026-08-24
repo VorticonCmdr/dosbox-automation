@@ -209,10 +209,20 @@ def test_input_mouse_move_x_abs_warps_and_ignores_x_rel(dosbox):
     # directly (item 2.14); x_rel/y_rel on the same event are ignored
     # once both are given. Multiples of 8 sidestep the driver's own
     # position granularity masking so the landed position is exact.
-    r = dosbox.input_sequence([{
+    #
+    # Same busy-retry as test_input_delay_ms_relative_timing just above:
+    # that test's own delay_ms chain can still be draining on this shared
+    # instance when this test starts, and a 409 means exactly that.
+    events = [{
         "type": "mouse_move",
         "x_rel": 2000.0, "y_rel": 2000.0, "x_abs": 96, "y_abs": 48,
-    }])
+    }]
+    deadline = time.monotonic() + 5.0
+    while True:
+        r = dosbox.input_sequence(events)
+        if r.status_code != 409 or time.monotonic() > deadline:
+            break
+        time.sleep(0.1)
     assert r.status_code == 200
     time.sleep(0.3)
     pos = dosbox.mouse_position().json()
@@ -308,9 +318,16 @@ def test_input_mouse_move_x_abs_out_of_range_rejected(dosbox):
 # Replay status and cancel
 # ---------------------------------------------------------------------------
 
-def test_replay_status_when_idle(dosbox):
-    dosbox.replay_cancel()  # in case an earlier test in this module left one running
-    r = dosbox.replay_status()
+def test_replay_status_when_idle(dosbox_e2e):
+    # Needs a genuinely fresh instance, not the shared module-scoped
+    # `dosbox` fixture other tests in this file also use: replay_cancel()
+    # deliberately preserves the last run's total/dispatched/remaining for
+    # post-mortem inspection (see test_replay_cancel_stops_a_running_sequence,
+    # which asserts dispatched < total survives a cancel) - so cancelling
+    # on a shared instance other tests have already used wouldn't actually
+    # leave these fields at zero.
+    client = dosbox_e2e().client
+    r = client.replay_status()
     assert r.status_code == 200
     data = r.json()
     assert data["active"] is False
