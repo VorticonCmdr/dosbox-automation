@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.6 done. Rest of tier 4 outstanding.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.5, 4.6 done. Rest of tier 4 outstanding.**
 
 ---
 
@@ -1086,11 +1086,19 @@ The gaps, in rough priority:
 The engine's four workflows only deploy the website. The bridge repo has no `.github` at all. Nothing runs gtest, `run-e2e.py`, pytest, ruff or bandit automatically, and nothing runs the two repos against each other.
 
 ### 4.5 Delete the stale trees
-**Engine. Effort: S.**
+**Engine. Effort: S. Status: done.**
 
 `extras/mcp/` is a six-week-old fork of a third of the bridge (no `protocol.py`, `lifecycle.py`, `cli.py`, `tools/bridge.py`, `tools/ghidra.py`, no PROTOCOL.md), is not packaged, is referenced by no build rule, is license-attributed in the shipped `THIRD_PARTY_LICENSES.txt`, and its README tells developers to test against it. Anyone reading the engine repo for the MCP surface reads the wrong code. Delete it or reduce it to a pointer.
 
 `extras/api/` ships a JS client that sends no Authorization header (so it cannot work against a token-enforcing engine), declares response fields the engine deliberately removed, has zero tests, and is the only place `compareAndSwap` and `alloc`/`free` are exercised at all. Decide: fix it or delete it.
+
+**Shipped: deleted both, in full (no pointer file).**
+
+`extras/mcp/`: confirmed zero references anywhere in the build (`CMakeLists.txt`, `tests/CMakeLists.txt`), CI, or docs other than this plan file itself. Removed the whole tree (`README.md`, `dosbox_mcp/` package, `tests/`, `pyproject.toml`) and the now-orphaned `PYTHON MCP BRIDGE (extras/mcp/)` attribution block for `httpx`/`mcp` in the root `THIRD_PARTY_LICENSES.txt` (the file `doc/THIRD_PARTY_LICENSES.txt` copies into the build at configure time - a stale license attribution for code that no longer exists is its own small honesty problem, same family as 4.1/4.6). The real bridge (dosbox-mcp, a separate published repo - `https://github.com/dosbox-automation/dosbox-mcp` per its own `pyproject.toml`) is unaffected.
+
+`extras/api/`: re-checked the plan's specific claims against the current code before deciding, since several turned out to already be stale (a recurring pattern this tier keeps finding - see 4.1's naming-divergence note, 4.2's protocol-version framing). "Declares response fields the engine deliberately removed" no longer held: `api.d.ts`'s `CpuResponse`, `MemoryResponse` (`memory.addr`/`memory.data`, plus `registers`), `AllocateResponse`, and `DosInfo` (`listOfLists`/`dosSwappableArea`/`firstShell`) all still matched `memory.cpp`/`dos.cpp`'s actual JSON output byte for byte. The "no Authorization header" claim did hold, and turned out to be only the surface of a deeper problem: these HTML files are meant to be copied into the webserver config directory and opened directly in a browser (the README's own instructions), but none of `memory.html`/`memory_monitor.html`/`memory_scanner.html`/`api.js`/`api.d.ts` are on `IsPublicDocPath`'s allowlist, so the *page itself* 401s on the plain browser navigation the README describes - before `api.js` ever gets a chance to attach a token to anything. Opening the file directly via `file://` doesn't work either: the engine sets no CORS headers, so a cross-origin `fetch()` from a `file://` page is blocked by the browser regardless of token. Fixing the client-side header is not fixable in isolation - either widen `IsPublicDocPath` for these three filenames (a deliberate exact-match allowlist that 4.2's own item explicitly argued against widening, for the same config-dir-shadowing reason 4.1 flagged) or add a real token-bootstrap flow (a URL query param or session-storage prompt, matching the pattern the bundled Swagger UI's "Authorize" button already uses for `/api.html`) - both are genuine design decisions, not an S-effort fix. Zero tests, zero other references anywhere in the repo, and instructions that don't currently work as written. Deleted rather than half-fixed.
+
+**Verification:** `grep` confirmed no remaining references to either path in `CMakeLists.txt`, `tests/CMakeLists.txt`, `.github/`, or `docs/` (other than this plan entry, kept as a record). No C++ rebuild needed - neither tree was ever part of the build graph, confirmed by the same grep before deleting.
 
 ### 4.6 Make the default token obtainable
 **Engine. Effort: S. Status: done.**
