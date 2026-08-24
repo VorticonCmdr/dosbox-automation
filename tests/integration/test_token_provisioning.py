@@ -52,7 +52,7 @@ def start_with_token_file(work_dir, use_env_token=False, token_file_setting=True
 
     env = {
         **os.environ,
-        "SDL_VIDEODRIVER": "offscreen",
+        "SDL_VIDEODRIVER": "dummy",  # "offscreen" aborts on macOS; see conftest.py
         "SDL_AUDIODRIVER": "dummy",
         "HOME": str(work_dir),
         "XDG_CONFIG_HOME": str(work_dir / ".config"),
@@ -256,7 +256,7 @@ def test_no_full_token_obtainable_when_explicitly_disabled(tmp_path):
 
     env = {
         **os.environ,
-        "SDL_VIDEODRIVER": "offscreen",
+        "SDL_VIDEODRIVER": "dummy",  # "offscreen" aborts on macOS; see conftest.py
         "SDL_AUDIODRIVER": "dummy",
         "HOME": str(work_dir),
         "XDG_CONFIG_HOME": str(work_dir / ".config"),

@@ -75,7 +75,11 @@ def dosbox(tmp_path_factory):
 
     env = {
         **os.environ,
-        "SDL_VIDEODRIVER": "offscreen",
+        # SDL3's "offscreen" driver aborts on macOS (no real display to
+        # get a GL context from). "dummy" is the portable headless
+        # choice - dosbox-mcp's lifecycle.py and run_riptide_demo.py in
+        # this same repo already settled on it for the same reason.
+        "SDL_VIDEODRIVER": "dummy",
         "SDL_AUDIODRIVER": "dummy",
         "HOME": str(work_dir),
         # HOME redirects the config dir on POSIX only; XDG_CONFIG_HOME
@@ -244,7 +248,7 @@ def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
     }
 
     if not visible:
-        env["SDL_VIDEODRIVER"] = "offscreen"
+        env["SDL_VIDEODRIVER"] = "dummy"
         env["SDL_AUDIODRIVER"] = "dummy"
 
     cmd = [
