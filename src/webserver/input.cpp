@@ -19,6 +19,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <limits>
 
 #include "libs/json/json.h"
 
@@ -44,6 +45,54 @@ bool IsValidEventFrame(const int64_t frame)
 bool IsValidTypingCps(const double cps)
 {
 	return cps >= MinTypingCps && cps <= MaxTypingCps;
+}
+
+bool IsValidMouseCoordinate(const int64_t value)
+{
+	return value >= 0 && value <= MaxMouseCoordinate;
+}
+
+bool IsValidMouseCoordinateDouble(const double raw)
+{
+	if (!std::isfinite(raw) || raw != std::floor(raw)) {
+		return false;
+	}
+	// Bounded against a generic, always-narrowing-safe limit before
+	// ever casting to int64_t - a huge-but-finite value (say 1e300)
+	// would be undefined behaviour to cast directly, and this bound is
+	// nowhere near tight enough on its own (IsValidMouseCoordinate's
+	// 0..MaxMouseCoordinate is what actually matters) so the real
+	// bounds check is still delegated below.
+	if (raw < 0.0 ||
+	    raw > static_cast<double>(std::numeric_limits<int32_t>::max())) {
+		return false;
+	}
+	return IsValidMouseCoordinate(static_cast<int64_t>(raw));
+}
+
+// nlohmann's get<uint16_t>() silently wraps a negative or an
+// over-65535 JSON number rather than rejecting it - confirmed directly,
+// not assumed - so the value is range- and integrality-checked
+// explicitly first via IsValidMouseCoordinateDouble. Accepts an
+// integral JSON float (e.g. 100.0, which a recorded event's dumped
+// host_x_abs/host_y_abs - or an agent's own width/2-style arithmetic -
+// is just as likely to produce as a bare integer literal); a genuinely
+// fractional value (100.5) is rejected, same as an out-of-range one.
+// On failure, writes the 400 response itself and returns false.
+static bool parse_mouse_coordinate(const json& value, const std::string& field_name,
+                                   httplib::Response& res, uint16_t& out)
+{
+	if (!value.is_number() ||
+	    !IsValidMouseCoordinateDouble(value.get<double>())) {
+		res.status = 400;
+		json err;
+		err["error"] = "'" + field_name + "' must be an integer 0.." +
+		               std::to_string(MaxMouseCoordinate);
+		send_json(res, err);
+		return false;
+	}
+	out = static_cast<uint16_t>(value.get<double>());
+	return true;
 }
 
 static const std::unordered_map<std::string, KBD_KEYS> key_name_map = {
@@ -174,7 +223,20 @@ static void dispatch_input_event(const InputEvent& ev)
 		KEYBOARD_AddKey(static_cast<KBD_KEYS>(ev.key), ev.pressed);
 		break;
 	case InputEvent::Type::MouseMove:
-		MOUSE_InjectMoved(ev.x_rel, ev.y_rel);
+		if (ev.has_abs) {
+			// Guest pixel coordinates, warped directly through the
+			// DOS driver's own state - MOUSE_InjectMoved has no
+			// absolute-position path that lands on an exact guest
+			// pixel (see MOUSEDOS_SetPosition's comment). Any
+			// x_rel/ y_rel on the same event is intentionally
+			// dropped: a hand-authored event asking for both is
+			// ambiguous, and the closed-loop absolute jump is what
+			// the caller most likely wants.
+			MOUSEDOS_SetPosition(static_cast<uint16_t>(ev.x_abs),
+			                     static_cast<uint16_t>(ev.y_abs));
+		} else {
+			MOUSE_InjectMoved(ev.x_rel, ev.y_rel);
+		}
 		break;
 	case InputEvent::Type::MouseButton: {
 		auto it = button_name_map.find(ev.button);
@@ -646,8 +708,31 @@ void InputSequenceCommand::Post(const httplib::Request& req, httplib::Response& 
 			ev.type  = InputEvent::Type::MouseMove;
 			ev.x_rel = jev.value("x_rel", 0.0f);
 			ev.y_rel = jev.value("y_rel", 0.0f);
-			ev.x_abs = jev.value("x_abs", 0.0f);
-			ev.y_abs = jev.value("y_abs", 0.0f);
+
+			const bool has_x_abs = jev.contains("x_abs");
+			const bool has_y_abs = jev.contains("y_abs");
+			if (has_x_abs != has_y_abs) {
+				res.status = 400;
+				json err;
+				err["error"] =
+				        "'x_abs' and 'y_abs' must be given "
+				        "together, or not at all";
+				send_json(res, err);
+				return;
+			}
+			ev.has_abs = has_x_abs && has_y_abs;
+			if (ev.has_abs) {
+				uint16_t x_abs = 0;
+				uint16_t y_abs = 0;
+				if (!parse_mouse_coordinate(
+				            jev["x_abs"], "x_abs", res, x_abs) ||
+				    !parse_mouse_coordinate(
+				            jev["y_abs"], "y_abs", res, y_abs)) {
+					return;
+				}
+				ev.x_abs = static_cast<float>(x_abs);
+				ev.y_abs = static_cast<float>(y_abs);
+			}
 		} else if (type_str == "mouse_button") {
 			ev.type    = InputEvent::Type::MouseButton;
 			ev.button  = jev.value("button", "left");
@@ -971,7 +1056,7 @@ void InputRecording::InstallHooks()
 	mouse_wheel_hook    = hook_mouse_wheel;
 }
 
-static json event_to_json(const InputEvent& ev)
+json EventToJson(const InputEvent& ev)
 {
 	json j;
 	j["t"]     = ev.t_ms;
@@ -989,8 +1074,16 @@ static json event_to_json(const InputEvent& ev)
 		j["type"]  = "mouse_move";
 		j["x_rel"] = ev.x_rel;
 		j["y_rel"] = ev.y_rel;
-		j["x_abs"] = ev.x_abs;
-		j["y_abs"] = ev.y_abs;
+		// Host window pixel coordinates at record time, for
+		// inspection only - a different coordinate space from
+		// mouse_move's own 'x_abs'/'y_abs' request field (guest DOS
+		// screen pixels, see dispatch_input_event), and deliberately
+		// named apart from it: reposting this dump verbatim as a
+		// /input/sequence body must fail loudly on the unrecognized
+		// field name rather than silently warping the cursor with a
+		// value from the wrong coordinate space.
+		j["host_x_abs"] = ev.x_abs;
+		j["host_y_abs"] = ev.y_abs;
 		break;
 	case InputEvent::Type::MouseButton:
 		j["type"]    = "mouse_button";
@@ -1089,7 +1182,7 @@ void RecordingHandlers::PostStop(const httplib::Request& req, httplib::Response&
 	}
 	for (const auto& ev : cmd.events) {
 		if (include_events) {
-			events_json.push_back(event_to_json(ev));
+			events_json.push_back(EventToJson(ev));
 		}
 		if (ev.t_ms > duration) {
 			duration = ev.t_ms;
@@ -1569,6 +1662,100 @@ void ReplayDispatchFrame(uint64_t current_frame)
 		        expected_ms,
 		        wall_drift);
 	}
+}
+
+// --- Mouse position (INT 33h driver only, see mouse.h) ---
+
+void MouseGetPositionCommand::Execute()
+{
+	const auto position = MOUSEDOS_GetPosition();
+	driver_started      = position.has_value();
+	if (position) {
+		x = position->x;
+		y = position->y;
+	}
+
+	const auto buttons = MOUSEDOS_GetButtons();
+	if (buttons) {
+		button_left   = buttons->left;
+		button_right  = buttons->right;
+		button_middle = buttons->middle;
+	}
+}
+
+void MouseGetPositionCommand::Get(const httplib::Request&, httplib::Response& res)
+{
+	MouseGetPositionCommand cmd;
+	cmd.WaitForCompletion();
+
+	json buttons;
+	buttons["left"]   = cmd.button_left;
+	buttons["right"]  = cmd.button_right;
+	buttons["middle"] = cmd.button_middle;
+
+	json result;
+	result["driver_started"] = cmd.driver_started;
+	result["x"]              = cmd.x;
+	result["y"]              = cmd.y;
+	result["buttons"]        = buttons;
+	send_json(res, result);
+}
+
+void MouseSetPositionCommand::Execute()
+{
+	if (!MOUSEDOS_SetPosition(x, y)) {
+		error = "DOS mouse driver not started, or guest is running "
+		        "Windows in 386 Enhanced mode";
+		return;
+	}
+
+	// Report back what was actually applied: limit_coordinates() inside
+	// MOUSEDOS_SetPosition may have clamped the request to the driver's
+	// current min/max range, and get_pos_x()/get_pos_y() (via
+	// MOUSEDOS_GetPosition) floor it further to the driver's position
+	// granularity regardless of clamping.
+	const auto position = MOUSEDOS_GetPosition();
+	if (position) {
+		applied_x = position->x;
+		applied_y = position->y;
+	}
+}
+
+void MouseSetPositionCommand::Post(const httplib::Request& req, httplib::Response& res)
+{
+	auto body = json::parse(req.body);
+
+	if (!body.contains("x") || !body.contains("y")) {
+		res.status = 400;
+		json err;
+		err["error"] = "Missing 'x' or 'y'";
+		send_json(res, err);
+		return;
+	}
+
+	uint16_t x = 0;
+	uint16_t y = 0;
+	if (!parse_mouse_coordinate(body["x"], "x", res, x) ||
+	    !parse_mouse_coordinate(body["y"], "y", res, y)) {
+		return;
+	}
+
+	MouseSetPositionCommand cmd(x, y);
+	cmd.WaitForCompletion();
+
+	if (!cmd.error.empty()) {
+		res.status = 409;
+		json err;
+		err["error"] = cmd.error;
+		send_json(res, err);
+		return;
+	}
+
+	json result;
+	result["status"] = "ok";
+	result["x"]      = cmd.applied_x;
+	result["y"]      = cmd.applied_y;
+	send_json(res, result);
 }
 
 // --- Input Type (text injection over REST) ---

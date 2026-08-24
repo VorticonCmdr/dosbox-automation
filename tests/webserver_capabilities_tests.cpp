@@ -36,6 +36,7 @@ using Webserver::MaxBatchReadBytes;
 using Webserver::MaxBatchWriteBytes;
 using Webserver::MaxInputEvents;
 using Webserver::MaxMemoryTransferBytes;
+using Webserver::MaxMouseCoordinate;
 using Webserver::MaxPatternLen;
 using Webserver::MaxRequestBodyBytes;
 using Webserver::MaxSearchSpanBytes;
@@ -136,6 +137,8 @@ TEST(BuildCapabilitiesBlockTest, LimitsMatchTheSameNamedConstantsTheValidatorsUs
 	EXPECT_EQ(capabilities["input"]["limits"]["max_events"], MaxInputEvents);
 	EXPECT_EQ(capabilities["input"]["limits"]["max_typed_text_chars"],
 	          MaxTypedTextChars);
+	EXPECT_EQ(capabilities["input"]["limits"]["max_mouse_coordinate"],
+	          MaxMouseCoordinate);
 
 	EXPECT_EQ(capabilities["freeze"]["limits"]["max_entries"],
 	          FreezeRegistry::MaxEntries);

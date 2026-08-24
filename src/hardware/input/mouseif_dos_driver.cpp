@@ -10,6 +10,7 @@
 #include "private/mouseif_dos_driver_state.h"
 
 #include <algorithm>
+#include <optional>
 
 #include "cpu/callback.h"
 #include "cpu/cpu.h"
@@ -124,6 +125,17 @@ static struct {
 	bool has_button_changed = false;
 	bool has_wheel_moved    = false;
 
+	// Set alongside has_mouse_moved by MOUSEDOS_SetPosition, which
+	// already applies its position change synchronously (unlike a
+	// captured/seamless move, which move_cursor() applies lazily from
+	// x_rel/x_abs at event time). Without this, update_moved()'s
+	// non-immediate-mode path would recompute against pending.x_rel/
+	// x_abs (typically zero), see no further change versus the
+	// already-applied position, and silently report no event at all -
+	// consumed the first time update_moved() runs, forcing exactly one
+	// MouseHasMoved report regardless of mode.
+	bool force_moved_event = false;
+
 	MouseButtons12S button_state = 0;
 
 	// If set, disable the wheel API during the next interrupt
@@ -150,6 +162,7 @@ static struct {
 		has_mouse_moved    = false;
 		has_button_changed = false;
 		has_wheel_moved    = false;
+		force_moved_event  = false;
 	}
 } pending;
 
@@ -281,6 +294,7 @@ static void clear_pending_events()
 	pending.has_mouse_moved    = false;
 	pending.has_button_changed = pending.button_state._data;
 	pending.has_wheel_moved    = false;
+	pending.force_moved_event  = false;
 	maybe_start_delay_timer(delay_ms);
 }
 
@@ -1385,6 +1399,13 @@ static uint8_t move_cursor()
 
 static uint8_t update_moved()
 {
+	if (pending.force_moved_event) {
+		// MOUSEDOS_SetPosition already applied its change directly;
+		// move_cursor() would see nothing left to do and report no
+		// event. Report it here instead, once.
+		pending.force_moved_event = false;
+		return enum_val(MouseEventId::MouseHasMoved);
+	}
 	if (is_immediate_mode()) {
 		return enum_val(MouseEventId::MouseHasMoved);
 	} else {
@@ -1558,6 +1579,88 @@ void MOUSEDOS_InjectRelativeMoved(const float x_rel, const float y_rel)
 	force_relative_next     = true;
 	pending.has_mouse_moved = true;
 	maybe_trigger_event();
+}
+
+// MOUSEDOS_GetPosition/GetButtons/SetPosition are reachable only from the
+// webserver Bridge - a host-triggered entry point with no relationship to
+// which VM currently has the CPU, the same category as MOUSEDOS_NotifyMoved/
+// NotifyButton/NotifyWheel/SetDelay (each carrying "Do not access 'state'
+// here in Windows 386 Enhanced mode, it might lead to crashes as the VM
+// context is unspecified here!"). Unlike those, this trio's whole job is to
+// read or write 'state' directly - there's no pending-flag-only path to
+// defer to a safe context the way NotifyMoved defers to move_cursor(). So
+// refuse outright while is_win386_mode is set, exactly as if the driver had
+// never started: report that honestly rather than risk touching guest
+// memory from an unspecified VM context.
+static bool is_position_accessible()
+{
+	return MOUSEDOS_IsDriverStarted() && !is_win386_mode;
+}
+
+std::optional<MouseDosPosition> MOUSEDOS_GetPosition()
+{
+	if (!is_position_accessible()) {
+		return std::nullopt;
+	}
+
+	MouseDosPosition result = {};
+	result.x                = get_pos_x();
+	result.y                = get_pos_y();
+	return result;
+}
+
+std::optional<MouseDosButtons> MOUSEDOS_GetButtons()
+{
+	if (!is_position_accessible()) {
+		return std::nullopt;
+	}
+
+	MouseDriverState state(*state_segment);
+	const auto buttons = state.GetButtons();
+
+	MouseDosButtons result = {};
+	result.left            = static_cast<bool>(buttons.left);
+	result.right           = static_cast<bool>(buttons.right);
+	result.middle          = static_cast<bool>(buttons.middle);
+	return result;
+}
+
+bool MOUSEDOS_SetPosition(const uint16_t x, const uint16_t y)
+{
+	if (!is_position_accessible()) {
+		return false;
+	}
+
+	// Same recipe INT 33h function 0x04 uses to reposition the cursor
+	// synchronously (see int33_handler's case 0x04): set the raw driver
+	// state directly and clamp - do not route through move_cursor(),
+	// which only knows how to apply a relative delta (captured mode) or
+	// a host-resolution-normalized absolute position (seamless mode),
+	// neither of which can land on an exact guest pixel.
+	MouseDriverState state(*state_segment);
+	state.SetPosX(static_cast<float>(x));
+	state.SetPosY(static_cast<float>(y));
+	limit_coordinates();
+
+	draw_cursor();
+
+	// This warp supersedes any relative motion already queued (from
+	// genuine host mouse movement, or an x_rel/y_rel event batched
+	// alongside this one) - without clearing it, move_cursor() would
+	// apply that stale delta on top of the position just set here the
+	// next time it runs, silently displacing the cursor away from what
+	// was just reported as applied.
+	pending.x_rel = 0.0f;
+	pending.y_rel = 0.0f;
+
+	// Report the change as a genuine mouse-moved event too, so a guest
+	// callback registered via function 0x0C sees it (see update_moved's
+	// force_moved_event check).
+	pending.force_moved_event = true;
+	pending.has_mouse_moved   = true;
+	maybe_trigger_event();
+
+	return true;
 }
 
 void MOUSEDOS_NotifyButton(const MouseButtons12S new_buttons_12S)
@@ -1855,8 +1958,8 @@ static Bitu int33_handler()
 			// Battle Chess wants this
 			auto pos_x = state.GetPosX();
 			pos_x      = std::clamp(pos_x,
-                                           static_cast<float>(min),
-                                           static_cast<float>(max));
+			                        static_cast<float>(min),
+			                        static_cast<float>(max));
 			// Or alternatively this:
 			// pos_x = (max - min + 1) / 2;
 			state.SetPosX(pos_x);
@@ -1880,8 +1983,8 @@ static Bitu int33_handler()
 			// Battle Chess wants this
 			auto pos_y = state.GetPosY();
 			pos_y      = std::clamp(pos_y,
-                                           static_cast<float>(min),
-                                           static_cast<float>(max));
+			                        static_cast<float>(min),
+			                        static_cast<float>(max));
 			// Or alternatively this:
 			// pos_x = (max - min + 1) / 2;
 			state.SetPosY(pos_y);
@@ -2622,7 +2725,7 @@ void MOUSEDOS_HandleWindowsStartup()
 
 	// Setup Windows/386 communication structures
 	const auto startup_ptr   = RealMake(*state_segment,
-                                          state.GetWin386StartupOffset());
+	                                    state.GetWin386StartupOffset());
 	const auto instances_ptr = RealMake(*state_segment,
 	                                    state.GetWin386InstancesOffset());
 

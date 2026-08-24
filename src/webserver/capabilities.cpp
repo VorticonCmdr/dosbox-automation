@@ -133,6 +133,7 @@ json BuildCapabilitiesBlock()
 	input_limits["replay_stall_threshold_ms"] = ReplayStallThresholdMs;
 	input_limits["max_recording_name_length"] = MaxRecordingNameLength;
 	input_limits["max_stored_recordings"]     = MaxStoredRecordings;
+	input_limits["max_mouse_coordinate"]      = MaxMouseCoordinate;
 
 	json cpu_control_limits;
 	cpu_control_limits["cycles_min"] = CpuCyclesMin;

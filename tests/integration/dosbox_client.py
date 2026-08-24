@@ -122,6 +122,19 @@ class DosboxClient:
     def replay_cancel(self) -> requests.Response:
         return self._delete("/api/v1/input/replay")
 
+    def mouse_position(self) -> requests.Response:
+        return self._get("/api/v1/input/mouse")
+
+    def mouse_set_position(self, x, y) -> requests.Response:
+        return self._post("/api/v1/input/mouse", json={"x": x, "y": y})
+
+    def mouse_set_position_raw(self, body: str) -> requests.Response:
+        return self._post(
+            "/api/v1/input/mouse",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+
     # --- Recording ---
 
     def recording_start(self) -> requests.Response:

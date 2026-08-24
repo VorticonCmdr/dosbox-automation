@@ -4,6 +4,8 @@
 
 #include "webserver/input.h"
 
+#include "hardware/input/keyboard.h"
+
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
@@ -120,9 +122,161 @@ TEST(TypingCpsValidation, AcceptsBoundaries)
 	EXPECT_TRUE(IsValidTypingCps(1000.0));
 }
 
+// -- MouseCoordinateValidation --
+
+using Webserver::IsValidMouseCoordinate;
+
+TEST(MouseCoordinateValidation, AcceptsZero)
+{
+	EXPECT_TRUE(IsValidMouseCoordinate(0));
+}
+
+TEST(MouseCoordinateValidation, AcceptsOrdinaryValue)
+{
+	EXPECT_TRUE(IsValidMouseCoordinate(320));
+}
+
+TEST(MouseCoordinateValidation, RejectsNegative)
+{
+	EXPECT_FALSE(IsValidMouseCoordinate(-1));
+}
+
+TEST(MouseCoordinateValidation, AcceptsUpperBoundary)
+{
+	EXPECT_TRUE(IsValidMouseCoordinate(65535));
+}
+
+TEST(MouseCoordinateValidation, RejectsJustPastUpperBoundary)
+{
+	EXPECT_FALSE(IsValidMouseCoordinate(65536));
+}
+
+TEST(MouseCoordinateValidation,
+     RejectsValueThatWouldWrapToInRangeOnNaiveUint16Conversion)
+{
+	// get<uint16_t>() on this value silently wraps to 4464 (70000 %
+	// 65536) rather than rejecting it - confirmed directly against
+	// nlohmann, not assumed.
+	EXPECT_FALSE(IsValidMouseCoordinate(70000));
+}
+
+// -- MouseCoordinateValidationDouble --
+//
+// The double-based check parse_mouse_coordinate actually calls on every
+// POST /api/v1/input/mouse and mouse_move x_abs/y_abs request - see
+// input.h's IsValidMouseCoordinateDouble doc comment.
+
+using Webserver::IsValidMouseCoordinateDouble;
+
+TEST(MouseCoordinateValidationDouble, AcceptsZero)
+{
+	EXPECT_TRUE(IsValidMouseCoordinateDouble(0.0));
+}
+
+TEST(MouseCoordinateValidationDouble, AcceptsIntegralFloat)
+{
+	// 100.0 (a JSON float that happens to be integral) must be treated
+	// the same as the bare integer literal 100 - e.g. a recorded
+	// event's dumped host_x_abs/host_y_abs, or an agent's own
+	// width/2-style arithmetic, is at least as likely to produce this
+	// as a bare integer.
+	EXPECT_TRUE(IsValidMouseCoordinateDouble(320.0));
+}
+
+TEST(MouseCoordinateValidationDouble, RejectsFractional)
+{
+	EXPECT_FALSE(IsValidMouseCoordinateDouble(100.5));
+}
+
+TEST(MouseCoordinateValidationDouble, RejectsNegative)
+{
+	EXPECT_FALSE(IsValidMouseCoordinateDouble(-1.0));
+}
+
+TEST(MouseCoordinateValidationDouble, RejectsJustPastUpperBoundary)
+{
+	EXPECT_FALSE(IsValidMouseCoordinateDouble(65536.0));
+}
+
+TEST(MouseCoordinateValidationDouble, AcceptsUpperBoundary)
+{
+	EXPECT_TRUE(IsValidMouseCoordinateDouble(65535.0));
+}
+
+TEST(MouseCoordinateValidationDouble, RejectsNaN)
+{
+	EXPECT_FALSE(IsValidMouseCoordinateDouble(
+	        std::numeric_limits<double>::quiet_NaN()));
+}
+
+TEST(MouseCoordinateValidationDouble, RejectsPositiveInfinity)
+{
+	EXPECT_FALSE(IsValidMouseCoordinateDouble(
+	        std::numeric_limits<double>::infinity()));
+}
+
+TEST(MouseCoordinateValidationDouble, RejectsNegativeInfinity)
+{
+	EXPECT_FALSE(IsValidMouseCoordinateDouble(
+	        -std::numeric_limits<double>::infinity()));
+}
+
+TEST(MouseCoordinateValidationDouble,
+     RejectsExtremeValueThatWouldOverflowInt64OnNaiveConversion)
+{
+	// Casting this straight to int64_t (skipping the pre-bound check)
+	// would be undefined behaviour.
+	EXPECT_FALSE(IsValidMouseCoordinateDouble(1e300));
+}
+
+// -- EventToJson --
+
+using Webserver::EventToJson;
+using Webserver::InputEvent;
+
+TEST(EventToJsonTest, MouseMoveSerializesHostAbsFieldsNotRequestAbsFields)
+{
+	// A recorded MouseMove's absolute position must come out as
+	// host_x_abs/host_y_abs, in a genuinely different coordinate space
+	// (host window pixels) from the request-body 'x_abs'/'y_abs' field
+	// (guest DOS screen pixels) - reposting this dump verbatim as a
+	// /input/sequence body must fail loudly on the unrecognized field
+	// name rather than silently misinterpreting the coordinate space.
+	InputEvent ev;
+	ev.type    = InputEvent::Type::MouseMove;
+	ev.x_rel   = 5.0f;
+	ev.y_rel   = -2.0f;
+	ev.x_abs   = 320.0f;
+	ev.y_abs   = 180.0f;
+	ev.has_abs = false; // never set by the recording pipeline
+
+	const auto j = EventToJson(ev);
+
+	EXPECT_EQ(j.at("type"), "mouse_move");
+	EXPECT_EQ(j.at("x_rel"), 5.0f);
+	EXPECT_EQ(j.at("y_rel"), -2.0f);
+	EXPECT_EQ(j.at("host_x_abs"), 320.0f);
+	EXPECT_EQ(j.at("host_y_abs"), 180.0f);
+	EXPECT_FALSE(j.contains("x_abs"));
+	EXPECT_FALSE(j.contains("y_abs"));
+}
+
+TEST(EventToJsonTest, KeyEventSerializesTypeKeyAndPressed)
+{
+	InputEvent ev;
+	ev.type    = InputEvent::Type::Key;
+	ev.key     = static_cast<int>(KBD_enter);
+	ev.pressed = true;
+
+	const auto j = EventToJson(ev);
+
+	EXPECT_EQ(j.at("type"), "key");
+	EXPECT_EQ(j.at("key"), "KBD_enter");
+	EXPECT_EQ(j.at("pressed"), true);
+}
+
 // -- RecordingStore --
 
-using Webserver::InputEvent;
 namespace RecordingStore = Webserver::RecordingStore;
 
 TEST(RecordingStoreNameValidation, AcceptsAlphanumericHyphenUnderscore)

@@ -7,6 +7,7 @@
 
 #include "bridge.h"
 #include "libs/http/http.h"
+#include "libs/json/json.h"
 
 #include <cstdint>
 #include <optional>
@@ -34,6 +35,15 @@ struct InputEvent {
 	// Mouse move params
 	float x_rel = 0, y_rel = 0;
 	float x_abs = 0, y_abs = 0;
+	// Whether x_abs/y_abs were explicitly given (as opposed to
+	// defaulted to 0) - a hand-authored mouse_move event's (0,0) is a
+	// legal target, so presence has to be tracked separately from the
+	// value. Only ever set true by the /input/sequence JSON parser;
+	// InputRecording::OnMouseMove never sets it, since a recorded
+	// event's x_abs/y_abs are host window coordinates (see
+	// EventToJson), not the guest pixel coordinates this flag promises
+	// dispatch_input_event.
+	bool has_abs = false;
 
 	// Mouse button params
 	std::string button = {};
@@ -41,6 +51,16 @@ struct InputEvent {
 	// Mouse wheel params
 	float wheel_delta = 0;
 };
+
+// Serializes one event the same way RecordingHandlers::PostStop's
+// include_events=true response does - a recorded MouseMove's absolute
+// position comes out as 'host_x_abs'/'host_y_abs' (host window pixels
+// at record time), never 'x_abs'/'y_abs' (the request-body field,
+// guest DOS screen pixels - see dispatch_input_event and
+// MOUSEDOS_SetPosition), so a dump can never be reposted verbatim as a
+// /input/sequence body and silently warp the cursor with the wrong
+// numbers. Exposed for testing.
+nlohmann::json EventToJson(const InputEvent& ev);
 
 // Upper bound for an event's position on the replay timeline ('t',
 // 'delay_ms' after accumulation, and 'cps'-derived timing). PIC_AddEvent
@@ -110,6 +130,29 @@ bool IsValidEventFrame(int64_t frame);
 // zero derives event timing far past IsValidEventTimeMs' bound just as
 // surely as an out-of-range 't' or 'delay_ms' does. Exposed for testing.
 bool IsValidTypingCps(double cps);
+
+// Upper bound for a mouse coordinate: POST /api/v1/input/mouse's 'x'/'y',
+// and a mouse_move event's 'x_abs'/'y_abs' when explicitly given. Matches
+// uint16_t's range, which MOUSEDOS_SetPosition further clamps to the
+// driver's live min/max - this only rejects what get<uint16_t>() would
+// otherwise silently wrap (negative, or above this) before that clamp
+// ever sees it.
+inline constexpr int64_t MaxMouseCoordinate = 65535;
+
+// Exposed for testing.
+bool IsValidMouseCoordinate(int64_t value);
+
+// The same bound, applied to a JSON number's raw double value before
+// it's ever narrowed to an integer type: rejects non-finite (NaN/Inf)
+// and genuinely fractional (100.5) values in addition to
+// IsValidMouseCoordinate's own range, and does so without risking
+// undefined behaviour from casting an out-of-range-but-finite double
+// straight to int64_t. This is the check that actually runs on every
+// POST /api/v1/input/mouse and mouse_move x_abs/y_abs request (see
+// parse_mouse_coordinate in input.cpp) - IsValidMouseCoordinate alone
+// is exposed for testing its own bound in isolation. Exposed for
+// testing.
+bool IsValidMouseCoordinateDouble(double raw);
 
 class InputSequenceCommand : public Command {
 public:
@@ -292,6 +335,52 @@ public:
 
 struct ReplayHandlers {
 	static void GetStatus(const httplib::Request&, httplib::Response& res);
+};
+
+// GET /api/v1/input/mouse: the built-in INT 33h driver's own idea of
+// where the cursor is and which buttons are down, read directly from
+// its state segment - a Bridge Command since that's live guest memory.
+// driver_started is false (x/y/buttons all defaulted) for a guest that
+// never installed the driver, one talking to the PS/2 or serial mouse
+// directly instead (Windows 3.x, some protected-mode games), or one
+// currently running Windows 3.x in 386 Enhanced mode (see
+// MOUSEDOS_GetPosition/is_position_accessible - touching the driver's
+// state from this route is unsafe there regardless of whether it was
+// started) - reported honestly rather than faked, since none of those
+// guests have a readable position here.
+class MouseGetPositionCommand : public Command {
+public:
+	void Execute() override;
+	static void Get(const httplib::Request&, httplib::Response& res);
+
+	bool driver_started = false;
+	uint16_t x          = 0;
+	uint16_t y          = 0;
+	bool button_left    = false;
+	bool button_right   = false;
+	bool button_middle  = false;
+};
+
+// POST /api/v1/input/mouse {x, y}: warps the INT 33h driver's cursor to
+// an exact guest pixel position (clamped to the driver's current
+// min/max range, then floored to its position granularity - a multiple
+// of a few pixels in most video modes, independent of any clamping -
+// see get_pos_x/get_pos_y) and reports a mouse-moved event so a
+// registered guest callback fires with the new position. error is set
+// (surfaced as 409) if the driver was never started, or the guest is
+// currently running Windows 3.x in 386 Enhanced mode - see
+// MouseGetPositionCommand's driver_started.
+class MouseSetPositionCommand : public Command {
+public:
+	MouseSetPositionCommand(const uint16_t x, const uint16_t y) : x(x), y(y)
+	{}
+	void Execute() override;
+	static void Post(const httplib::Request& req, httplib::Response& res);
+
+	uint16_t x         = 0;
+	uint16_t y         = 0;
+	uint16_t applied_x = 0;
+	uint16_t applied_y = 0;
 };
 
 } // namespace Webserver

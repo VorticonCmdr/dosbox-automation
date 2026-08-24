@@ -174,15 +174,21 @@ def test_input_delay_ms_relative_timing(dosbox):
     assert r.json()["events_scheduled"] == 4
 
 
-def test_input_recording_fields_still_accepted(dosbox):
-    # Recorded replays carry x_abs/y_abs metadata alongside the deltas;
-    # they must keep replaying
+def test_input_mouse_move_x_abs_warps_and_ignores_x_rel(dosbox):
+    # x_abs/y_abs on a mouse_move event warp the DOS driver's cursor
+    # directly (item 2.14); x_rel/y_rel on the same event are ignored
+    # once both are given. Multiples of 8 sidestep the driver's own
+    # position granularity masking so the landed position is exact.
     r = dosbox.input_sequence([{
         "type": "mouse_move",
-        "t": 0, "frame": 1,
-        "x_rel": 2.0, "y_rel": 3.0, "x_abs": 100.0, "y_abs": 50.0,
+        "x_rel": 2000.0, "y_rel": 2000.0, "x_abs": 96, "y_abs": 48,
     }])
     assert r.status_code == 200
+    time.sleep(0.3)
+    pos = dosbox.mouse_position().json()
+    if pos["driver_started"]:
+        assert pos["x"] == 96
+        assert pos["y"] == 48
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +257,19 @@ def test_input_negative_delay_rejected(dosbox):
     assert r.status_code == 400
     r = dosbox.input_sequence([
         {"type": "key", "key": "KBD_a", "t": -5},
+    ])
+    assert r.status_code == 400
+
+
+def test_input_mouse_move_x_abs_without_y_abs_rejected(dosbox):
+    r = dosbox.input_sequence([{"type": "mouse_move", "x_abs": 100}])
+    assert r.status_code == 400
+    assert "y_abs" in r.json()["error"]
+
+
+def test_input_mouse_move_x_abs_out_of_range_rejected(dosbox):
+    r = dosbox.input_sequence([
+        {"type": "mouse_move", "x_abs": 70000, "y_abs": 50},
     ])
     assert r.status_code == 400
 
@@ -354,6 +373,110 @@ def test_replay_cancel_when_nothing_active(dosbox):
     r = dosbox.replay_cancel()
     assert r.status_code == 200
     assert r.json()["cancelled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Mouse position
+# ---------------------------------------------------------------------------
+
+def test_mouse_position_shape(dosbox):
+    r = dosbox.mouse_position()
+    assert r.status_code == 200
+    data = r.json()
+    assert "driver_started" in data
+    assert "x" in data
+    assert "y" in data
+    assert set(data["buttons"].keys()) == {"left", "right", "middle"}
+
+
+def test_mouse_set_position_round_trips(dosbox):
+    # Multiples of 8 sidestep the driver's own position granularity
+    # masking (see get_pos_x/get_pos_y) so the landed position is exact.
+    r = dosbox.mouse_set_position(96, 48)
+    assert r.status_code == 200
+    data = r.json()
+    if data.get("status") == "ok":
+        assert data["x"] == 96
+        assert data["y"] == 48
+        assert dosbox.mouse_position().json()["x"] == 96
+        assert dosbox.mouse_position().json()["y"] == 48
+    else:
+        # Driver never started in this environment - refused, not
+        # silently accepted.
+        assert r.status_code == 409
+
+
+def test_mouse_set_position_clamps_out_of_screen_range(dosbox):
+    # Within the 0..65535 wire range but almost certainly past the
+    # driver's actual screen resolution - must clamp, not error.
+    r = dosbox.mouse_set_position(60000, 60000)
+    assert r.status_code in (200, 409)
+    if r.status_code == 200:
+        data = r.json()
+        assert data["x"] < 60000
+        assert data["y"] < 60000
+
+
+def test_mouse_set_position_rejects_out_of_wire_range(dosbox):
+    r = dosbox.mouse_set_position(70000, 50)
+    assert r.status_code == 400
+
+
+def test_mouse_set_position_rejects_negative(dosbox):
+    r = dosbox.mouse_set_position(-1, 50)
+    assert r.status_code == 400
+
+
+def test_mouse_set_position_rejects_fractional(dosbox):
+    r = dosbox.mouse_set_position(10.5, 50)
+    assert r.status_code == 400
+
+
+def test_mouse_set_position_accepts_integral_float(dosbox):
+    r = dosbox.mouse_set_position(96.0, 48.0)
+    assert r.status_code in (200, 409)
+
+
+def test_mouse_set_position_missing_field(dosbox):
+    r = dosbox.mouse_set_position_raw(json.dumps({"x": 10}))
+    assert r.status_code == 400
+
+
+def test_mouse_set_position_does_not_leave_a_stale_relative_delta(dosbox):
+    # Regression test for an adversarial-review finding on item 2.14:
+    # MOUSEDOS_SetPosition used to warp the cursor without clearing
+    # pending.x_rel/y_rel, so a relative delta queued just before the
+    # warp (from a real host move, or an x_rel/y_rel event batched
+    # alongside the x_abs one) silently re-applied on top of the
+    # just-set position the next time any unrelated movement occurred.
+    # Coordinates are multiples of 8 to sidestep the driver's own
+    # position granularity masking.
+    r = dosbox.mouse_set_position(96, 48)
+    assert r.status_code == 200
+
+    r = dosbox.input_sequence([
+        {"type": "mouse_move", "x_rel": 500, "y_rel": 0},
+        {"type": "mouse_move", "x_abs": 400, "y_abs": 104},
+    ])
+    assert r.status_code == 200
+    time.sleep(0.3)
+
+    pos = dosbox.mouse_position().json()
+    if not pos["driver_started"]:
+        return
+    assert pos["x"] == 400
+    assert pos["y"] == 104
+
+    # A subsequent, unrelated small move used to be where the stale
+    # x_rel=500 got silently flushed on top of the warped position.
+    r = dosbox.input_sequence([{"type": "mouse_move", "x_rel": 8, "y_rel": 0}])
+    assert r.status_code == 200
+    time.sleep(0.3)
+
+    pos = dosbox.mouse_position().json()
+    assert pos["x"] == 408, (
+        f"stale relative delta re-applied: expected x=408, got x={pos['x']}"
+    )
 
 
 # ---------------------------------------------------------------------------

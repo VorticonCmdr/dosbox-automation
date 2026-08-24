@@ -6,6 +6,7 @@
 #define DOSBOX_MOUSE_H
 
 #include <array>
+#include <optional>
 #include <regex>
 #include <string>
 #include <vector>
@@ -18,7 +19,7 @@
 // Initialization, configuration
 // ***************************************************************************
 
-void MOUSE_AddConfigSection(const ConfigPtr &);
+void MOUSE_AddConfigSection(const ConfigPtr&);
 void MOUSE_Init();
 
 // ***************************************************************************
@@ -35,12 +36,12 @@ enum class MouseInterfaceId {
 };
 
 constexpr std::array<MouseInterfaceId, 6> AllMouseInterfaceIds = {
-	MouseInterfaceId::DOS,
-	MouseInterfaceId::PS2,
-	MouseInterfaceId::COM1,
-	MouseInterfaceId::COM2,
-	MouseInterfaceId::COM3,
-	MouseInterfaceId::COM4,
+        MouseInterfaceId::DOS,
+        MouseInterfaceId::PS2,
+        MouseInterfaceId::COM1,
+        MouseInterfaceId::COM2,
+        MouseInterfaceId::COM3,
+        MouseInterfaceId::COM4,
 };
 
 enum class MouseMapStatus {
@@ -80,8 +81,8 @@ enum class MouseHint {
 // Notifications from external subsystems - all should go via these methods
 // ***************************************************************************
 
-void MOUSE_EventMoved(const float x_rel, const float y_rel,
-                      const float x_abs, const float y_abs);
+void MOUSE_EventMoved(const float x_rel, const float y_rel, const float x_abs,
+                      const float y_abs);
 void MOUSE_EventMoved(const float x_rel, const float y_rel,
                       const MouseInterfaceId device_id);
 
@@ -99,7 +100,7 @@ void MOUSE_InjectWheel(const float w_rel);
 
 using MouseMoveHookFn = void (*)(float x_rel, float y_rel, float x_abs, float y_abs);
 using MouseButtonHookFn = void (*)(int button_id, bool pressed);
-using MouseWheelHookFn = void (*)(float delta);
+using MouseWheelHookFn  = void (*)(float delta);
 extern MouseMoveHookFn mouse_move_hook;
 extern MouseButtonHookFn mouse_button_hook;
 extern MouseWheelHookFn mouse_wheel_hook;
@@ -144,7 +145,7 @@ struct MouseScreenParams {
 };
 
 // To be called when screen mode changes, emulator window gets resized, etc.
-void MOUSE_NewScreenParams(const MouseScreenParams &params);
+void MOUSE_NewScreenParams(const MouseScreenParams& params);
 
 // Notification that user pressed/released the hotkey combination
 // to capture/release the mouse
@@ -171,6 +172,39 @@ bool MOUSEDOS_NeedsAutoexecEntry();
 
 bool MOUSEDOS_IsDriverStarted();
 bool MOUSEDOS_StartDriver(const bool force_low_memory = false);
+
+// Cursor position and button state, read directly from the driver's
+// state segment (bypassing the interrupt interface entirely). Only
+// reflects the built-in INT 33h driver's own idea of where the cursor
+// is: a guest talking to the PS/2 or serial mouse directly (Windows
+// 3.x, some protected-mode games) has no readable position here.
+struct MouseDosPosition {
+	uint16_t x = 0;
+	uint16_t y = 0;
+};
+struct MouseDosButtons {
+	bool left   = false;
+	bool right  = false;
+	bool middle = false;
+};
+
+// std::nullopt if MOUSEDOS_IsDriverStarted() is false, or the guest is
+// currently running Windows 3.x in 386 Enhanced mode - report that
+// honestly rather than a fabricated (0,0) (itself a legal driver
+// position) or risk touching the driver's state from a context the VM
+// switch hasn't settled.
+std::optional<MouseDosPosition> MOUSEDOS_GetPosition();
+std::optional<MouseDosButtons> MOUSEDOS_GetButtons();
+
+// Sets the driver's cursor position directly, clamped to its currently
+// configured min/max range (the same clamp applied after every
+// host-driven movement) and then floored to its position granularity
+// (see get_pos_x/get_pos_y - independent of the clamp), and reports a
+// mouse-moved event so a registered guest callback runs with the new
+// position and the cursor redraws. False if MOUSEDOS_IsDriverStarted()
+// is false, or the guest is currently running Windows 3.x in 386
+// Enhanced mode.
+bool MOUSEDOS_SetPosition(const uint16_t x, const uint16_t y);
 
 void MOUSEDOS_BeforeNewVideoMode();
 void MOUSEDOS_AfterNewVideoMode(const bool is_mode_changing);
@@ -242,8 +276,7 @@ MouseModelCom MOUSECOM_GetConfiguredModel();
 // Whether the serial mouse should auto-switch to Mouse Systems mouse emulation
 bool MOUSECOM_GetConfiguredAutoMsm();
 
-bool MOUSECOM_ParseComModel(const std::string& model_str,
-                            MouseModelCom& model,
+bool MOUSECOM_ParseComModel(const std::string& model_str, MouseModelCom& model,
                             bool& auto_msm);
 
 void MOUSECOM_RegisterListener(const MouseInterfaceId interface_id,
@@ -281,7 +314,7 @@ public:
 
 	MouseInterfaceId GetInterfaceId() const;
 	MouseMapStatus GetMapStatus() const;
-	const std::string &GetMappedDeviceName() const;
+	const std::string& GetMappedDeviceName() const;
 	int16_t GetSensitivityX() const; // -999 to +999
 	int16_t GetSensitivityY() const; // -999 to +999
 	uint16_t GetMinRate() const;     // 10-500, 0 for none
@@ -293,22 +326,22 @@ private:
 
 	const MouseInterfaceId interface_id;
 
-	const MouseInterface &Interface() const;
-	const MousePhysical &MappedPhysical() const;
+	const MouseInterface& Interface() const;
+	const MousePhysical& MappedPhysical() const;
 };
 
 class MousePhysicalInfoEntry final {
 public:
 	bool IsMapped() const;
 	bool IsDeviceDisconnected() const;
-	const std::string &GetDeviceName() const;
+	const std::string& GetDeviceName() const;
 
 private:
 	friend class ManyMouseGlue;
 	MousePhysicalInfoEntry(const uint8_t idx);
 
 	const uint8_t idx;
-	const MousePhysical &Physical() const;
+	const MousePhysical& Physical() const;
 };
 
 class MouseControlAPI final {
@@ -326,8 +359,8 @@ public:
 	typedef std::vector<MouseInterfaceId> ListIDs;
 
 	// Do not use the references after object gets destroyed
-	const std::vector<MouseInterfaceInfoEntry> &GetInfoInterfaces() const;
-	const std::vector<MousePhysicalInfoEntry> &GetInfoPhysical();
+	const std::vector<MouseInterfaceInfoEntry>& GetInfoInterfaces() const;
+	const std::vector<MousePhysicalInfoEntry>& GetInfoPhysical();
 
 	static bool IsNoMouseMode();
 	static bool IsMappingBlockedByDriver();
@@ -344,39 +377,37 @@ public:
 
 	// This one is ONLY for interactive mapping in MOUSECTL.COM!
 	bool MapInteractively(const MouseInterfaceId interface_id,
-	                      uint8_t &physical_device_idx);
+	                      uint8_t& physical_device_idx);
 
 	bool Map(const MouseInterfaceId interface_id,
 	         const uint8_t physical_device_idx);
-	bool Map(const MouseInterfaceId interface_id,
-	         const std::regex &regex);
-	bool UnMap(const ListIDs &list_ids);
+	bool Map(const MouseInterfaceId interface_id, const std::regex& regex);
+	bool UnMap(const ListIDs& list_ids);
 
-	bool OnOff(const ListIDs &list_ids, const bool enable);
-	bool Reset(const ListIDs &list_ids);
+	bool OnOff(const ListIDs& list_ids, const bool enable);
+	bool Reset(const ListIDs& list_ids);
 
 	// Valid sensitivity values are from -999 to +999
-	bool SetSensitivity(const ListIDs &list_ids,
-	                    const int16_t sensitivity_x,
+	bool SetSensitivity(const ListIDs& list_ids, const int16_t sensitivity_x,
 	                    const int16_t sensitivity_y);
-	bool SetSensitivityX(const ListIDs &list_ids, const int16_t sensitivity_x);
-	bool SetSensitivityY(const ListIDs &list_ids, const int16_t sensitivity_y);
+	bool SetSensitivityX(const ListIDs& list_ids, const int16_t sensitivity_x);
+	bool SetSensitivityY(const ListIDs& list_ids, const int16_t sensitivity_y);
 
-	bool ResetSensitivity(const ListIDs &list_ids);
-	bool ResetSensitivityX(const ListIDs &list_ids);
-	bool ResetSensitivityY(const ListIDs &list_ids);
+	bool ResetSensitivity(const ListIDs& list_ids);
+	bool ResetSensitivityX(const ListIDs& list_ids);
+	bool ResetSensitivityY(const ListIDs& list_ids);
 
-	static const std::vector<uint16_t> &GetValidMinRateList();
-	static const std::string &GetValidMinRateStr();
+	static const std::vector<uint16_t>& GetValidMinRateList();
+	static const std::string& GetValidMinRateStr();
 	static std::string GetInterfaceNameStr(const MouseInterfaceId interface_id);
 
-	bool SetMinRate(const MouseControlAPI::ListIDs &list_ids,
+	bool SetMinRate(const MouseControlAPI::ListIDs& list_ids,
 	                const uint16_t value_hz);
-	bool ResetMinRate(const MouseControlAPI::ListIDs &list_ids);
+	bool ResetMinRate(const MouseControlAPI::ListIDs& list_ids);
 
 private:
-	MouseControlAPI(const MouseControlAPI &)            = delete;
-	MouseControlAPI &operator=(const MouseControlAPI &) = delete;
+	MouseControlAPI(const MouseControlAPI&)            = delete;
+	MouseControlAPI& operator=(const MouseControlAPI&) = delete;
 
 	bool was_interactive_mapping_started = false;
 };

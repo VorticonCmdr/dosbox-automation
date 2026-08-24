@@ -234,6 +234,8 @@ static void setup_api_handlers()
 	server.Post("/api/v1/input/type", InputTypeCommand::Post);
 	server.Get("/api/v1/input/replay/status", ReplayHandlers::GetStatus);
 	server.Delete("/api/v1/input/replay", ReplayCancelCommand::Delete);
+	server.Get("/api/v1/input/mouse", MouseGetPositionCommand::Get);
+	server.Post("/api/v1/input/mouse", MouseSetPositionCommand::Post);
 
 	server.Get("/api/v1/video/frame", VideoHandlers::GetFrame);
 	server.Get("/api/v1/video/frame/info", VideoHandlers::GetFrameInfo);
