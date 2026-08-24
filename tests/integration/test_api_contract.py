@@ -93,7 +93,14 @@ def test_dosbox_info_reports_features(dosbox):
     for key in ("memory", "input", "cpu_registers", "port_io", "freeze"):
         assert features.get(key) is True, f"{key} should be true"
     assert features["cpu_control"] is True
-    assert features["debugger"] is False
+    # "debugger" is the one feature that depends on how this binary was
+    # built (C_DEBUGGER), so it can't be hardcoded - this repo's own
+    # build-debugger/ tree (used by 4.4's CI matrix) builds with it on,
+    # which would fail a hardcoded False here. capabilities.debugger.
+    # limits.built already reports the same C_DEBUGGER value the engine
+    # computed features["debugger"] from (capabilities.cpp), so this
+    # checks the two agree instead of assuming a value.
+    assert features["debugger"] == data["capabilities"]["debugger"]["limits"]["built"]
 
 
 # ---------------------------------------------------------------------------
