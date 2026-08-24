@@ -6,8 +6,11 @@
 
 #include <gtest/gtest.h>
 
-using Webserver::RegisterKind;
+#include "json/json.h"
+
 using Webserver::RegClass;
+using Webserver::RegisterKind;
+using Webserver::WriteRegisterCommand;
 
 namespace {
 
@@ -46,6 +49,55 @@ TEST(CpuWrite, IndicesAreDistinct)
 	auto ebx = RegisterKind("ebx");
 	EXPECT_NE(eax.index, ebx.index);
 	EXPECT_EQ(eax.reg_class, ebx.reg_class);
+}
+
+// -- WriteRegisterCommand::Put: HTTP-level request handling --
+//
+// The unknown-register and out-of-range-segment-value checks respond
+// directly and return before constructing a Command or touching the
+// Bridge, so they're safe to exercise here. The success path needs a
+// live Bridge pump, which no webserver test currently sets up - same
+// gap noted for the debugger route group (webserver_debug_tests.cpp).
+
+TEST(WriteRegisterHandler, RejectsUnknownRegister)
+{
+	httplib::Request req;
+	req.body = R"({"register": "banana", "value": 1})";
+	httplib::Response res;
+	WriteRegisterCommand::Put(req, res);
+
+	EXPECT_EQ(res.status, 400);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("error").get<std::string>(), "Unknown register: banana");
+}
+
+TEST(WriteRegisterHandler, RejectsSegmentValueAbove0xFFFF)
+{
+	httplib::Request req;
+	req.body = R"({"register": "cs", "value": 65536})";
+	httplib::Response res;
+	WriteRegisterCommand::Put(req, res);
+
+	EXPECT_EQ(res.status, 400);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("error").get<std::string>(),
+	          "Segment register value must be 0..0xFFFF");
+}
+
+TEST(WriteRegisterHandler, RejectsMissingRequiredFields)
+{
+	httplib::Request req;
+	req.body = R"({"register": "eax"})";
+	httplib::Response res;
+	EXPECT_THROW(WriteRegisterCommand::Put(req, res), std::exception);
+}
+
+TEST(WriteRegisterHandler, RejectsMalformedJson)
+{
+	httplib::Request req;
+	req.body = "not json";
+	httplib::Response res;
+	EXPECT_THROW(WriteRegisterCommand::Put(req, res), std::exception);
 }
 
 } // namespace
