@@ -445,18 +445,27 @@ void InputSequenceCommand::ExecuteFrameBased()
 		return;
 	}
 
-	/* Normalize frames and timestamps so the first event is at frame 0,
+	/* Normalize frames and timestamps so the earliest event is at frame 0,
 	   t=0. The recording stores values relative to recording start, but
 	   there's dead time between "start recording" and the first actual
 	   input. Stripping that offset makes replay independent of when the API
-	   call lands relative to the game boot sequence. */
-	uint64_t frame_base = 0;
-	double t_base       = 0;
+	   call lands relative to the game boot sequence.
+
+	   The baseline is the event with the smallest frame (its own t_ms
+	   travels with it, not computed independently - frame and t_ms are
+	   two clocks on the same event, and mixing a baseline frame from one
+	   event with a baseline t_ms from another would desync them). This
+	   must not skip an event just because its frame/t_ms is already 0:
+	   a hand-authored sequence's genuine first event is often exactly
+	   frame 0, t 0, and treating that as "not real dead time yet" would
+	   pick a later event as the baseline instead, collapsing the whole
+	   schedule once every event's value dropped below it. */
+	uint64_t frame_base = events.empty() ? 0 : events.front().frame;
+	double t_base       = events.empty() ? 0 : events.front().t_ms;
 	for (const auto& ev : events) {
-		if (ev.frame > 0 || ev.t_ms > 0) {
+		if (ev.frame < frame_base) {
 			frame_base = ev.frame;
 			t_base     = ev.t_ms;
-			break;
 		}
 	}
 
