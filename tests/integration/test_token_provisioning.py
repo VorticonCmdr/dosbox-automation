@@ -12,12 +12,29 @@ is removed on clean shutdown.
 
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 import requests
 
 from conftest import find_free_port, start_dosbox_instance, WORKSPACE
+
+
+def expected_config_dir(work_dir):
+    """Where the engine actually creates its config dir for a HOME/
+    XDG_CONFIG_HOME override pointed at work_dir, mirroring
+    get_or_create_config_dir() (src/misc/cross.cpp) per platform.
+
+    macOS ignores XDG_CONFIG_HOME entirely and always resolves to
+    ~/Library/Preferences/dosbox-automation (confirmed live: the engine
+    logs "WEBSERVER: Token written to <HOME>/Library/Preferences/..."
+    even with XDG_CONFIG_HOME set) - only Linux/BSD and Windows honor
+    XDG_CONFIG_HOME, which is what these fixtures set to work_dir/.config.
+    """
+    if sys.platform == "darwin":
+        return work_dir / "Library" / "Preferences" / "dosbox-automation"
+    return work_dir / ".config" / "dosbox-automation"
 
 
 def start_with_token_file(work_dir, use_env_token=False, token_file_setting=True):
@@ -41,7 +58,7 @@ def start_with_token_file(work_dir, use_env_token=False, token_file_setting=True
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # Write primary config
-    config_dir = work_dir / ".config" / "dosbox-automation"
+    config_dir = expected_config_dir(work_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     dosbox_bin = Path(DOSBOX_BIN).resolve()
     resource_dir = dosbox_bin.parent / "resources"
@@ -120,7 +137,7 @@ def test_token_file_created(tmp_path):
     work_dir = tmp_path / "token-test"
     inst, token = start_with_token_file(work_dir)
 
-    token_path = work_dir / ".config" / "dosbox-automation" / "webserver" / "api_token"
+    token_path = expected_config_dir(work_dir) / "webserver" / "api_token"
 
     try:
         assert token_path.exists(), f"Token file not found at {token_path}"
@@ -141,7 +158,7 @@ def test_token_file_permissions(tmp_path):
     work_dir = tmp_path / "perm-test"
     inst, _ = start_with_token_file(work_dir)
 
-    token_path = work_dir / ".config" / "dosbox-automation" / "webserver" / "api_token"
+    token_path = expected_config_dir(work_dir) / "webserver" / "api_token"
 
     try:
         mode = stat.S_IMODE(token_path.stat().st_mode)
@@ -184,7 +201,7 @@ def test_token_file_removed_on_shutdown(tmp_path):
     work_dir = tmp_path / "shutdown-test"
     inst, _ = start_with_token_file(work_dir)
 
-    token_path = work_dir / ".config" / "dosbox-automation" / "webserver" / "api_token"
+    token_path = expected_config_dir(work_dir) / "webserver" / "api_token"
     assert token_path.exists()
 
     inst.shutdown()
@@ -201,7 +218,7 @@ def test_no_token_file_with_env_var(tmp_path):
     work_dir = tmp_path / "env-test"
     inst, _ = start_with_token_file(work_dir, use_env_token=True)
 
-    token_path = work_dir / ".config" / "dosbox-automation" / "webserver" / "api_token"
+    token_path = expected_config_dir(work_dir) / "webserver" / "api_token"
 
     try:
         assert not token_path.exists(), (
@@ -222,7 +239,7 @@ def test_token_file_written_by_default(tmp_path):
     work_dir = tmp_path / "default-test"
     inst, token = start_with_token_file(work_dir, token_file_setting=None)
 
-    token_path = work_dir / ".config" / "dosbox-automation" / "webserver" / "api_token"
+    token_path = expected_config_dir(work_dir) / "webserver" / "api_token"
 
     try:
         assert token_path.exists(), (
@@ -246,7 +263,7 @@ def test_no_full_token_obtainable_when_explicitly_disabled(tmp_path):
     work_dir.mkdir(parents=True, exist_ok=True)
     port = find_free_port()
 
-    config_dir = work_dir / ".config" / "dosbox-automation"
+    config_dir = expected_config_dir(work_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     dosbox_bin = Path(DOSBOX_BIN).resolve()
     resource_dir = dosbox_bin.parent / "resources"
