@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.6, 4.6 done. Rest of tiers 2-4 outstanding.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.7, 4.6 done. Rest of tiers 2-4 outstanding.**
 
 ---
 
@@ -974,11 +974,21 @@ Bridge side (`dosbox_mcp/connection.py`): `Connection` stores `self._instance_id
 **Verification:** engine side rebuilt clean in both `build` and `build-debugger`; ctest unchanged (same pre-existing 20 `MountPolicyTest` failures, 0 new). Bridge side: 473 pytest passed (up from 462 before this item), 2 skipped, 0 regressions; ruff clean on every touched file (4 pre-existing baseline findings elsewhere confirmed via `git stash` before/after, unrelated to this change).
 
 ### 3.7 Move handlers off the event loop
-**Bridge. Effort: S.**
+**Bridge. Effort: S. Status: done.**
 
 `async def call_tool` calls the sync handler inline, and every handler makes a blocking httpx call with a flat 30 s timeout. One slow call (a `mode=rendered` frame waits up to 2 s in the engine) stalls the whole server: no concurrency, no cancellation, no progress notifications. Move handlers to `anyio.to_thread.run_sync`.
 
 **Prerequisite for** any background work in the bridge, including resource subscriptions.
+
+**Shipped.** `call_tool` (`dosbox_mcp/server.py`) now does `return await anyio.to_thread.run_sync(handler, arguments or {})` instead of calling the sync handler inline. `anyio` was already a transitive dependency of the `mcp` SDK (the SDK's own `Server.run()` and `stdio_server()` are built on it), so no new dependency. `abandon_on_cancel` stays at its default `False`: `Connection` has no locking around its own request path (only around the reconnect state transitions, see below), so abandoning a thread mid-request while a cancelled caller moves on would leave a mutating request running unobserved.
+
+**A real, empirically-reproduced concurrency bug found and fixed before shipping, not by the review pass but by testing the interaction with 3.6 directly:** the SDK already dispatches each incoming request as its own `anyio` task (`Server.run`'s task group, one per message), but since nothing awaited inside the old inline call, every task still ran on the single event loop thread with no actual overlap - concurrency was nominal, not real. Once handlers run in genuine worker threads, `Connection`'s 3.6 reconnect logic (`_instance_id`, `detach()`, `_try_connect()`) turned out to have zero synchronization. A scratch reproduction (two threads hitting a 401 against the same, never-restarted engine, staggered so the second thread's reattach lands mid-flight through the first's) produced a spurious `EngineRestarted` **200/200 runs** - not a rare interleaving, a near-certainty under any real concurrent load, and directly caused by shipping this item: the first thread's `detach()` clears `_instance_id` to `None` before the second thread reads it, so the second thread compares `None` against the freshly-reconnected id and (correctly, per 3.6's own "any change including absence is proof" rule) concludes a restart happened that never did.
+
+Fixed with a `threading.Lock` plus a monotonic `_generation` counter, bumped on every successful `_try_connect()`. `call()` captures `old_id` and the current generation before making its request; on a 401, it acquires the lock and only performs its own `detach()`/`_try_connect()` if no other thread already advanced the generation past what it captured - otherwise it reuses that thread's result. All threads that raced against the same pre-failure state converge on the same `old_id`/`new_id` comparison, so a real restart still surfaces `EngineRestarted` to every one of them, and a non-restart never does. `ensure_connected()` got the same double-checked-locking treatment for the equivalent race on the very first connect. The lock guards only these state transitions, never the request itself - a slow call still can't stall an unrelated one, which is the entire point of this item.
+
+**Verification:** the original scratch reproduction re-run against the fix: 0/200 spurious restarts. Promoted to two permanent regression tests in `tests/test_connection.py` (`TestConcurrentReattach`): one asserting no false positive across concurrent non-restart 401s, one asserting a genuine restart still reaches both concurrent callers - both pass reliably across repeated runs. A third new test (`tests/test_server.py`, `TestConcurrentDispatch`) dispatches three tool calls through the real `call_tool` SDK path with a 0.2s-sleeping mock transport and asserts the total wall time is close to 0.2s, not 0.6s - proving genuine concurrency through the actual dispatch path, not just at the `Connection` level. Full suite: 476 passed (up from 473 before this item), 2 skipped, 0 regressions; ruff clean on every touched file (2 pre-existing baseline findings in `server.py`, unrelated, confirmed via `git stash` before/after).
+
+Not run through the adversarial-review Workflow: the fix is narrow (one lock, one counter, in one file already covered by direct empirical reproduction before and after), and the review budget seemed better spent building and confirming the reproduction itself, which is a stronger signal here than a panel of readers speculating about interleavings.
 
 ### 3.8 Bound the Lua output serializer and get it off the emulation thread
 **Engine. Effort: M.**
