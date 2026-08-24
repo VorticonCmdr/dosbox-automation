@@ -44,6 +44,7 @@ add_executable(dosbox_tests
     script_validator_tests.cpp
     text_input_tests.cpp
     webserver_mem_search_tests.cpp
+    webserver_mem_write_tests.cpp
     webserver_mem_scan_tests.cpp
     webserver_memory_snapshot_tests.cpp
     webserver_freeze_tests.cpp
