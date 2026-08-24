@@ -11,6 +11,7 @@
 #include "input.h"
 #include "private/auth.h"
 #include "private/backtrace.h"
+#include "private/batch.h"
 #include "private/cpu.h"
 #include "private/debug.h"
 #include "private/disassemble.h"
@@ -208,6 +209,8 @@ static void setup_api_handlers()
 	server.Get("/api/v1/io/port", PortReadCommand::Get);
 	server.Put("/api/v1/io/port", PortWriteCommand::Put);
 	server.Put("/api/v1/cpu/register", WriteRegisterCommand::Put);
+
+	server.Post("/api/v1/batch", BatchCommand::Post);
 
 	server.Get("/api/v1/debug/status", DebugStatusCommand::Get);
 	server.Post("/api/v1/debug/pause", DebugPauseCommand::Post);

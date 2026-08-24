@@ -284,6 +284,14 @@ class DosboxClient:
             body["limit"] = limit
         return self._post("/api/v1/memory/diff", json=body)
 
+    # --- Batch ---
+
+    def batch(self, ops: list, on_error: str | None = None) -> requests.Response:
+        body = {"ops": ops}
+        if on_error is not None:
+            body["on_error"] = on_error
+        return self._post("/api/v1/batch", json=body)
+
     # --- Control ---
 
     def shutdown(self) -> requests.Response:

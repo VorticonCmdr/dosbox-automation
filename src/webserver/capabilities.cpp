@@ -8,6 +8,7 @@
 #include "drive.h"
 #include "input.h"
 #include "private/backtrace.h"
+#include "private/batch.h"
 #include "private/disassemble.h"
 #include "private/dos.h"
 #include "private/freeze.h"
@@ -189,6 +190,15 @@ json BuildCapabilitiesBlock()
 	j["drive"]   = ToJson(AlwaysOn("always available", drive_limits));
 	j["capture"] = ToJson(AlwaysOn("always available"));
 	j["wait"]    = ToJson(AlwaysOn("always available", wait_limits));
+
+	json batch_limits;
+	batch_limits["max_ops"]           = MaxBatchOps;
+	batch_limits["max_read_bytes"]    = MaxBatchReadBytes;
+	batch_limits["max_write_bytes"]   = MaxBatchWriteBytes;
+	batch_limits["base_timeout_ms"]   = BatchBaseTimeoutMs;
+	batch_limits["per_op_timeout_ms"] = BatchPerOpTimeoutMs;
+	batch_limits["max_timeout_ms"]    = BatchMaxTimeoutMs;
+	j["batch"] = ToJson(AlwaysOn("always available", batch_limits));
 
 	return j;
 }

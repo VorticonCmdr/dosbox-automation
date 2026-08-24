@@ -1101,3 +1101,161 @@ def test_drive_swap_no_path_leak(dosbox):
     r = dosbox.drive_swap("A", "/tmp/does-not-exist-ever.img")
     assert r.status_code == 400
     assert "/tmp" not in r.json().get("image", "")
+
+
+# ---------------------------------------------------------------------------
+# Batch
+# ---------------------------------------------------------------------------
+
+
+def test_batch_applies_ops_in_order_and_visibly_within_the_same_batch(dosbox):
+    r = dosbox.batch([
+        {"op": "cpu_write", "register": "ebx", "value": 4242},
+        {"op": "cpu_read"},
+    ])
+    assert r.status_code == 200
+    body = r.json()
+    assert body["aborted"] is False
+    assert body["results"][0]["status"] == "ok"
+    assert body["results"][1]["registers"]["ebx"] == 4242
+
+
+def test_batch_mem_write_then_mem_read_round_trips(dosbox):
+    r = dosbox.batch([
+        {"op": "mem_write", "offset": 0x8000, "data": "aGVsbG8="},
+        {"op": "mem_read", "offset": 0x8000, "len": 5},
+    ])
+    assert r.status_code == 200
+    body = r.json()
+    assert body["results"][1]["data"] == "aGVsbG8="
+
+
+def test_batch_mem_cas_conflict_reports_the_actual_bytes(dosbox):
+    dosbox.batch([{"op": "mem_write", "offset": 0x8100, "data": "aGVsbG8="}])
+    r = dosbox.batch([
+        {"op": "mem_cas", "offset": 0x8100, "data": "d29ybGQ=", "expected": "d3Jvbmc="},
+    ])
+    assert r.status_code == 200
+    result = r.json()["results"][0]
+    assert result["status"] == "conflict"
+    assert result["data"] == "aGVsbG8="
+
+
+def test_batch_mem_cas_success_writes_through(dosbox):
+    dosbox.batch([{"op": "mem_write", "offset": 0x8200, "data": "aGVsbG8="}])
+    r = dosbox.batch([
+        {"op": "mem_cas", "offset": 0x8200, "data": "d29ybGQ=", "expected": "aGVsbG8="},
+    ])
+    assert r.status_code == 200
+    assert r.json()["results"][0]["status"] == "ok"
+
+    verify = dosbox.batch([{"op": "mem_read", "offset": 0x8200, "len": 5}])
+    assert verify.json()["results"][0]["data"] == "d29ybGQ="
+
+
+def test_batch_default_on_error_abort_skips_remaining_ops(dosbox):
+    r = dosbox.batch([
+        {"op": "mem_cas", "offset": 0x8300, "data": "AA==", "expected": "//8="},
+        {"op": "cpu_write", "register": "ecx", "value": 1},
+    ])
+    body = r.json()
+    assert body["aborted"] is True
+    assert body["results"][0]["status"] == "conflict"
+    assert body["results"][1]["status"] == "skipped"
+
+
+def test_batch_on_error_continue_still_runs_the_rest(dosbox):
+    r = dosbox.batch(
+        [
+            {"op": "mem_cas", "offset": 0x8400, "data": "AA==", "expected": "//8="},
+            {"op": "cpu_write", "register": "edx", "value": 7},
+        ],
+        on_error="continue",
+    )
+    body = r.json()
+    assert body["aborted"] is False
+    assert body["results"][0]["status"] == "conflict"
+    assert body["results"][1]["status"] == "ok"
+
+
+def test_batch_freeze_set_then_clear(dosbox):
+    r = dosbox.batch([
+        {"op": "freeze_set", "address": 0x9000, "value": 42, "width": 1},
+        {"op": "freeze_clear", "address": 0x9000},
+    ])
+    body = r.json()
+    assert body["results"][0]["status"] == "ok"
+    assert body["results"][1]["status"] == "ok"
+
+
+def test_batch_freeze_clear_not_found(dosbox):
+    r = dosbox.batch([{"op": "freeze_clear", "address": 0x9999999}])
+    assert r.json()["results"][0]["status"] == "not_found"
+
+
+def test_batch_port_read_and_write(dosbox):
+    r = dosbox.batch([
+        {"op": "port_write", "port": 0x61, "value": 0, "width": 1},
+        {"op": "port_read", "port": 0x61, "width": 1},
+    ])
+    assert r.status_code == 200
+    for result in r.json()["results"]:
+        assert result["status"] == "ok"
+
+
+def test_batch_rejects_more_than_max_ops(dosbox):
+    ops = [{"op": "cpu_read"}] * 65
+    r = dosbox.batch(ops)
+    assert r.status_code == 400
+    assert r.json()["error_code"] == "invalid_argument"
+
+
+def test_batch_rejects_an_empty_ops_array(dosbox):
+    r = dosbox.batch([])
+    assert r.status_code == 400
+
+
+def test_batch_rejects_an_unknown_op(dosbox):
+    r = dosbox.batch([{"op": "debug_pause"}])
+    assert r.status_code == 400
+    assert "ops[0" in r.json()["error"]
+
+
+def test_batch_rejects_mem_write_with_an_expected_field(dosbox):
+    r = dosbox.batch([
+        {"op": "mem_write", "offset": 0, "data": "AA==", "expected": "AA=="},
+    ])
+    assert r.status_code == 400
+
+
+def test_batch_rejects_read_bytes_over_the_aggregate_cap(dosbox):
+    r = dosbox.batch([
+        {"op": "mem_read", "offset": 0, "len": 600000},
+        {"op": "mem_read", "offset": 0, "len": 600000},
+    ])
+    assert r.status_code == 400
+    assert "mem_read" in r.json()["error"]
+
+
+def test_batch_out_of_range_register_relative_address_is_a_per_op_status(dosbox):
+    # A huge offset added to a live segment base can legitimately exceed
+    # the emulated machine's memory - only knowable once the register's
+    # value is read on the emulation thread, so this must be a per-op
+    # 'out_of_range' status, not a 500 or a malformed response.
+    r = dosbox.batch([
+        {"op": "mem_read", "segment": "ds", "offset": 4_000_000_000, "len": 16},
+    ])
+    assert r.status_code == 200
+    result = r.json()["results"][0]
+    assert result["status"] == "out_of_range"
+
+
+def test_batch_capability_reports_the_documented_limits(dosbox):
+    info = dosbox.session.get(
+        dosbox._url("/api/v1/dosbox/info"), timeout=dosbox.timeout
+    ).json()
+    limits = info["capabilities"]["batch"]["limits"]
+    assert limits["max_ops"] == 64
+    assert limits["max_read_bytes"] == 1024 * 1024
+    assert limits["max_write_bytes"] == 256 * 1024
+    assert info["features"]["batch"] is True

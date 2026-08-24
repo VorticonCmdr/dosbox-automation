@@ -2,9 +2,9 @@
 // License: GPL-2.0-or-later. Contact: dosbox-automation-project@trinity2k.net
 //
 
-#include "webserver.h"
-#include "bridge.h"
 #include "private/cpu.h"
+#include "bridge.h"
+#include "webserver.h"
 
 #include "base64/base64.h"
 #include "http/http.h"
@@ -12,7 +12,9 @@
 
 #include "cpu/cpu.h"
 #include "cpu/registers.h"
+#include "misc/support.h"
 
+#include <iterator>
 #include <unordered_map>
 
 using json = nlohmann::json;
@@ -71,12 +73,12 @@ RegisterRef RegisterKind(const std::string_view name)
 	        {"edi", {RegClass::General, 5}},
 	        {"esp", {RegClass::General, 6}},
 	        {"ebp", {RegClass::General, 7}},
-	        {"cs", {RegClass::Segment, 0}},
-	        {"ds", {RegClass::Segment, 1}},
-	        {"es", {RegClass::Segment, 2}},
-	        {"ss", {RegClass::Segment, 3}},
-	        {"fs", {RegClass::Segment, 4}},
-	        {"gs", {RegClass::Segment, 5}},
+	        { "cs", {RegClass::Segment, 0}},
+	        { "ds", {RegClass::Segment, 1}},
+	        { "es", {RegClass::Segment, 2}},
+	        { "ss", {RegClass::Segment, 3}},
+	        { "fs", {RegClass::Segment, 4}},
+	        { "gs", {RegClass::Segment, 5}},
 	};
 
 	auto it = lookup.find(name);
@@ -86,28 +88,57 @@ RegisterRef RegisterKind(const std::string_view name)
 	return {RegClass::Unknown, -1};
 }
 
+void WriteRegisterValue(const RegisterRef ref, const uint32_t value)
+{
+	if (ref.reg_class == RegClass::General) {
+		// Map index to the lvalue reference
+		uint32_t* regs[] = {&reg_eax,
+		                    &reg_ebx,
+		                    &reg_ecx,
+		                    &reg_edx,
+		                    &reg_esi,
+		                    &reg_edi,
+		                    &reg_esp,
+		                    &reg_ebp};
+		// RegisterKind's table is the only source of ref.index; this
+		// only fires if a future edit adds a General entry there
+		// without growing regs[] to match - loud in a debug build
+		// rather than a silent out-of-bounds access in release.
+		assertm(ref.index >= 0 &&
+		                static_cast<size_t>(ref.index) < std::size(regs),
+		        "RegisterKind's General index out of sync with "
+		        "WriteRegisterValue's regs[]");
+		*regs[ref.index] = value;
+	} else if (ref.reg_class == RegClass::Segment) {
+		static constexpr SegNames seg_names[] = {
+		        SegNames::cs,
+		        SegNames::ds,
+		        SegNames::es,
+		        SegNames::ss,
+		        SegNames::fs,
+		        SegNames::gs,
+		};
+		assertm(ref.index >= 0 && static_cast<size_t>(ref.index) <
+		                                  std::size(seg_names),
+		        "RegisterKind's Segment index out of sync with "
+		        "WriteRegisterValue's seg_names[]");
+		CPU_SetSegGeneral(seg_names[ref.index], value);
+	}
+}
+
 void WriteRegisterCommand::Execute()
 {
 	auto ref = RegisterKind(name);
 
-	if (ref.reg_class == RegClass::General) {
-		// Map index to the lvalue reference
-		uint32_t* regs[] = {&reg_eax, &reg_ebx, &reg_ecx, &reg_edx,
-		                    &reg_esi, &reg_edi, &reg_esp, &reg_ebp};
-		*regs[ref.index] = value;
-	} else if (ref.reg_class == RegClass::Segment) {
-		static constexpr SegNames seg_names[] = {
-		        SegNames::cs, SegNames::ds, SegNames::es,
-		        SegNames::ss, SegNames::fs, SegNames::gs,
-		};
-		CPU_SetSegGeneral(seg_names[ref.index], value);
-	} else {
+	if (ref.reg_class == RegClass::Unknown) {
 		error = "Unknown register: " + name;
+		return;
 	}
+
+	WriteRegisterValue(ref, value);
 }
 
-void WriteRegisterCommand::Put(const httplib::Request& req,
-                               httplib::Response& res)
+void WriteRegisterCommand::Put(const httplib::Request& req, httplib::Response& res)
 {
 	auto j = json::parse(req.body);
 

@@ -1,5 +1,6 @@
 target_sources(dosboxcommon PRIVATE
   backtrace.cpp
+  batch.cpp
   bridge.cpp
   capabilities.cpp
   capture.cpp

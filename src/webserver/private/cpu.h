@@ -24,6 +24,14 @@ struct RegisterRef {
 
 RegisterRef RegisterKind(std::string_view name);
 
+// Writes value through an already-resolved RegisterRef (RegisterKind's
+// result) - ref.reg_class must not be RegClass::Unknown, the caller's
+// responsibility to have already rejected. Exposed so BatchCommand
+// (batch.cpp) writes a register through the exact same index mapping
+// WriteRegisterCommand::Execute() uses, rather than a second copy that
+// could silently drift.
+void WriteRegisterValue(RegisterRef ref, uint32_t value);
+
 struct Registers {
 	uint32_t eax   = 0;
 	uint32_t ebx   = 0;
@@ -61,7 +69,8 @@ private:
 class WriteRegisterCommand : public Command {
 public:
 	WriteRegisterCommand(std::string name, uint32_t value)
-	        : name(std::move(name)), value(value)
+	        : name(std::move(name)),
+	          value(value)
 	{}
 
 	void Execute() override;

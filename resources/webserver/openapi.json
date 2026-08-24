@@ -58,6 +58,10 @@
     {
       "name": "I/O",
       "description": "Direct x86 I/O port access."
+    },
+    {
+      "name": "Batch",
+      "description": "Atomic multi-operation execution (memory, CPU, I/O port, freeze)."
     }
   ],
   "security": [
@@ -2418,6 +2422,71 @@
         }
       }
     },
+    "/api/v1/batch": {
+      "post": {
+        "tags": [
+          "Batch"
+        ],
+        "summary": "Execute a batch of memory/CPU/port/freeze operations atomically",
+        "operationId": "executeBatch",
+        "description": "Applies 1-64 memory, CPU register, I/O port, and freeze operations in order, in a single pass on the emulation thread - no other request can interleave mid-batch. Not a transaction: there is no rollback, only in-order application and (with on_error='abort', the default) an early stop once one op fails. Every op that was attempted gets a result; every op skipped by an abort gets status 'skipped'. Op count and per-batch byte budgets are deliberately tighter than the equivalent single-op routes - see /api/v1/dosbox/info's capabilities.batch.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Batch"
+              },
+              "example": {
+                "ops": [
+                  {
+                    "op": "mem_cas",
+                    "offset": 4096,
+                    "data": "d29ybGQ=",
+                    "expected": "aGVsbG8="
+                  },
+                  {
+                    "op": "cpu_write",
+                    "register": "eax",
+                    "value": 1
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-op results, index-correlated with the request's 'ops'.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BatchOpResult"
+                      }
+                    },
+                    "aborted": {
+                      "type": "boolean",
+                      "description": "True when on_error='abort' stopped the batch before every op was attempted."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/api/v1/drive": {
       "get": {
         "tags": [
@@ -3527,6 +3596,141 @@
           },
           "truncated": {
             "type": "boolean"
+          }
+        }
+      },
+      "BatchOp": {
+        "type": "object",
+        "required": [
+          "op"
+        ],
+        "description": "One operation. 'op' selects the shape of the rest: mem_read (segment?, offset, len), mem_write (segment?, offset, data), mem_cas (segment?, offset, data, expected), cpu_read (), cpu_write (register, value), port_read (port, width?), port_write (port, width?, value), freeze_set (address, value, width?), freeze_clear (address).",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "mem_read",
+              "mem_write",
+              "mem_cas",
+              "cpu_read",
+              "cpu_write",
+              "port_read",
+              "port_write",
+              "freeze_set",
+              "freeze_clear"
+            ]
+          },
+          "segment": {
+            "description": "mem_read/mem_write/mem_cas only. Register name (cs/ds/es/fs/gs/ss, resolved live at execution time) or a fixed paragraph value 0x0000..0xFFFF. Omit for a plain linear offset."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "mem_read/mem_write/mem_cas only. Segment-relative if 'segment' is given, otherwise a linear physical offset."
+          },
+          "len": {
+            "type": "integer",
+            "description": "mem_read only. Bytes to read."
+          },
+          "data": {
+            "type": "string",
+            "description": "mem_write/mem_cas only. Base64-encoded bytes to write."
+          },
+          "expected": {
+            "type": "string",
+            "description": "mem_cas only. Base64-encoded bytes the address must currently hold for the write to happen."
+          },
+          "register": {
+            "type": "string",
+            "description": "cpu_write only. Register name (eax, ebx, ecx, edx, esi, edi, esp, ebp, cs, ds, es, ss, fs, gs)."
+          },
+          "value": {
+            "type": "integer",
+            "description": "cpu_write/port_write/freeze_set only."
+          },
+          "port": {
+            "type": "integer",
+            "description": "port_read/port_write only. 0x0000..0xFFFF."
+          },
+          "width": {
+            "type": "integer",
+            "description": "port_read/port_write (1 or 2, default 1) or freeze_set (1, 2, or 4, default 1)."
+          },
+          "address": {
+            "type": "integer",
+            "description": "freeze_set/freeze_clear only."
+          }
+        }
+      },
+      "Batch": {
+        "type": "object",
+        "required": [
+          "ops"
+        ],
+        "properties": {
+          "ops": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/BatchOp"
+            },
+            "description": "1-64 operations, applied in order in a single atomic pass on the emulation thread. Total mem_read length across the batch is capped at 1 MiB, total mem_write/mem_cas data+expected at 256 KiB."
+          },
+          "on_error": {
+            "type": "string",
+            "enum": [
+              "abort",
+              "continue"
+            ],
+            "default": "abort",
+            "description": "'abort' (default) stops applying further ops once one fails (mem_cas conflict, freeze_set registry full, freeze_clear not found, or an out-of-range register-relative address) - the ops after it are reported 'skipped', not attempted. 'continue' applies every op regardless."
+          }
+        }
+      },
+      "BatchOpResult": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "conflict",
+              "not_found",
+              "registry_full",
+              "out_of_range",
+              "skipped"
+            ]
+          },
+          "addr": {
+            "type": "integer",
+            "description": "mem_read/mem_write/mem_cas, when status is ok or conflict."
+          },
+          "data": {
+            "type": "string",
+            "description": "Base64. mem_read (the bytes read) or mem_cas conflict (the actual current bytes)."
+          },
+          "registers": {
+            "type": "object",
+            "description": "cpu_read only."
+          },
+          "value": {
+            "type": "integer",
+            "description": "cpu_write/port_read/port_write/freeze_set, when status is ok."
+          },
+          "address": {
+            "type": "integer",
+            "description": "freeze_set/freeze_clear only."
+          },
+          "width": {
+            "type": "integer",
+            "description": "freeze_set only, when status is ok."
+          },
+          "message": {
+            "type": "string",
+            "description": "Present only for status out_of_range."
           }
         }
       }

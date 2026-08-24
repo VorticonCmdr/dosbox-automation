@@ -5,12 +5,13 @@
 #ifndef DOSBOX_WEBSERVER_MEMORY_H
 #define DOSBOX_WEBSERVER_MEMORY_H
 
-#include "webserver/bridge.h"
 #include "cpu.h"
+#include "webserver/bridge.h"
 
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include "http/http.h"
@@ -18,6 +19,19 @@
 namespace Webserver {
 
 enum class Segment { None, CS, SS, DS, ES, FS, GS };
+
+// "CS"/"DS"/etc (case-insensitive) to the matching Segment, or
+// Segment::None for anything else - including a numeric paragraph
+// value, which the caller resolves separately via
+// BaseSegmentToOffset()/PhysicalMake(). Exposed so BatchCommand
+// (batch.cpp) resolves a JSON-body 'segment' field the exact same way
+// ReadMemoryCommand/WriteMemoryCommand resolve their path-param one.
+Segment StrToBaseSegment(std::string_view str);
+
+// The live physical base address of a register-named Segment (0 for
+// Segment::None, since a numeric segment is folded into the caller's
+// offset instead - see StrToBaseSegment's comment).
+uint32_t BaseSegmentToOffset(Segment segment);
 
 // Shared by ReadMemoryCommand::Get's 'len' bound and
 // WriteMemoryCommand::Put's body-size check, so the two directions can't

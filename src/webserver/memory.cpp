@@ -2,14 +2,14 @@
 // License: GPL-2.0-or-later. Contact: dosbox-automation-project@trinity2k.net
 //
 
-#include "webserver.h"
-#include "bridge.h"
 #include "private/memory.h"
+#include "bridge.h"
+#include "webserver.h"
 
 #include "base64/base64.h"
 #include "http/http.h"
-#include "json/json.h"
 #include "utils/string_utils.h"
+#include "json/json.h"
 
 #include "cpu/registers.h"
 #include "debugger/debugger.h"
@@ -23,7 +23,7 @@ using httplib::Request, httplib::Response;
 
 namespace Webserver {
 
-static Segment str_to_base_segment(const std::string_view str)
+Segment StrToBaseSegment(const std::string_view str)
 {
 	auto val = upcase(str);
 	static const std::unordered_map<std::string_view, Segment> lookup = {
@@ -42,7 +42,7 @@ static Segment str_to_base_segment(const std::string_view str)
 	}
 }
 
-static uint32_t base_segment_to_offset(const Segment segment)
+uint32_t BaseSegmentToOffset(const Segment segment)
 {
 	switch (segment) {
 	case Segment::CS: return SegPhys(SegNames::cs);
@@ -64,7 +64,7 @@ static void parse_mem_addr(const httplib::Request& req, Segment& segment,
 
 	if (req.path_params.find("segment") != req.path_params.end()) {
 		auto& segment_param = req.path_params.at("segment");
-		segment             = str_to_base_segment(segment_param);
+		segment             = StrToBaseSegment(segment_param);
 
 		// Segment can either be a register to resolve later or an
 		// address which we can already resolve here.
@@ -92,12 +92,12 @@ void ReadMemoryCommand::Execute()
 {
 	regs.load();
 
-	// 64-bit arithmetic deliberately: base_segment_to_offset()'s live
+	// 64-bit arithmetic deliberately: BaseSegmentToOffset()'s live
 	// segment base plus offset (untrusted HTTP input for the linear/
 	// numeric-segment forms) can overflow uint32_t and silently wrap
 	// into a small, in-range-looking address instead of correctly
 	// failing the bounds check below.
-	const uint64_t addr64 = static_cast<uint64_t>(base_segment_to_offset(base)) +
+	const uint64_t addr64 = static_cast<uint64_t>(BaseSegmentToOffset(base)) +
 	                        static_cast<uint64_t>(offset);
 
 	LOG_DEBUG("API: ReadMemoryCommand(0x%06x, %d)",
@@ -165,9 +165,9 @@ void ReadMemoryCommand::Get(const Request& req, Response& res)
 void WriteMemoryCommand::Execute()
 {
 	// 64-bit arithmetic deliberately - see ReadMemoryCommand::Execute's
-	// comment: base_segment_to_offset() plus offset can overflow
+	// comment: BaseSegmentToOffset() plus offset can overflow
 	// uint32_t and silently wrap into a small, in-range-looking address.
-	const uint64_t addr64 = static_cast<uint64_t>(base_segment_to_offset(base)) +
+	const uint64_t addr64 = static_cast<uint64_t>(BaseSegmentToOffset(base)) +
 	                        static_cast<uint64_t>(offset);
 
 	LOG_DEBUG("API: WriteMemoryCommand(0x%06x, %d)",

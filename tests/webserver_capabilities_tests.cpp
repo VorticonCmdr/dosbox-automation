@@ -6,6 +6,7 @@
 
 #include "webserver/bridge.h"
 #include "webserver/input.h"
+#include "webserver/private/batch.h"
 #include "webserver/private/dos.h"
 #include "webserver/private/freeze.h"
 #include "webserver/private/memory.h"
@@ -19,6 +20,9 @@
 #include "libs/json/json.h"
 
 using Webserver::AllocationRegistry;
+using Webserver::BatchBaseTimeoutMs;
+using Webserver::BatchMaxTimeoutMs;
+using Webserver::BatchPerOpTimeoutMs;
 using Webserver::BuildCapabilitiesBlock;
 using Webserver::BuildServerLimits;
 using Webserver::CapabilityState;
@@ -27,6 +31,9 @@ using Webserver::ComputeDebuggerCapability;
 using Webserver::DefaultBridgeTimeoutMs;
 using Webserver::FeaturesProjection;
 using Webserver::FreezeRegistry;
+using Webserver::MaxBatchOps;
+using Webserver::MaxBatchReadBytes;
+using Webserver::MaxBatchWriteBytes;
 using Webserver::MaxInputEvents;
 using Webserver::MaxMemoryTransferBytes;
 using Webserver::MaxPatternLen;
@@ -106,7 +113,8 @@ TEST(BuildCapabilitiesBlockTest, CoversEveryServedGroup)
 	                                "script",
 	                                "drive",
 	                                "capture",
-	                                "wait"}) {
+	                                "wait",
+	                                "batch"}) {
 		ASSERT_TRUE(capabilities.contains(group)) << group;
 		EXPECT_TRUE(capabilities[group].contains("state")) << group;
 		EXPECT_TRUE(capabilities[group].contains("reason")) << group;
@@ -138,6 +146,18 @@ TEST(BuildCapabilitiesBlockTest, LimitsMatchTheSameNamedConstantsTheValidatorsUs
 	EXPECT_EQ(capabilities["wait"]["limits"]["max_timeout_ms"], MaxWaitTimeoutMs);
 	EXPECT_EQ(capabilities["wait"]["limits"]["max_pattern_len"], MaxPatternLen);
 	EXPECT_EQ(capabilities["wait"]["limits"]["max_waiters"], MaxWaiters);
+
+	EXPECT_EQ(capabilities["batch"]["limits"]["max_ops"], MaxBatchOps);
+	EXPECT_EQ(capabilities["batch"]["limits"]["max_read_bytes"],
+	          MaxBatchReadBytes);
+	EXPECT_EQ(capabilities["batch"]["limits"]["max_write_bytes"],
+	          MaxBatchWriteBytes);
+	EXPECT_EQ(capabilities["batch"]["limits"]["base_timeout_ms"],
+	          BatchBaseTimeoutMs);
+	EXPECT_EQ(capabilities["batch"]["limits"]["per_op_timeout_ms"],
+	          BatchPerOpTimeoutMs);
+	EXPECT_EQ(capabilities["batch"]["limits"]["max_timeout_ms"],
+	          BatchMaxTimeoutMs);
 }
 
 TEST(BuildCapabilitiesBlockTest, DebuggerStateReflectsThisBuildsMacros)
