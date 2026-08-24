@@ -20,11 +20,18 @@ Environment:
     DOSBOX_BIN    Path to dosbox binary (default: build/debug-linux/dosbox)
 
 Categories:
-    api     API contract tests (test_api_contract.py)
-    lua     Lua REST endpoint and function tests (test_lua_api.py, test_lua_functions.py)
-    capture ZMBV capture endpoint tests (test_capture_api.py)
-    e2e     Manifest-driven installer automation (test_e2e_installs.py)
-    all     Everything (default)
+    api       API contract tests (test_api_contract.py)
+    lua       Lua REST endpoint and function tests (test_lua_api.py, test_lua_functions.py)
+    capture   ZMBV capture endpoint tests (test_capture_api.py)
+    mount     Mount policy / drive-swap path validation (test_mount_policy.py)
+    traversal Static-asset and drive-swap path traversal contract (test_traversal_contract.py)
+    token     Token file provisioning and permissions (test_token_provisioning.py)
+    openapi   openapi.json and doc-asset pre-auth exposure (test_openapi_docs.py)
+    screen    Text-mode screen reading, route and per-machine (test_screen_text_route.py, test_screen_text_machines.py)
+    graphics  Graphics mode switching (test_graphics_modes.py)
+    helpers   Lua install-script generator unit tests, no live engine needed (test_e2e_helpers.py)
+    e2e       Manifest-driven installer automation (test_e2e_installs.py)
+    all       Everything (default)
 """
 
 import argparse
@@ -47,6 +54,13 @@ CATEGORIES = {
     "api": ["test_api_contract.py"],
     "lua": ["test_lua_api.py", "test_lua_functions.py"],
     "capture": ["test_capture_api.py"],
+    "mount": ["test_mount_policy.py"],
+    "traversal": ["test_traversal_contract.py"],
+    "token": ["test_token_provisioning.py"],
+    "openapi": ["test_openapi_docs.py"],
+    "screen": ["test_screen_text_route.py", "test_screen_text_machines.py"],
+    "graphics": ["test_graphics_modes.py"],
+    "helpers": ["test_e2e_helpers.py"],
     "e2e": ["test_e2e_installs.py"],
 }
 
@@ -85,7 +99,7 @@ def list_tests():
         for f in files:
             path = TESTS_DIR / f
             status = "exists" if path.exists() else "not yet"
-            print(f"  [{cat:8s}] {f:40s} [{status}]")
+            print(f"  [{cat:9s}] {f:40s} [{status}]")
 
 
 def main():
