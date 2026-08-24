@@ -149,6 +149,8 @@ json BuildCapabilitiesBlock()
 	script_limits["instruction_limit"] = Lua::LuaEngine::DefaultInstructionLimit;
 	script_limits["wall_clock_limit_ms"] = Lua::LuaEngine::DefaultWallClockLimitMs;
 	script_limits["max_log_tail_bytes"] = Lua::MaxLogTailBytes;
+	script_limits["max_output_nodes"]   = Lua::MaxOutputNodes;
+	script_limits["max_output_bytes"]   = Lua::MaxOutputBytes;
 
 	json wait_limits;
 	wait_limits["min_timeout_ms"]     = MinWaitTimeoutMs;

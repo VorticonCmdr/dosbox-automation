@@ -17,9 +17,13 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace Lua {
 
@@ -101,6 +105,76 @@ public:
 	static void Post(const httplib::Request& req, httplib::Response& res);
 };
 
+// Plain, Lua-independent copy of a `dosbox.output` value. Built on the
+// emulation thread (LuaStatusCommand::Execute, inside the Bridge Command,
+// with direct access to the Lua state) and converted to JSON later on the
+// web thread (LuaStatusCommand::Get) - it must own every string outright,
+// never a raw Lua string pointer, since the Lua GC can run on the
+// emulation thread in between the two phases and invalidate anything
+// borrowed from the interpreter.
+struct LuaOutputNode {
+	enum class Kind { Null, Bool, Int, Double, String, Object };
+
+	Kind kind                = Kind::Null;
+	bool bool_value          = false;
+	int64_t int_value        = 0;
+	double double_value      = 0.0;
+	std::string string_value = {};
+	std::vector<std::pair<std::string, LuaOutputNode>> object_value = {};
+
+	// Matches the pre-3.8 nlohmann::json behavior this replaces: a
+	// still-default node (never walked, or a table with zero entries)
+	// is "no output to report", not an empty JSON object.
+	bool IsEmpty() const
+	{
+		return kind == Kind::Null ||
+		       (kind == Kind::Object && object_value.empty());
+	}
+};
+
+// Caps how much of `dosbox.output` a single serialization walks, shared
+// across the whole call (not per-subtable): a handful of tables each
+// holding references to the previous one is a small number of Lua slots
+// but, without this, an exponential number of emitted JSON nodes. `visited`
+// (keyed by lua_topointer identity) is what actually bounds that - it also
+// makes a genuine cycle (t.self = t) terminate instead of relying solely on
+// the depth cap. `visited` is never backed out once a subtree finishes: a
+// table reachable via more than one path (not just an ancestor cycle) is
+// deliberately walked once and truncated on later occurrences too - the
+// alternative (ancestor-path-only tracking) would let a shared, densely-
+// nested DAG re-expand the same subtree from every parent, exactly the
+// blowup this exists to prevent. The tradeoff is that a script legitimately
+// reusing the same small, harmless subtable in two unrelated places will
+// see the second occurrence collapse to "...".
+struct LuaOutputBudget {
+	size_t nodes_used = 0;
+	size_t bytes_used = 0;
+	// Every key/value pair the walk looks at, accepted or not - unlike
+	// nodes_used (committed pairs only), this bounds total loop
+	// iterations even for a table built entirely of unsupported-type
+	// keys/values, which would otherwise never trip nodes_used or
+	// bytes_used at all and iterate the whole table regardless of size.
+	size_t pairs_examined                   = 0;
+	std::unordered_set<const void*> visited = {};
+	bool truncated                          = false;
+};
+
+inline constexpr size_t MaxOutputNodes = 2000;
+inline constexpr size_t MaxOutputBytes = 64 * 1024;
+inline constexpr int MaxOutputDepth    = 10;
+
+// Walks the Lua table at `idx` into an owned LuaOutputNode tree, subject to
+// `budget`. Exposed for testing; LuaStatusCommand::Execute is the only
+// production caller. `depth` starts at 0 for a direct call on the root
+// `dosbox.output` table.
+LuaOutputNode LuaTableToNode(lua_State* L, int idx, int depth,
+                             LuaOutputBudget& budget);
+
+// Converts an already-built LuaOutputNode tree to JSON. Pure data
+// transformation, safe to call from any thread - unlike LuaTableToNode,
+// which touches the Lua state and must only run on the emulation thread.
+nlohmann::json LuaOutputNodeToJson(const LuaOutputNode& node);
+
 struct LuaStatusResult {
 	ScriptState state = ScriptState::Idle;
 	std::string error = {};
@@ -111,7 +185,8 @@ struct LuaStatusResult {
 	// on whether a log is available at all, not just whether one
 	// exists on disk from some earlier run.
 	std::string log_path  = {};
-	nlohmann::json output = {};
+	LuaOutputNode output  = {};
+	bool output_truncated = false;
 };
 
 class LuaStatusCommand : public Webserver::Command {

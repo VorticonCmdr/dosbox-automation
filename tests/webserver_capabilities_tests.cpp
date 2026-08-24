@@ -148,6 +148,10 @@ TEST(BuildCapabilitiesBlockTest, LimitsMatchTheSameNamedConstantsTheValidatorsUs
 	          Lua::ScriptValidator::MaxBodySize);
 	EXPECT_EQ(capabilities["script"]["limits"]["max_log_tail_bytes"],
 	          Lua::MaxLogTailBytes);
+	EXPECT_EQ(capabilities["script"]["limits"]["max_output_nodes"],
+	          Lua::MaxOutputNodes);
+	EXPECT_EQ(capabilities["script"]["limits"]["max_output_bytes"],
+	          Lua::MaxOutputBytes);
 
 	EXPECT_EQ(capabilities["wait"]["limits"]["max_timeout_ms"], MaxWaitTimeoutMs);
 	EXPECT_EQ(capabilities["wait"]["limits"]["max_pattern_len"], MaxPatternLen);

@@ -287,45 +287,161 @@ void LuaStopCommand::Post(const httplib::Request&, httplib::Response& res)
 
 // -- LuaStatusCommand --
 
-// Recursively convert a Lua table to JSON.
-static json LuaTableToJson(lua_State* L, int idx, int depth = 0)
+namespace {
+
+// A truncation marker, matching the pre-3.8 depth cutoff's own placeholder
+// ("...") so existing callers/tests that already expect that string for a
+// cut-off subtree keep working unchanged.
+LuaOutputNode TruncatedNode(LuaOutputBudget& budget)
 {
-	if (depth > 10) {
-		return "...";
+	budget.truncated = true;
+	LuaOutputNode node;
+	node.kind         = LuaOutputNode::Kind::String;
+	node.string_value = "...";
+	return node;
+}
+
+} // namespace
+
+LuaOutputNode LuaTableToNode(lua_State* L, int idx, int depth, LuaOutputBudget& budget)
+{
+	if (depth > MaxOutputDepth) {
+		return TruncatedNode(budget);
 	}
 
-	json j;
+	// insert().second is false when the pointer was already present -
+	// a cycle (this table is its own ancestor) or the same table
+	// reachable via more than one path. Either way, stop here instead
+	// of re-walking it: that's what keeps a handful of tables sharing
+	// subtables from expanding into an exponential number of nodes.
+	if (!budget.visited.insert(lua_topointer(L, idx)).second) {
+		return TruncatedNode(budget);
+	}
+
+	LuaOutputNode node;
+	node.kind = LuaOutputNode::Kind::Object;
 
 	lua_pushnil(L);
 	while (lua_next(L, idx) != 0) {
+		// Every pair examined counts, whether or not it ends up
+		// accepted below - otherwise a table built entirely of
+		// unsupported-type keys or values (which never touches
+		// nodes_used/bytes_used at all) would iterate in full
+		// regardless of size.
+		if (budget.pairs_examined >= MaxOutputNodes) {
+			budget.truncated = true;
+			lua_pop(L, 2); // both the key and the value lua_next
+			               // just pushed
+			break;
+		}
+		++budget.pairs_examined;
+
 		std::string key;
 		if (lua_isinteger(L, -2)) {
 			key = std::to_string(lua_tointeger(L, -2));
 		} else if (lua_type(L, -2) == LUA_TSTRING) {
-			key = lua_tostring(L, -2);
+			// lua_tolstring (not lua_tostring, which relies on the
+			// caller running strlen on the result) so a key
+			// containing an embedded NUL byte is captured whole
+			// rather than silently truncated at the first one.
+			size_t key_len      = 0;
+			const char* key_ptr = lua_tolstring(L, -2, &key_len);
+			key.assign(key_ptr, key_len);
 		} else {
 			lua_pop(L, 1);
 			continue;
 		}
 
 		// Check order matters: lua_isstring returns true for numbers
-		// due to coercion, so check specific types first.
+		// due to coercion, so check specific types first. String
+		// values are deliberately NOT copied into value.string_value
+		// yet - only lua_tolstring'd for a pointer and length, an O(1)
+		// peek into Lua's own buffer - so an oversized string can be
+		// rejected by the budget check below without first paying for
+		// the copy: without this, a 15 MB string referenced from many
+		// small sibling tables would get fully memcpy'd into a
+		// std::string on every occurrence before its budget rejection
+		// discarded it, defeating the whole point of the byte budget.
+		LuaOutputNode value;
+		bool matched               = true;
+		bool is_pending_lua_string = false;
+		const char* pending_string = nullptr;
+		size_t pending_string_len  = 0;
 		if (lua_isboolean(L, -1)) {
-			j[key] = static_cast<bool>(lua_toboolean(L, -1));
+			value.kind = LuaOutputNode::Kind::Bool;
+			value.bool_value = static_cast<bool>(lua_toboolean(L, -1));
 		} else if (lua_isinteger(L, -1)) {
-			j[key] = lua_tointeger(L, -1);
+			value.kind      = LuaOutputNode::Kind::Int;
+			value.int_value = lua_tointeger(L, -1);
 		} else if (lua_isnumber(L, -1)) {
-			j[key] = lua_tonumber(L, -1);
+			value.kind         = LuaOutputNode::Kind::Double;
+			value.double_value = lua_tonumber(L, -1);
 		} else if (lua_type(L, -1) == LUA_TSTRING) {
-			j[key] = lua_tostring(L, -1);
+			value.kind            = LuaOutputNode::Kind::String;
+			is_pending_lua_string = true;
+			pending_string = lua_tolstring(L, -1, &pending_string_len);
 		} else if (lua_istable(L, -1)) {
-			j[key] = LuaTableToJson(L, lua_absindex(L, -1), depth + 1);
+			// Recursing here can itself return a Kind::String node
+			// (a truncation placeholder from a deeper
+			// depth/visited-set cutoff) - is_pending_lua_string
+			// stays false in that case, so it's never mistaken for
+			// an actual Lua string value still awaiting its
+			// deferred copy below.
+			value = LuaTableToNode(L, lua_absindex(L, -1), depth + 1, budget);
+		} else {
+			matched = false;
 		}
 
 		lua_pop(L, 1);
+
+		if (!matched) {
+			continue;
+		}
+
+		const size_t added_bytes =
+		        key.size() +
+		        (value.kind == LuaOutputNode::Kind::String
+		                 ? (is_pending_lua_string ? pending_string_len
+		                                          : value.string_value.size())
+		                 : 0);
+
+		if (budget.nodes_used >= MaxOutputNodes ||
+		    budget.bytes_used + added_bytes > MaxOutputBytes) {
+			budget.truncated = true;
+			lua_pop(L, 1); // the key lua_next left on the stack for
+			               // its own resumption, which we're not doing
+			break;
+		}
+
+		if (is_pending_lua_string) {
+			value.string_value.assign(pending_string, pending_string_len);
+		}
+
+		++budget.nodes_used;
+		budget.bytes_used += added_bytes;
+		node.object_value.emplace_back(std::move(key), std::move(value));
 	}
 
-	return j;
+	return node;
+}
+
+nlohmann::json LuaOutputNodeToJson(const LuaOutputNode& node)
+{
+	switch (node.kind) {
+	case LuaOutputNode::Kind::Bool: return node.bool_value;
+	case LuaOutputNode::Kind::Int: return node.int_value;
+	case LuaOutputNode::Kind::Double: return node.double_value;
+	case LuaOutputNode::Kind::String: return node.string_value;
+	case LuaOutputNode::Kind::Object: {
+		json j;
+		for (const auto& [key, child] : node.object_value) {
+			j[key] = LuaOutputNodeToJson(child);
+		}
+		return j;
+	}
+	case LuaOutputNode::Kind::Null:
+	default: return nullptr;
+	}
 }
 
 void LuaStatusCommand::Execute()
@@ -345,14 +461,20 @@ void LuaStatusCommand::Execute()
 		result.log_path = mgr.Log().FilePath();
 	}
 
-	// Serialize the dosbox.output table.
+	// Serialize the dosbox.output table. The budget-bounded walk into a
+	// plain owned structure happens here, on the emulation thread, while
+	// the Lua state is actually valid; the nlohmann::json conversion and
+	// dump happen later in Get(), on the web thread.
 	auto* L = mgr.Engine().GetState();
 	if (L) {
 		lua_getglobal(L, "dosbox");
 		if (lua_istable(L, -1)) {
 			lua_getfield(L, -1, "output");
 			if (lua_istable(L, -1)) {
-				result.output = LuaTableToJson(L, lua_absindex(L, -1));
+				LuaOutputBudget budget;
+				result.output = LuaTableToNode(
+				        L, lua_absindex(L, -1), 0, budget);
+				result.output_truncated = budget.truncated;
 			}
 			lua_pop(L, 1);
 		}
@@ -374,9 +496,10 @@ void LuaStatusCommand::Get(const httplib::Request&, httplib::Response& res)
 		j["error"] = cmd.result.error;
 	}
 
-	if (!cmd.result.output.empty()) {
-		j["output"] = cmd.result.output;
+	if (!cmd.result.output.IsEmpty()) {
+		j["output"] = LuaOutputNodeToJson(cmd.result.output);
 	}
+	j["output_truncated"] = cmd.result.output_truncated;
 
 	if (!cmd.result.log_path.empty()) {
 		j["log_path"] = cmd.result.log_path;
