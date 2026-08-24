@@ -31,6 +31,7 @@
 #include "gui/osd/osd_port.h"
 
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +45,8 @@
 #if defined(WIN32)
 #include <bcrypt.h>
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #include "http/http.h"
@@ -297,16 +300,14 @@ static std::string strip_port(const std::string& host)
 	return host;
 }
 
-static std::string generate_api_token()
+static void fill_random_bytes(uint8_t* buf, const size_t len)
 {
-	uint8_t buf[32] = {};
-
 #if defined(WIN32)
 	// BCryptGenRandom is the Windows CSPRNG. std::random_device on
 	// MinGW has been deterministic on some toolchains.
 	const auto status = BCryptGenRandom(nullptr,
 	                                    buf,
-	                                    sizeof(buf),
+	                                    static_cast<ULONG>(len),
 	                                    BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 	if (!BCRYPT_SUCCESS(status)) {
 		E_Exit("WEBSERVER: BCryptGenRandom failed (0x%08lx)", status);
@@ -314,7 +315,7 @@ static std::string generate_api_token()
 #else
 	// On Linux/macOS, /dev/urandom is the standard CSPRNG source.
 	auto* f = fopen("/dev/urandom", "rb");
-	if (!f || fread(buf, 1, sizeof(buf), f) != sizeof(buf)) {
+	if (!f || fread(buf, 1, len, f) != len) {
 		if (f) {
 			fclose(f);
 		}
@@ -322,15 +323,35 @@ static std::string generate_api_token()
 	}
 	fclose(f);
 #endif
+}
 
+static std::string to_hex(const uint8_t* buf, const size_t len)
+{
 	constexpr char hex[] = "0123456789abcdef";
-	std::string token;
-	token.reserve(64);
-	for (const auto byte : buf) {
-		token += hex[(byte >> 4) & 0xF];
-		token += hex[byte & 0xF];
+	std::string s;
+	s.reserve(len * 2);
+	for (size_t i = 0; i < len; ++i) {
+		s += hex[(buf[i] >> 4) & 0xF];
+		s += hex[buf[i] & 0xF];
 	}
-	return token;
+	return s;
+}
+
+static std::string generate_api_token()
+{
+	uint8_t buf[32] = {};
+	fill_random_bytes(buf, sizeof(buf));
+	return to_hex(buf, sizeof(buf));
+}
+
+// 128 bits: enough to make a collision between two instances started in
+// the same second astronomically unlikely, without the token's larger
+// size (this identifies a process, it does not authenticate anything).
+static std::string generate_instance_id()
+{
+	uint8_t buf[16] = {};
+	fill_random_bytes(buf, sizeof(buf));
+	return to_hex(buf, sizeof(buf));
 }
 
 static std::filesystem::path token_file_path = {};
@@ -519,6 +540,24 @@ static void run(const std::string addr, const int port,
 		api_token = generate_api_token();
 	}
 
+	// Identity for restart detection (3.6): a bridge that re-attaches
+	// after a 401 can tell "same process, stale token" apart from
+	// "this is a different process" by comparing instance_id, instead
+	// of blindly replaying a possibly-mutating request into a fresh
+	// guest session.
+	const auto instance_id = generate_instance_id();
+	const auto pid =
+#if defined(WIN32)
+	        static_cast<int64_t>(GetCurrentProcessId());
+#else
+	        static_cast<int64_t>(getpid());
+#endif
+	const auto started_at_unix =
+	        std::chrono::duration_cast<std::chrono::seconds>(
+	                std::chrono::system_clock::now().time_since_epoch())
+	                .count();
+	const auto start_steady = std::chrono::steady_clock::now();
+
 	server.set_mount_point("/", config_home);
 	server.set_mount_point("/", resource_home);
 
@@ -528,14 +567,23 @@ static void run(const std::string addr, const int port,
 	server.set_exception_handler(error_handler);
 
 	server.Get("/api/v1/dosbox/info",
-	           [](const httplib::Request&, httplib::Response& res) {
+	           [instance_id, pid, started_at_unix, start_steady](
+	                   const httplib::Request&, httplib::Response& res) {
 		           const auto capabilities = BuildCapabilitiesBlock();
+		           const auto uptime_ms =
+		                   std::chrono::duration_cast<std::chrono::milliseconds>(
+		                           std::chrono::steady_clock::now() - start_steady)
+		                           .count();
 
 		           json j;
 		           j["version"]      = DOSBOX_GetDetailedVersion();
 		           j["features"]     = FeaturesProjection(capabilities);
 		           j["capabilities"] = capabilities;
 		           j["limits"]       = BuildServerLimits();
+		           j["instance_id"]  = instance_id;
+		           j["pid"]          = pid;
+		           j["started_at_unix"] = started_at_unix;
+		           j["uptime_ms"]       = uptime_ms;
 		           send_json(res, j);
 	           });
 

@@ -61,6 +61,29 @@ def test_dosbox_info(dosbox):
     assert "configWebserver" not in data
 
 
+def test_dosbox_info_reports_instance_identity(dosbox):
+    # aug-3.6: lets a client tell a stale token on the same process
+    # apart from a genuine restart (a different process behind the
+    # same URL).
+    r = dosbox.dosbox_info()
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["instance_id"]) == 32
+    int(data["instance_id"], 16)  # 128 bits of hex, not a label
+    assert data["pid"] > 0
+    assert data["started_at_unix"] > 0
+    assert data["uptime_ms"] >= 0
+
+
+def test_dosbox_info_instance_id_is_stable_across_calls(dosbox):
+    first = dosbox.dosbox_info().json()
+    second = dosbox.dosbox_info().json()
+    assert first["instance_id"] == second["instance_id"]
+    assert first["pid"] == second["pid"]
+    assert first["started_at_unix"] == second["started_at_unix"]
+    assert second["uptime_ms"] >= first["uptime_ms"]
+
+
 def test_dosbox_info_reports_features(dosbox):
     r = dosbox.dosbox_info()
     assert r.status_code == 200
