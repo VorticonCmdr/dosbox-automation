@@ -11,6 +11,8 @@
 #include <functional>
 #include <limits>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "http/http.h"
 #include "json/json.h"
@@ -80,6 +82,12 @@ void send_json(httplib::Response& res, const nlohmann::json& j);
 // the fixed documentation assets (landing page, API explorer, openapi spec,
 // vendored Swagger UI). Exact-match only, so no traversal or token file leaks.
 bool IsPublicDocPath(const std::string& method, const std::string& path);
+
+// Every (method, path) the server actually registers under /api/v1,
+// including GET /api/v1/dosbox/info. Exposed for testing: a test walks
+// this against resources/webserver/openapi.json so the spec can't drift
+// out of sync with the real route table again (4.1).
+std::vector<std::pair<std::string, std::string>> RegisteredApiRoutes();
 
 // The JSON error shape and HTTP status a caught exception maps to.
 // `message` stays a plain, caller-facing string; `code` and `retryable`

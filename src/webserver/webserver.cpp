@@ -186,99 +186,169 @@ bool IsPublicDocPath(const std::string& method, const std::string& path)
 
 static httplib::Server server;
 
+enum class HttpMethod { Get, Post, Put, Delete };
+
+struct ApiRoute {
+	HttpMethod method;
+	std::string path;
+	httplib::Server::Handler handler;
+};
+
+// Single source of truth for the API surface: setup_api_handlers() below
+// registers every route from this table, and RegisteredApiRoutes()
+// (webserver.h) exposes the same (method, path) pairs so a test can walk
+// them against resources/webserver/openapi.json and catch drift instead
+// of it silently accumulating (4.1). GET /api/v1/dosbox/info is the one
+// route not in this table - its handler captures per-instance runtime
+// state (instance_id, pid, start time) generated fresh in run(), so it's
+// registered separately below; RegisteredApiRoutes() adds it back in.
+static const std::vector<ApiRoute>& get_api_route_table()
+{
+	static const std::vector<ApiRoute> routes = {
+	        {   HttpMethod::Get,"/api/v1/cpu/state",                 CpuStateCommand::Get                                    },
+
+	        {   HttpMethod::Get,         "/api/v1/dos/internals",             DosInternalsCommand::Get},
+
+	        {  HttpMethod::Post,       "/api/v1/dosbox/shutdown",                ShutdownCommand::Post},
+
+	        {  HttpMethod::Post,       "/api/v1/memory/allocate",             AllocMemoryCommand::Post},
+	        {  HttpMethod::Post,           "/api/v1/memory/free",              FreeMemoryCommand::Post},
+	        {   HttpMethod::Get,
+	         "/api/v1/memory/allocations",        MemoryAllocationsCommand::Get                       },
+	        {  HttpMethod::Post,         "/api/v1/memory/search",            SearchMemoryCommand::Post},
+	        {  HttpMethod::Post,           "/api/v1/memory/scan",              ScanMemoryCommand::Post},
+	        {  HttpMethod::Post,       "/api/v1/memory/snapshot",         MemorySnapshotHandlers::Post},
+	        {  HttpMethod::Post,           "/api/v1/memory/diff",             MemoryDiffHandlers::Post},
+	        {  HttpMethod::Post,         "/api/v1/memory/freeze",                 FreezeHandlers::Post},
+	        {   HttpMethod::Get,         "/api/v1/memory/freeze",                  FreezeHandlers::Get},
+	        {HttpMethod::Delete,         "/api/v1/memory/freeze",               FreezeHandlers::Delete},
+	        {   HttpMethod::Get,   "/api/v1/memory/:offset/:len",               ReadMemoryCommand::Get},
+	        {   HttpMethod::Get,
+	         "/api/v1/memory/:segment/:offset/:len",               ReadMemoryCommand::Get             },
+	        {   HttpMethod::Put,        "/api/v1/memory/:offset",              WriteMemoryCommand::Put},
+	        {   HttpMethod::Put,
+	         "/api/v1/memory/:segment/:offset",              WriteMemoryCommand::Put                  },
+
+	        {   HttpMethod::Get,               "/api/v1/io/port",                 PortReadCommand::Get},
+	        {   HttpMethod::Put,               "/api/v1/io/port",                PortWriteCommand::Put},
+	        {   HttpMethod::Put,          "/api/v1/cpu/register",            WriteRegisterCommand::Put},
+
+	        {  HttpMethod::Post,                 "/api/v1/batch",                   BatchCommand::Post},
+
+	        {   HttpMethod::Get,          "/api/v1/debug/status",              DebugStatusCommand::Get},
+	        {  HttpMethod::Post,           "/api/v1/debug/pause",              DebugPauseCommand::Post},
+	        {  HttpMethod::Post,        "/api/v1/debug/continue",           DebugContinueCommand::Post},
+	        {  HttpMethod::Post,            "/api/v1/debug/step",               DebugStepCommand::Post},
+	        {  HttpMethod::Post,       "/api/v1/debug/step_over",           DebugStepOverCommand::Post},
+	        {  HttpMethod::Post,          "/api/v1/debug/run_to",              DebugRunToCommand::Post},
+	        {  HttpMethod::Post,        "/api/v1/debug/step_out",            DebugStepOutCommand::Post},
+	        {   HttpMethod::Get,            "/api/v1/debug/wait",               DebugWaitHandlers::Get},
+
+	        {   HttpMethod::Get,
+	         "/api/v1/debug/disassemble/:segment/:offset/:count",              DisassembleCommand::Get},
+	        {   HttpMethod::Get,       "/api/v1/debug/backtrace",                BacktraceCommand::Get},
+
+	        {   HttpMethod::Get,
+	         "/api/v1/debug/breakpoints",     DebugListBreakpointsCommand::Get                        },
+	        {  HttpMethod::Post,
+	         "/api/v1/debug/breakpoints",      DebugAddBreakpointCommand::Post                        },
+	        {HttpMethod::Delete,
+	         "/api/v1/debug/breakpoints", DebugDeleteBreakpointCommand::Delete                        },
+
+	        {  HttpMethod::Post,        "/api/v1/input/sequence",           InputSequenceCommand::Post},
+	        {  HttpMethod::Post,            "/api/v1/input/type",               InputTypeCommand::Post},
+	        {   HttpMethod::Get,   "/api/v1/input/replay/status",            ReplayHandlers::GetStatus},
+	        {HttpMethod::Delete,          "/api/v1/input/replay",          ReplayCancelCommand::Delete},
+	        {   HttpMethod::Get,           "/api/v1/input/mouse",         MouseGetPositionCommand::Get},
+	        {  HttpMethod::Post,           "/api/v1/input/mouse",        MouseSetPositionCommand::Post},
+
+	        {   HttpMethod::Get,           "/api/v1/video/frame",              VideoHandlers::GetFrame},
+	        {   HttpMethod::Get,      "/api/v1/video/frame/info",          VideoHandlers::GetFrameInfo},
+	        {   HttpMethod::Get,            "/api/v1/video/text",               ScreenTextCommand::Get},
+
+	        {   HttpMethod::Get,         "/api/v1/program/state",     ControlHandlers::GetProgramState},
+	        {   HttpMethod::Get,                "/api/v1/status",           ControlHandlers::GetStatus},
+	        {  HttpMethod::Post,      "/api/v1/control/shutdown",                ShutdownCommand::Post},
+
+	        {  HttpMethod::Post,                  "/api/v1/wait",                   WaitHandlers::Post},
+
+	        {   HttpMethod::Get,                 "/api/v1/drive",                DriveListCommand::Get},
+	        {  HttpMethod::Post,            "/api/v1/drive/swap",               DriveSwapCommand::Post},
+
+	        {  HttpMethod::Post,            "/api/v1/mount/lock",              MountHandlers::PostLock},
+	        {   HttpMethod::Get,            "/api/v1/mount/lock",               MountHandlers::GetLock},
+	        {   HttpMethod::Get,          "/api/v1/mount/policy",             MountHandlers::GetPolicy},
+	        {   HttpMethod::Get,          "/api/v1/mount/images",             MountHandlers::GetImages},
+
+	        {  HttpMethod::Post,
+	         "/api/v1/input/record/start",         RecordingHandlers::PostStart                       },
+	        {  HttpMethod::Post,
+	         "/api/v1/input/record/pause",         RecordingHandlers::PostPause                       },
+	        {  HttpMethod::Post,     "/api/v1/input/record/stop",          RecordingHandlers::PostStop},
+	        {   HttpMethod::Get,
+	         "/api/v1/input/record/status",         RecordingHandlers::GetStatus                      },
+	        {   HttpMethod::Get,
+	         "/api/v1/input/recordings",      RecordingStoreHandlers::GetList                         },
+	        {HttpMethod::Delete,
+	         "/api/v1/input/recordings/:name",       RecordingStoreHandlers::Delete                   },
+
+	        {  HttpMethod::Post,           "/api/v1/script/load",            Lua::LuaLoadCommand::Post},
+	        {  HttpMethod::Post,          "/api/v1/script/start",           Lua::LuaStartCommand::Post},
+	        {  HttpMethod::Post,           "/api/v1/script/stop",            Lua::LuaStopCommand::Post},
+	        {   HttpMethod::Get,         "/api/v1/script/status",           Lua::LuaStatusCommand::Get},
+	        {   HttpMethod::Get,            "/api/v1/script/log",              Lua::LuaLogCommand::Get},
+
+	        {  HttpMethod::Post,
+	         "/api/v1/capture/video/start",            CaptureStartCommand::Post                      },
+	        {  HttpMethod::Post,    "/api/v1/capture/video/stop",             CaptureStopCommand::Post},
+	        {   HttpMethod::Get,
+	         "/api/v1/capture/video/status",            CaptureStatusCommand::Get                     },
+	        {   HttpMethod::Get,
+	         "/api/v1/capture/video/compression",    CaptureCompressionGetCommand::Get                },
+	        {   HttpMethod::Put,
+	         "/api/v1/capture/video/compression",    CaptureCompressionSetCommand::Put                },
+	};
+	return routes;
+}
+
 static void setup_api_handlers()
 {
-	server.Get("/api/v1/cpu/state", CpuStateCommand::Get);
+	for (const auto& route : get_api_route_table()) {
+		switch (route.method) {
+		case HttpMethod::Get:
+			server.Get(route.path, route.handler);
+			break;
+		case HttpMethod::Post:
+			server.Post(route.path, route.handler);
+			break;
+		case HttpMethod::Put:
+			server.Put(route.path, route.handler);
+			break;
+		case HttpMethod::Delete:
+			server.Delete(route.path, route.handler);
+			break;
+		}
+	}
+}
 
-	server.Get("/api/v1/dos/internals", DosInternalsCommand::Get);
-
-	server.Post("/api/v1/dosbox/shutdown", ShutdownCommand::Post);
-
-	server.Post("/api/v1/memory/allocate", AllocMemoryCommand::Post);
-	server.Post("/api/v1/memory/free", FreeMemoryCommand::Post);
-	server.Get("/api/v1/memory/allocations", MemoryAllocationsCommand::Get);
-	server.Post("/api/v1/memory/search", SearchMemoryCommand::Post);
-	server.Post("/api/v1/memory/scan", ScanMemoryCommand::Post);
-	server.Post("/api/v1/memory/snapshot", MemorySnapshotHandlers::Post);
-	server.Post("/api/v1/memory/diff", MemoryDiffHandlers::Post);
-	server.Post("/api/v1/memory/freeze", FreezeHandlers::Post);
-	server.Get("/api/v1/memory/freeze", FreezeHandlers::Get);
-	server.Delete("/api/v1/memory/freeze", FreezeHandlers::Delete);
-	server.Get("/api/v1/memory/:offset/:len", ReadMemoryCommand::Get);
-	server.Get("/api/v1/memory/:segment/:offset/:len", ReadMemoryCommand::Get);
-	server.Put("/api/v1/memory/:offset", WriteMemoryCommand::Put);
-	server.Put("/api/v1/memory/:segment/:offset", WriteMemoryCommand::Put);
-
-	server.Get("/api/v1/io/port", PortReadCommand::Get);
-	server.Put("/api/v1/io/port", PortWriteCommand::Put);
-	server.Put("/api/v1/cpu/register", WriteRegisterCommand::Put);
-
-	server.Post("/api/v1/batch", BatchCommand::Post);
-
-	server.Get("/api/v1/debug/status", DebugStatusCommand::Get);
-	server.Post("/api/v1/debug/pause", DebugPauseCommand::Post);
-	server.Post("/api/v1/debug/continue", DebugContinueCommand::Post);
-	server.Post("/api/v1/debug/step", DebugStepCommand::Post);
-	server.Post("/api/v1/debug/step_over", DebugStepOverCommand::Post);
-	server.Post("/api/v1/debug/run_to", DebugRunToCommand::Post);
-	server.Post("/api/v1/debug/step_out", DebugStepOutCommand::Post);
-	server.Get("/api/v1/debug/wait", DebugWaitHandlers::Get);
-
-	server.Get("/api/v1/debug/disassemble/:segment/:offset/:count",
-	           DisassembleCommand::Get);
-	server.Get("/api/v1/debug/backtrace", BacktraceCommand::Get);
-
-	server.Get("/api/v1/debug/breakpoints", DebugListBreakpointsCommand::Get);
-	server.Post("/api/v1/debug/breakpoints", DebugAddBreakpointCommand::Post);
-	server.Delete("/api/v1/debug/breakpoints",
-	              DebugDeleteBreakpointCommand::Delete);
-
-	server.Post("/api/v1/input/sequence", InputSequenceCommand::Post);
-	server.Post("/api/v1/input/type", InputTypeCommand::Post);
-	server.Get("/api/v1/input/replay/status", ReplayHandlers::GetStatus);
-	server.Delete("/api/v1/input/replay", ReplayCancelCommand::Delete);
-	server.Get("/api/v1/input/mouse", MouseGetPositionCommand::Get);
-	server.Post("/api/v1/input/mouse", MouseSetPositionCommand::Post);
-
-	server.Get("/api/v1/video/frame", VideoHandlers::GetFrame);
-	server.Get("/api/v1/video/frame/info", VideoHandlers::GetFrameInfo);
-	server.Get("/api/v1/video/text", ScreenTextCommand::Get);
-
-	server.Get("/api/v1/program/state", ControlHandlers::GetProgramState);
-	server.Get("/api/v1/status", ControlHandlers::GetStatus);
-	server.Post("/api/v1/control/shutdown", ShutdownCommand::Post);
-
-	server.Post("/api/v1/wait", WaitHandlers::Post);
-
-	server.Get("/api/v1/drive", DriveListCommand::Get);
-	server.Post("/api/v1/drive/swap", DriveSwapCommand::Post);
-
-	server.Post("/api/v1/mount/lock", MountHandlers::PostLock);
-	server.Get("/api/v1/mount/lock", MountHandlers::GetLock);
-	server.Get("/api/v1/mount/policy", MountHandlers::GetPolicy);
-	server.Get("/api/v1/mount/images", MountHandlers::GetImages);
-
-	server.Post("/api/v1/input/record/start", RecordingHandlers::PostStart);
-	server.Post("/api/v1/input/record/pause", RecordingHandlers::PostPause);
-	server.Post("/api/v1/input/record/stop", RecordingHandlers::PostStop);
-	server.Get("/api/v1/input/record/status", RecordingHandlers::GetStatus);
-	server.Get("/api/v1/input/recordings", RecordingStoreHandlers::GetList);
-	server.Delete("/api/v1/input/recordings/:name",
-	              RecordingStoreHandlers::Delete);
-
-	server.Post("/api/v1/script/load", Lua::LuaLoadCommand::Post);
-	server.Post("/api/v1/script/start", Lua::LuaStartCommand::Post);
-	server.Post("/api/v1/script/stop", Lua::LuaStopCommand::Post);
-	server.Get("/api/v1/script/status", Lua::LuaStatusCommand::Get);
-	server.Get("/api/v1/script/log", Lua::LuaLogCommand::Get);
-
-	server.Post("/api/v1/capture/video/start", CaptureStartCommand::Post);
-	server.Post("/api/v1/capture/video/stop", CaptureStopCommand::Post);
-	server.Get("/api/v1/capture/video/status", CaptureStatusCommand::Get);
-	server.Get("/api/v1/capture/video/compression",
-	           CaptureCompressionGetCommand::Get);
-	server.Put("/api/v1/capture/video/compression",
-	           CaptureCompressionSetCommand::Put);
+std::vector<std::pair<std::string, std::string>> RegisteredApiRoutes()
+{
+	std::vector<std::pair<std::string, std::string>> routes;
+	for (const auto& route : get_api_route_table()) {
+		const char* method = "GET";
+		switch (route.method) {
+		case HttpMethod::Get: method = "GET"; break;
+		case HttpMethod::Post: method = "POST"; break;
+		case HttpMethod::Put: method = "PUT"; break;
+		case HttpMethod::Delete: method = "DELETE"; break;
+		}
+		routes.emplace_back(method, route.path);
+	}
+	// See get_api_route_table()'s comment: the one route registered outside
+	// that table, because its handler closes over per-instance runtime
+	// state rather than being a plain static function.
+	routes.emplace_back("GET", "/api/v1/dosbox/info");
+	return routes;
 }
 
 static std::string strip_port(const std::string& host)

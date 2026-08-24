@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "dosbox-automation control API",
-    "version": "0.84-da1",
+    "version": "0.84-da3",
     "description": "REST API for programmatic control of dosbox-automation. Automate installations, drive games, capture frames, and record or replay input.\n\nThe API is intended for local automation. By default the server binds to 127.0.0.1 and is not designed to be exposed to untrusted networks. Every endpoint under /api/v1 requires a bearer token; the documentation assets (this page, the landing page, openapi.json) are served without a token so the docs are browsable. Use the Authorize button to paste your token before running a request.\n\nAll endpoints read or write internal state atomically between emulated CPU steps. They never run during native DOS functions or interrupts, so the internal data structures are always consistent.",
     "license": {
       "name": "GPL-2.0-or-later"
@@ -62,6 +62,14 @@
     {
       "name": "Batch",
       "description": "Atomic multi-operation execution (memory, CPU, I/O port, freeze)."
+    },
+    {
+      "name": "Debug",
+      "description": "Interactive debugging: pause/step/continue, breakpoints, state inspection. Needs a debugger-enabled build - see capabilities.debugger in GET /api/v1/dosbox/info. Every route below returns 501 when it isn't."
+    },
+    {
+      "name": "Wait",
+      "description": "Server-side long poll for a condition (text, screen change, frame count, memory value, debugger stop, script completion, program change) instead of client-side polling."
     }
   ],
   "security": [
@@ -181,7 +189,7 @@
                   }
                 },
                 "example": {
-                  "version": "dosbox-automation 0.84-da1",
+                  "version": "dosbox-automation 0.84-da3",
                   "features": {
                     "memory": true,
                     "input": true,
@@ -2857,6 +2865,790 @@
           }
         }
       }
+    },
+    "/api/v1/debug/status": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Debugger status",
+        "description": "stop mirrors the most recently published DebugStop record, whether or not the emulator is stopped right now.",
+        "operationId": "debugStatus",
+        "responses": {
+          "200": {
+            "description": "Whether the debugger is currently stopped, and the last stop record.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "debugging": true,
+                  "stop": {
+                    "stop_id": 3,
+                    "reason": "breakpoint"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/pause": {
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Pause execution",
+        "description": "Idempotent: pausing an already-paused emulator returns status 'ok' again rather than an error.",
+        "operationId": "debugPause",
+        "responses": {
+          "200": {
+            "description": "Paused (or already paused).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "debugging": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/continue": {
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Resume execution",
+        "operationId": "debugContinue",
+        "responses": {
+          "200": {
+            "description": "Resumed. The next stop (if any) happens asynchronously - poll GET /debug/wait?since_stop_id=resumed_from_stop_id.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "debugging": false,
+                  "resumed_from_stop_id": 3
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/step": {
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Single-step one or more instructions",
+        "description": "Optional JSON body: {\"count\": N} to step N instructions in one call (default 1). N is bounded; see debug.h's DEBUG_MaxStepCount.",
+        "operationId": "debugStep",
+        "responses": {
+          "200": {
+            "description": "Stepped. status is 'not_paused' when the emulator wasn't stopped to begin with.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "debugging": true,
+                  "stop": {
+                    "stop_id": 4,
+                    "reason": "step"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/step_over": {
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Step over the current call/int/loop/rep",
+        "operationId": "debugStepOver",
+        "responses": {
+          "200": {
+            "description": "Armed a one-shot breakpoint past the current instruction, or fell back to a plain step when the current instruction isn't one of call/int/loop/rep. stop is only present when a step was published synchronously by this call - otherwise poll GET /debug/wait?since_stop_id=resumed_from_stop_id.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "stepped_over": true,
+                  "debugging": false,
+                  "resumed_from_stop_id": 5
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/run_to": {
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Run until a specific address",
+        "operationId": "debugRunTo",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "segment",
+                  "offset"
+                ],
+                "properties": {
+                  "segment": {
+                    "type": "integer"
+                  },
+                  "offset": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "example": {
+                "segment": 0,
+                "offset": 4660
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Armed a one-shot breakpoint at segment:offset and resumed. The actual stop happens asynchronously - poll GET /debug/wait?since_stop_id=resumed_from_stop_id.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "resumed_from_stop_id": 6
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/step_out": {
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Run until the current function returns",
+        "description": "Backtraces (heuristically, real mode has no reliable frame pointer chain) to the caller's return address and plants a one-shot breakpoint there.",
+        "operationId": "debugStepOut",
+        "responses": {
+          "200": {
+            "description": "status is 'no_confident_caller_frame' when the backtrace couldn't resolve a caller to aim at (nothing is armed in that case), or 'not_paused' when the emulator wasn't stopped. On 'ok', poll GET /debug/wait?since_stop_id=resumed_from_stop_id for the actual stop.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "resumed_from_stop_id": 7
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/wait": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Long-poll for the next debugger stop",
+        "description": "Blocks the calling connection (not a Bridge command, so it never holds the emulation thread) until a stop newer than since_stop_id is published or timeout_ms elapses.",
+        "operationId": "debugWait",
+        "parameters": [
+          {
+            "name": "since_stop_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0
+            },
+            "description": "Return immediately if the current stop_id already exceeds this."
+          },
+          {
+            "name": "timeout_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Bounded by wait.min_timeout_ms/max_timeout_ms in GET /dosbox/info's limits block."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Either a new stop past since_stop_id, or a timeout with the live debugging state.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "satisfied": true,
+                  "stop_id": 8,
+                  "reason": "breakpoint",
+                  "debugging": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/disassemble/{segment}/{offset}/{count}": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Disassemble instructions starting at segment:offset",
+        "description": "Real-mode-style seg:off addressing, decoded with the live CS's current operand-size default - not a protected-mode GDT resolution. Always available, regardless of the debugger capability.",
+        "operationId": "debugDisassemble",
+        "parameters": [
+          {
+            "name": "segment",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "count",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Bounded by disassemble.max_count in GET /dosbox/info's limits block."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Decoded instructions. truncated is true when count instructions would have read past the end of emulated memory.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "segment": 0,
+                  "offset": 4660,
+                  "truncated": false,
+                  "instructions": [
+                    {
+                      "offset": 4660,
+                      "length": 2,
+                      "text": "MOV AX,BX",
+                      "target": null,
+                      "bytes": "iMM="
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/backtrace": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Walk the call stack from the current frame",
+        "description": "Heuristic in DOS real mode: expect most walks to resolve confidently one or two frames before confidence drops. Always available, regardless of the debugger capability.",
+        "operationId": "debugBacktrace",
+        "parameters": [
+          {
+            "name": "max_frames",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Bounded by backtrace.max_frames in GET /dosbox/info's limits block; defaults to backtrace.default_frames."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Frames from innermost outward. confidence is 'low' once BP stops looking like a real frame-pointer chain - real-mode DOS code has no guarantee it kept one at all.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "frames": [
+                    {
+                      "bp": 4660,
+                      "segment": 0,
+                      "offset": 256,
+                      "confidence": "high"
+                    }
+                  ],
+                  "stopped_reason": "bp_zero"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/breakpoints": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "List breakpoints",
+        "operationId": "debugListBreakpoints",
+        "responses": {
+          "200": {
+            "description": "All currently registered breakpoints.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "breakpoints": [
+                    {
+                      "id": 1,
+                      "index": 0,
+                      "type": "execute",
+                      "segment": 0,
+                      "offset": 256,
+                      "once": false,
+                      "active": true,
+                      "hit_count": 0,
+                      "ignore_count": 0,
+                      "condition": null
+                    }
+                  ],
+                  "count": 1
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Add a breakpoint",
+        "description": "type is 'execute', 'interrupt', or 'memory'. execute/memory take segment+offset; interrupt takes int (0x00-0xFF) and optional ah/al (omit for wildcard). Optional: once (bool), ignore_count (int, mutually exclusive with once), condition (BreakpointCondition, mutually exclusive with once). memory breakpoints additionally need a heavy-debugger build - see capabilities.debugger in GET /dosbox/info - and return 501 otherwise even when C_DEBUGGER is on.",
+        "operationId": "debugAddBreakpoint",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "execute",
+                      "interrupt",
+                      "memory"
+                    ]
+                  },
+                  "segment": {
+                    "type": "integer"
+                  },
+                  "offset": {
+                    "type": "integer"
+                  },
+                  "int": {
+                    "type": "integer"
+                  },
+                  "ah": {
+                    "type": "integer"
+                  },
+                  "al": {
+                    "type": "integer"
+                  },
+                  "once": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "ignore_count": {
+                    "type": "integer",
+                    "default": 0
+                  },
+                  "condition": {
+                    "$ref": "#/components/schemas/BreakpointCondition"
+                  }
+                }
+              },
+              "example": {
+                "type": "execute",
+                "segment": 0,
+                "offset": 256
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created. Echoes back the stored breakpoint, including the id and index the engine assigned.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "id": 1,
+                  "index": 0,
+                  "type": "execute",
+                  "segment": 0,
+                  "offset": 256,
+                  "once": false,
+                  "active": true,
+                  "hit_count": 0,
+                  "ignore_count": 0,
+                  "condition": null
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "description": "A breakpoint already exists at this location and either it or this one carries an ignore_count or condition - only the first match in list order is ever evaluated, so the second would silently never fire. List existing breakpoints and delete the conflicting one first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Delete breakpoints",
+        "description": "Body is optional. Specify exactly one of 'id' or 'index' to delete a single breakpoint; omit the body (or send an empty one) to delete all.",
+        "operationId": "debugDeleteBreakpoints",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer"
+                  },
+                  "index": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "example": {
+                "id": 1
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted. An empty body deletes all breakpoints (status 'cleared'); a body with 'id' or 'index' deletes just that one (status 'removed').",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "removed",
+                  "id": 1
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "description": "No breakpoint at the given id/index.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/script/log": {
+      "get": {
+        "tags": [
+          "Script"
+        ],
+        "summary": "Read the debug log of the loaded script",
+        "description": "Only available for a script started with debug=true (POST /script/load). Reads the last script.max_log_tail_bytes of the file directly, independent of the emulation thread.",
+        "operationId": "scriptLog",
+        "responses": {
+          "200": {
+            "description": "Tail of the debug log, up to script.max_log_tail_bytes.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "path": "/home/user/.local/share/dosbox-automation/lua-logs/demo.log",
+                  "truncated": false,
+                  "content": "..."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No debug script is loaded - the currently loaded script (if any) wasn't started with debug=true.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "A debug script is loaded but its log either failed to open on the engine side, or isn't readable now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/wait": {
+      "post": {
+        "tags": [
+          "Wait"
+        ],
+        "summary": "Long-poll for a condition",
+        "description": "One request, one wait: blocks the calling connection (never the emulation thread) until the condition named by 'for' is satisfied or timeout_ms elapses. 'for' is one of text, screen_change, frames, replay_done, memory, stopped, script_done, program, each taking its own extra fields - see the engine's wait.h for the full per-condition field list. reason on return is 'matched', 'timeout', 'emulator_stopped' (a frame-driven condition can't progress while paused), 'shutting_down', or 'error'.",
+        "operationId": "waitFor",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "for"
+                ],
+                "properties": {
+                  "for": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "screen_change",
+                      "frames",
+                      "replay_done",
+                      "memory",
+                      "stopped",
+                      "script_done",
+                      "program"
+                    ]
+                  },
+                  "timeout_ms": {
+                    "type": "integer",
+                    "description": "Bounded by wait.min_timeout_ms/max_timeout_ms in GET /dosbox/info's limits block."
+                  },
+                  "pattern": {
+                    "type": "string",
+                    "description": "'text'/'program' conditions."
+                  },
+                  "ignore_case": {
+                    "type": "boolean",
+                    "description": "'text' condition."
+                  },
+                  "baseline_hash": {
+                    "type": "string",
+                    "description": "'screen_change' condition: 16 hex chars, from a prior text_hash/hash value."
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "frame"
+                    ],
+                    "description": "'screen_change' condition."
+                  },
+                  "count": {
+                    "type": "integer",
+                    "description": "'frames' condition: how many frames from now."
+                  },
+                  "addr": {
+                    "type": "integer",
+                    "description": "'memory' condition."
+                  },
+                  "width": {
+                    "type": "integer",
+                    "enum": [
+                      1,
+                      2,
+                      4
+                    ],
+                    "description": "'memory' condition, default 1."
+                  },
+                  "value": {
+                    "type": "integer",
+                    "description": "'memory' condition."
+                  },
+                  "op": {
+                    "type": "string",
+                    "enum": [
+                      "eq",
+                      "ne",
+                      "lt",
+                      "gt",
+                      "le",
+                      "ge"
+                    ],
+                    "description": "'memory' condition, default eq."
+                  }
+                }
+              },
+              "example": {
+                "for": "text",
+                "pattern": "Install complete",
+                "timeout_ms": 15000
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The wait ended, either satisfied or on timeout/error - both are 200, not an HTTP-level failure. Extra fields beyond satisfied/reason/for depend on which condition was requested (e.g. text_hash for 'text', frame for 'frames', value for 'memory').",
+            "content": {
+              "application/json": {
+                "example": {
+                  "satisfied": true,
+                  "reason": "matched",
+                  "for": "text",
+                  "text_hash": "1a2b3c4d5e6f7890"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "description": "for: 'stopped' needs a debugger-enabled build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2922,6 +3714,19 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "DebuggerNotBuilt": {
+        "description": "The debugger capability isn't built into this binary (C_DEBUGGER=0). See capabilities.debugger in GET /api/v1/dosbox/info.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": "debug_status: debugger capability not built in this binary"
             }
           }
         }
@@ -3429,6 +4234,14 @@
           "output": {
             "type": "object",
             "description": "The script's dosbox.output table, when set."
+          },
+          "output_truncated": {
+            "type": "boolean",
+            "description": "True when dosbox.output was too large or deeply nested and was cut off - see capabilities.script.limits in GET /api/v1/dosbox/info. Always present."
+          },
+          "log_path": {
+            "type": "string",
+            "description": "Present only when the loaded script was started with debug=true. GET /script/log reads it."
           }
         }
       },
@@ -3926,6 +4739,180 @@
           "message": {
             "type": "string",
             "description": "Present only for status out_of_range."
+          }
+        }
+      },
+      "BreakpointCondition": {
+        "type": "object",
+        "nullable": true,
+        "description": "Extra match condition on a breakpoint, evaluated only once the breakpoint's own location/int-ah-al already matched. Either register-based (register/op/value) or memory-based (segment/offset/width/op/value), never both. Absent or null means the breakpoint always stops.",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "eq",
+              "ne",
+              "lt",
+              "le",
+              "gt",
+              "ge"
+            ]
+          },
+          "value": {
+            "type": "integer",
+            "description": "32-bit value compared against."
+          },
+          "register": {
+            "type": "string",
+            "description": "Register-based condition, e.g. 'eax', 'al', 'cs'."
+          },
+          "segment": {
+            "type": "integer",
+            "description": "Memory-based condition: segment."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Memory-based condition: offset."
+          },
+          "width": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              4
+            ],
+            "description": "Memory-based condition: value width in bytes."
+          }
+        }
+      },
+      "DebugBreakpoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Stable identifier, unique for the life of the process."
+          },
+          "index": {
+            "type": "integer",
+            "description": "Current position in the breakpoint list; not stable across deletes."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "execute",
+              "interrupt",
+              "memory"
+            ]
+          },
+          "segment": {
+            "type": "integer",
+            "description": "execute/memory breakpoints only."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "execute/memory breakpoints only."
+          },
+          "int": {
+            "type": "integer",
+            "description": "interrupt breakpoints only."
+          },
+          "ah": {
+            "type": "integer",
+            "description": "interrupt breakpoints only; DEBUG_BPINT_ANY (0x100) means wildcard."
+          },
+          "al": {
+            "type": "integer",
+            "description": "interrupt breakpoints only; DEBUG_BPINT_ANY (0x100) means wildcard."
+          },
+          "once": {
+            "type": "boolean",
+            "description": "Removed automatically after its first hit."
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "hit_count": {
+            "type": "integer"
+          },
+          "ignore_count": {
+            "type": "integer",
+            "description": "Remaining hits to skip before this breakpoint actually stops."
+          },
+          "condition": {
+            "$ref": "#/components/schemas/BreakpointCondition"
+          }
+        }
+      },
+      "DebugStop": {
+        "type": "object",
+        "description": "A snapshot of emulator state at the moment execution paused - on a breakpoint hit, an explicit pause, or after a step.",
+        "properties": {
+          "stop_id": {
+            "type": "integer",
+            "description": "Monotonically increasing; poll GET /debug/wait?since_stop_id= for the next one."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why execution stopped, e.g. 'breakpoint', 'step', 'pause'."
+          },
+          "registers": {
+            "$ref": "#/components/schemas/Registers"
+          },
+          "linear_eip": {
+            "type": "integer"
+          },
+          "protected_mode": {
+            "type": "boolean"
+          },
+          "core": {
+            "type": "string"
+          },
+          "code_bytes": {
+            "type": "string",
+            "format": "byte",
+            "description": "A few bytes at CS:EIP, base64-encoded."
+          },
+          "breakpoint": {
+            "nullable": true,
+            "type": "object",
+            "description": "The breakpoint that caused this stop, or null when the stop wasn't a breakpoint hit.",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "execute",
+                  "interrupt",
+                  "memory"
+                ]
+              },
+              "segment": {
+                "type": "integer"
+              },
+              "offset": {
+                "type": "integer"
+              },
+              "int": {
+                "type": "integer"
+              },
+              "ah": {
+                "type": "integer"
+              },
+              "al": {
+                "type": "integer"
+              },
+              "id": {
+                "type": "integer"
+              },
+              "index": {
+                "type": "integer"
+              },
+              "once": {
+                "type": "boolean"
+              },
+              "hit_count": {
+                "type": "integer"
+              }
+            }
           }
         }
       }

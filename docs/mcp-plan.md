@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.6 done. Rest of tiers 2-4 outstanding.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.6 done. Rest of tier 4 outstanding.**
 
 ---
 
@@ -1022,13 +1022,27 @@ The `visited` set is a global, never-backed-out dedup for the whole call (not an
 ## Tier 4: hygiene and infrastructure
 
 ### 4.1 Regenerate openapi.json and keep it honest
-**Engine. Effort: S. Highest value in this tier.**
+**Engine. Effort: S. Highest value in this tier. Status: done.**
 
 The spec is declared normative by `PROTOCOL.md`, is served unauthenticated, and is what `bridge_swagger` reads. It documents 36 paths against 48 registered, omits all seven debug routes, and still says `info.version 0.84-da1` against 0.84-da3. The only test asserts `openapi == "3.1.0"` and that `/api/v1/status` is a key.
 
 Regenerate, and add a test that walks the registered route table and asserts every `(path, method)` appears in the spec. Note the naming divergence while regenerating: the spec table writes `memory/{offset}/{length}`, the engine registers `{len}`.
 
 Also, `config_home` is mounted at `/` ahead of `resource_home`, so a file dropped in the user-writable config dir shadows the shipped resource and is served unauthenticated, including this normative document. Worth a decision.
+
+**Shipped.** The registered route count had grown to 70 (method, path) pairs by the time this landed - well past the "48" this item was written against - so the actual gap was wider than described: the live server was missing all 11 debug-group paths (13 method entries: status, pause, continue, step, step_over, run_to, step_out, wait, disassemble, backtrace, breakpoints GET/POST/DELETE), plus `GET /script/log` and `POST /wait` (both added after this item was written). The `memory/{offset}/{length}` vs `{len}` naming divergence the item called out no longer exists in the spec (already `{len}` on both sides) - stale by the time this ran, not something this change touched.
+
+Refactored `setup_api_handlers()` (`webserver.cpp`) from 68 sequential `server.Get/Post/Put/Delete(...)` calls into a single `ApiRoute` table (`method`, `path`, `handler`) that both registers every route and backs a new `Webserver::RegisteredApiRoutes()` (`webserver.h`), so the route table a test walks is the same data structure production code registers from, not a hand-maintained parallel list that can drift the same way the spec did. `GET /api/v1/dosbox/info` stays registered separately in `run()` - its handler closes over per-instance runtime state (`instance_id`, `pid`, start time) generated fresh per process, so it can't live in a table of plain static handlers - `RegisteredApiRoutes()` adds its one entry back in with a comment explaining why, keeping it a deliberate, documented exception rather than an untracked gap.
+
+Added `tests/webserver_openapi_tests.cpp`: `EveryRegisteredRouteIsDocumented` walks `RegisteredApiRoutes()` and asserts each `(method, path)` is a key (translating httplib's `:name` path params to OpenAPI's `{name}`) under the matching verb in `resources/webserver/openapi.json`; `EveryDocumentedRouteIsRegistered` checks the inverse, so a route that's later removed from the server can't leave stale documentation behind either; a third test sanity-checks `RegisteredApiRoutes()` itself isn't accidentally empty. All three run from `CMAKE_SOURCE_DIR` (the existing `WORKING_DIRECTORY` for `dosbox_tests`) and read the real spec file directly, so a regeneration miss fails a real test rather than depending on someone remembering to check.
+
+Wrote full OpenAPI operations for all 13 new paths: new `Debug` and `Wait` tags, new `DebuggerNotBuilt` shared 501 response, new `BreakpointCondition`/`DebugBreakpoint`/`DebugStop` schemas built directly from `debug.cpp`'s actual JSON construction (`DebugStopToJson`, `BreakpointToJson`) rather than guessed. Also fixed two fields the 3.8 item had added to `LuaStatusCommand::Get`'s response but never reflected in the `ScriptStatus` schema: `output_truncated` (always present) and `log_path` (present only for a `debug=true` script) - caught while cross-checking `script/status`'s existing doc entry against its handler for the new `script/log` entry next to it. Bumped `info.version` to `0.84-da3` (both the top-level field and the `/status` example payload, which still said `0.84-da1`) to match `DOSBOX_VERSION` (`CMakeLists.txt`).
+
+Left `config_home` mounted ahead of `resource_home` as-is: httplib's `base_dirs_` matches in registration order, so a file dropped in the user-writable webserver config directory does shadow a shipped doc asset (landing page, `openapi.json`, the vendored Swagger UI assets) for the handful of exact paths on `IsPublicDocPath`'s allowlist - but the pre-routing bearer check runs before either mount is ever consulted, and `IsPublicDocPath` is what decides which paths skip that check, not which mount wins a file match; `/api_token` and every `/api/v1/*` route still require the token regardless of mount order (existing test: `test_token_file_not_exposed_via_docs`). Whoever can write into that config directory can already read the real token file living there, so shadowing the docs for them specifically doesn't cross a privilege boundary the token file itself doesn't already cross. Not a change worth making blind; flagged here as the decision rather than silently left unexamined.
+
+Not adversarially reviewed via the Workflow tool: same reasoning as 4.6 - this is a documentation regeneration plus a mechanical single-source-of-truth refactor of already-tested route registration (every route's behavior is unchanged, only how it gets registered), backed by a route-table equality test in both directions and a live-instance check against a real running binary. Talked through the main risk by hand instead: the refactor could in principle register a route under the wrong verb or typo a path and still pass both new tests if the same mistake were made in both the table and the hand-authored spec entry - mitigated by the live-instance curl checks against `/debug/status` and `/debug/breakpoints` matching the documented shapes exactly, and by the full ctest run showing zero new failures across either build.
+
+**Verification:** rebuilt both `build` and `build-debugger` clean (`webserver.cpp` and the new test file only - no other translation units touched). `resources/webserver/openapi.json` is valid JSON; a full-route diff (registered route table vs. spec) shows zero missing and zero stale entries in either direction. ctest: `build` 1311 run / 20 pre-existing `MountPolicyTest` failures / 0 new; `build-debugger` same. Live-verified against an isolated `dosbox_with_debugger` instance (own `HOME`, dummy SDL drivers, non-default port, shut down via `POST /api/v1/control/shutdown`, never touching the user's own long-running instance): `GET /openapi.json` serves `info.version: "0.84-da3"` with 62 documented paths; `GET /api/v1/debug/status` and `GET /api/v1/debug/breakpoints` return exactly the shapes the new `DebugStop`/`DebugBreakpoint` schemas describe.
 
 ### 4.2 Close the protocol negotiation loop
 **Engine + bridge + protocol. Effort: S.**
