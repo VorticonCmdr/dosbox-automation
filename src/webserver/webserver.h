@@ -24,6 +24,27 @@ namespace Webserver {
 constexpr auto TypeJson   = "application/json";
 constexpr auto TypeBinary = "application/octet-stream";
 
+// Engine identity and the highest MCP protocol minor this build's API
+// surface implements. The single source both GET /api/v1/hello
+// (pre-auth) and GET /api/v1/dosbox/info report it from, so the two
+// routes can never disagree - see dosbox_mcp/protocol.py on the bridge
+// side for what a minor bump is expected to mean (additive only,
+// negotiated as min(bridge minor, engine minor)).
+constexpr auto EngineName = "dosbox-automation";
+// PROTOCOL.md's changelog already documents route/field additions
+// through 1.13.0 (draft) as things this engine ships - the debug group
+// (1.1.0), memory/search limit+total (1.2.0), memory/scan (1.3.0),
+// memory/snapshot+diff (1.4.0), the breakpoint address bounds check
+// (1.5.0), memory/allocate+free+allocations (1.6.0), drive/mount.policy/
+// mount.images (1.7.0), capture/video/start compression+status fields
+// (1.8.0), input/replay/status+cancel (1.9.0), input/record store
+// (1.10.0), batch (1.11.0), input/mouse (1.12.0), script/log +
+// dosbox/info's instance_id/pid/started_at_unix/uptime_ms (1.13.0). This
+// item (4.2, closing the negotiation loop itself: dosbox/info finally
+// sends this field, GET /api/v1/hello is implemented for the first time)
+// is 1.14.0 - see PROTOCOL.md's changelog entry of the same number.
+constexpr auto McpProtocol = "1.14";
+
 // httplib::Server::set_payload_max_length's cap, applied to every request
 // body regardless of route. Named so the capability descriptor
 // (capabilities.cpp) can report the same number it enforces.
@@ -82,6 +103,20 @@ void send_json(httplib::Response& res, const nlohmann::json& j);
 // the fixed documentation assets (landing page, API explorer, openapi spec,
 // vendored Swagger UI). Exact-match only, so no traversal or token file leaks.
 bool IsPublicDocPath(const std::string& method, const std::string& path);
+
+// True when a request may bypass the bearer-token check because it's the
+// pre-auth protocol handshake, GET /api/v1/hello - not a doc asset.
+// Deliberately kept separate from IsPublicDocPath rather than folded
+// into its allowlist: that predicate's own comment explains why it's
+// exact-match against one fixed small set, and widening it is exactly
+// the kind of change that risks a path toward the token file (see the
+// config_home mount comment in run()). This predicate exists for one
+// reason only - handing out {name, version, mcp_protocol} before a
+// bridge has a token, so it can tell whether it's even talking to a
+// compatible engine before trying to authenticate. Same discipline:
+// exact-match, GET/HEAD only. The Host allowlist check in the
+// pre-routing handler still runs before either predicate is consulted.
+bool IsPublicApiPath(const std::string& method, const std::string& path);
 
 // Every (method, path) the server actually registers under /api/v1,
 // including GET /api/v1/dosbox/info. Exposed for testing: a test walks

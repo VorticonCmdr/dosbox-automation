@@ -2,6 +2,7 @@
 // License: GPL-2.0-or-later. Contact: dosbox-automation-project@trinity2k.net
 //
 
+#include "webserver/control.h"
 #include "webserver/private/auth.h"
 #include "webserver/webserver.h"
 
@@ -9,8 +10,14 @@
 
 #include <gtest/gtest.h>
 
+#include "json/json.h"
+
 using Webserver::ConstantTimeEquals;
+using Webserver::ControlHandlers;
+using Webserver::EngineName;
+using Webserver::IsPublicApiPath;
 using Webserver::IsPublicDocPath;
+using Webserver::McpProtocol;
 
 namespace {
 
@@ -140,6 +147,77 @@ TEST(WebserverDocPath, RejectsTraversalAndTrickyVariants)
 	EXPECT_FALSE(IsPublicDocPath("GET", "/INDEX.HTML"));
 	EXPECT_FALSE(IsPublicDocPath("GET", "/openapi.json?x=1"));
 	EXPECT_FALSE(IsPublicDocPath("GET", ""));
+}
+
+// -- Pre-auth API path allowlist (4.2: GET /api/v1/hello) --
+
+TEST(WebserverApiPath, AllowsHelloForGetAndHead)
+{
+	EXPECT_TRUE(IsPublicApiPath("GET", "/api/v1/hello"));
+	EXPECT_TRUE(IsPublicApiPath("HEAD", "/api/v1/hello"));
+}
+
+TEST(WebserverApiPath, RejectsNonReadMethods)
+{
+	EXPECT_FALSE(IsPublicApiPath("POST", "/api/v1/hello"));
+	EXPECT_FALSE(IsPublicApiPath("PUT", "/api/v1/hello"));
+	EXPECT_FALSE(IsPublicApiPath("DELETE", "/api/v1/hello"));
+}
+
+TEST(WebserverApiPath, RejectsEveryOtherApiEndpoint)
+{
+	EXPECT_FALSE(IsPublicApiPath("GET", "/api/v1/status"));
+	EXPECT_FALSE(IsPublicApiPath("GET", "/api/v1/dosbox/info"));
+	EXPECT_FALSE(IsPublicApiPath("GET", "/api/v1/cpu/state"));
+}
+
+TEST(WebserverApiPath, RejectsTraversalAndTrickyVariants)
+{
+	EXPECT_FALSE(IsPublicApiPath("GET", "/api/v1/hello/../dosbox/info"));
+	EXPECT_FALSE(IsPublicApiPath("GET", "/api/v1/hello/"));
+	EXPECT_FALSE(IsPublicApiPath("GET", "/api/v1/hello?x=1"));
+	EXPECT_FALSE(IsPublicApiPath("GET", "/API/V1/HELLO"));
+	EXPECT_FALSE(IsPublicApiPath("GET", ""));
+}
+
+TEST(WebserverApiPath, NeverOverlapsWithDocPathAllowlist)
+{
+	// The two predicates are deliberately separate (see IsPublicApiPath's
+	// header comment) - confirm neither allowlist secretly covers the
+	// other's one path.
+	EXPECT_FALSE(IsPublicDocPath("GET", "/api/v1/hello"));
+	for (const auto* p : {"/",
+	                      "/index.html",
+	                      "/style-index.css",
+	                      "/api.html",
+	                      "/openapi.json",
+	                      "/swagger-ui.css",
+	                      "/swagger-ui-bundle.js"}) {
+		EXPECT_FALSE(IsPublicApiPath("GET", p)) << p;
+	}
+}
+
+// -- GET /api/v1/hello response shape --
+//
+// Not a Command/Bridge test: ControlHandlers::GetHello never touches
+// emulator state or crosses the Bridge (that's the whole point of it
+// being pre-auth), so it's safe and meaningful to call directly.
+
+TEST(WebserverHello, ReportsExactlyNameVersionAndProtocol)
+{
+	httplib::Request req;
+	httplib::Response res;
+	ControlHandlers::GetHello(req, res);
+
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("name").get<std::string>(), EngineName);
+	EXPECT_EQ(j.at("mcp_protocol").get<std::string>(), McpProtocol);
+	EXPECT_TRUE(j.at("version").is_string());
+	EXPECT_FALSE(j.at("version").get<std::string>().empty());
+
+	// Exactly these three fields - no pid, uptime, or anything else that
+	// would need per-instance state or a Bridge crossing.
+	EXPECT_EQ(j.size(), 3u);
 }
 
 } // namespace

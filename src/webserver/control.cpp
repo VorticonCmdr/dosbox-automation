@@ -64,4 +64,13 @@ void ControlHandlers::GetStatus(const httplib::Request&, httplib::Response& res)
 	send_json(res, j);
 }
 
+void ControlHandlers::GetHello(const httplib::Request&, httplib::Response& res)
+{
+	json j;
+	j["name"]         = EngineName;
+	j["version"]      = DOSBOX_GetDetailedVersion();
+	j["mcp_protocol"] = McpProtocol;
+	send_json(res, j);
+}
+
 } // namespace Webserver

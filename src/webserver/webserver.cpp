@@ -184,6 +184,14 @@ bool IsPublicDocPath(const std::string& method, const std::string& path)
 	return public_paths.count(path) > 0;
 }
 
+bool IsPublicApiPath(const std::string& method, const std::string& path)
+{
+	if (method != "GET" && method != "HEAD") {
+		return false;
+	}
+	return path == "/api/v1/hello";
+}
+
 static httplib::Server server;
 
 enum class HttpMethod { Get, Post, Put, Delete };
@@ -269,6 +277,7 @@ static const std::vector<ApiRoute>& get_api_route_table()
 	        {   HttpMethod::Get,         "/api/v1/program/state",     ControlHandlers::GetProgramState},
 	        {   HttpMethod::Get,                "/api/v1/status",           ControlHandlers::GetStatus},
 	        {  HttpMethod::Post,      "/api/v1/control/shutdown",                ShutdownCommand::Post},
+	        {   HttpMethod::Get,                 "/api/v1/hello",            ControlHandlers::GetHello},
 
 	        {  HttpMethod::Post,                  "/api/v1/wait",                   WaitHandlers::Post},
 
@@ -551,9 +560,11 @@ static void setup_security(const std::string& addr, int port,
 			return httplib::Server::HandlerResponse::Handled;
 		}
 
-		// Documentation assets are browsable without a token (Host
-		// check still applies). The /api/v1 endpoints below are not.
-		if (IsPublicDocPath(req.method, req.path)) {
+		// Documentation assets and the GET /api/v1/hello handshake are
+		// browsable/callable without a token (Host check still
+		// applies). Every other /api/v1 endpoint is not.
+		if (IsPublicDocPath(req.method, req.path) ||
+		    IsPublicApiPath(req.method, req.path)) {
 			return httplib::Server::HandlerResponse::Unhandled;
 		}
 
@@ -646,6 +657,8 @@ static void run(const std::string addr, const int port,
 		                           .count();
 
 		           json j;
+		           j["name"]         = EngineName;
+		           j["mcp_protocol"] = McpProtocol;
 		           j["version"]      = DOSBOX_GetDetailedVersion();
 		           j["features"]     = FeaturesProjection(capabilities);
 		           j["capabilities"] = capabilities;

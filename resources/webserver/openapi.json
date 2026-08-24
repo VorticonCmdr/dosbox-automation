@@ -3649,6 +3649,51 @@
           }
         }
       }
+    },
+    "/api/v1/hello": {
+      "get": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Pre-auth protocol handshake",
+        "description": "The only route that answers without a bearer token (see the security scheme description). Lets a bridge check version and protocol compatibility before it has - or can even obtain - a token. Returns exactly these three fields: no pid, uptime, features, or anything else that would need per-instance state.",
+        "operationId": "hello",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Engine identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "version",
+                    "mcp_protocol"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "mcp_protocol": {
+                      "type": "string",
+                      "description": "Highest dosbox-mcp wire protocol minor this build implements, as major.minor."
+                    }
+                  }
+                },
+                "example": {
+                  "name": "dosbox-automation",
+                  "version": "dosbox-automation 0.84-da3 (abc1234)",
+                  "mcp_protocol": "1.14"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
