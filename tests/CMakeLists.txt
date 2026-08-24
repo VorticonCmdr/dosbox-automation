@@ -34,6 +34,7 @@ add_executable(dosbox_tests
     unicode_tests.cpp
     webserver_auth_tests.cpp
     webserver_openapi_tests.cpp
+    webserver_scope_tests.cpp
     osd_tests.cpp
     mount_policy_tests.cpp
     lua_engine_tests.cpp

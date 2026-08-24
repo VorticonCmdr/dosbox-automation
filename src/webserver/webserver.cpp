@@ -30,6 +30,7 @@
 #include "gui/osd/osd.h"
 #include "gui/osd/osd_port.h"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -38,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -200,122 +202,160 @@ struct ApiRoute {
 	HttpMethod method;
 	std::string path;
 	httplib::Server::Handler handler;
+	TokenScope required_scope;
 };
 
 // Single source of truth for the API surface: setup_api_handlers() below
-// registers every route from this table, and RegisteredApiRoutes()
+// registers every route from this table, RegisteredApiRoutes()
 // (webserver.h) exposes the same (method, path) pairs so a test can walk
 // them against resources/webserver/openapi.json and catch drift instead
-// of it silently accumulating (4.1). GET /api/v1/dosbox/info is the one
-// route not in this table - its handler captures per-instance runtime
-// state (instance_id, pid, start time) generated fresh in run(), so it's
-// registered separately below; RegisteredApiRoutes() adds it back in.
+// of it silently accumulating (4.1), and RequiredScopeFor (4.7) reads
+// each route's required_scope straight from the same entry - there is
+// no separate scope table that could fall out of sync with either. GET
+// /api/v1/dosbox/info is the one route not in this table - its handler
+// captures per-instance runtime state (instance_id, pid, start time)
+// generated fresh in run(), so it's registered separately below;
+// RegisteredApiRoutes() and RequiredScopeFor() both special-case it back
+// in.
 static const std::vector<ApiRoute>& get_api_route_table()
 {
+	using enum TokenScope;
 	static const std::vector<ApiRoute> routes = {
-	        {   HttpMethod::Get,"/api/v1/cpu/state",                 CpuStateCommand::Get                                    },
+	        {   HttpMethod::Get,"/api/v1/cpu/state",                 CpuStateCommand::Get,Read	                                                                                                   },
 
-	        {   HttpMethod::Get,         "/api/v1/dos/internals",             DosInternalsCommand::Get},
+	        {   HttpMethod::Get,         "/api/v1/dos/internals",             DosInternalsCommand::Get,    Read},
 
-	        {  HttpMethod::Post,       "/api/v1/dosbox/shutdown",                ShutdownCommand::Post},
+	        {  HttpMethod::Post,       "/api/v1/dosbox/shutdown",                ShutdownCommand::Post, Control},
 
-	        {  HttpMethod::Post,       "/api/v1/memory/allocate",             AllocMemoryCommand::Post},
-	        {  HttpMethod::Post,           "/api/v1/memory/free",              FreeMemoryCommand::Post},
+	        {  HttpMethod::Post,       "/api/v1/memory/allocate",             AllocMemoryCommand::Post,   Write},
+	        {  HttpMethod::Post,           "/api/v1/memory/free",              FreeMemoryCommand::Post,   Write},
 	        {   HttpMethod::Get,
-	         "/api/v1/memory/allocations",        MemoryAllocationsCommand::Get                       },
-	        {  HttpMethod::Post,         "/api/v1/memory/search",            SearchMemoryCommand::Post},
-	        {  HttpMethod::Post,           "/api/v1/memory/scan",              ScanMemoryCommand::Post},
-	        {  HttpMethod::Post,       "/api/v1/memory/snapshot",         MemorySnapshotHandlers::Post},
-	        {  HttpMethod::Post,           "/api/v1/memory/diff",             MemoryDiffHandlers::Post},
-	        {  HttpMethod::Post,         "/api/v1/memory/freeze",                 FreezeHandlers::Post},
-	        {   HttpMethod::Get,         "/api/v1/memory/freeze",                  FreezeHandlers::Get},
-	        {HttpMethod::Delete,         "/api/v1/memory/freeze",               FreezeHandlers::Delete},
-	        {   HttpMethod::Get,   "/api/v1/memory/:offset/:len",               ReadMemoryCommand::Get},
+	         "/api/v1/memory/allocations",        MemoryAllocationsCommand::Get,
+	         Read	                                                                                      },
+	        {  HttpMethod::Post,         "/api/v1/memory/search",            SearchMemoryCommand::Post,    Read},
+	        {  HttpMethod::Post,           "/api/v1/memory/scan",              ScanMemoryCommand::Post,    Read},
+	        {  HttpMethod::Post,
+	         "/api/v1/memory/snapshot",         MemorySnapshotHandlers::Post,
+	         Read	                                                                                      },
+	        {  HttpMethod::Post,           "/api/v1/memory/diff",             MemoryDiffHandlers::Post,    Read},
+	        {  HttpMethod::Post,         "/api/v1/memory/freeze",                 FreezeHandlers::Post,   Write},
+	        {   HttpMethod::Get,         "/api/v1/memory/freeze",                  FreezeHandlers::Get,    Read},
+	        {HttpMethod::Delete,         "/api/v1/memory/freeze",               FreezeHandlers::Delete,   Write},
+	        {   HttpMethod::Get,   "/api/v1/memory/:offset/:len",               ReadMemoryCommand::Get,    Read},
 	        {   HttpMethod::Get,
-	         "/api/v1/memory/:segment/:offset/:len",               ReadMemoryCommand::Get             },
-	        {   HttpMethod::Put,        "/api/v1/memory/:offset",              WriteMemoryCommand::Put},
+	         "/api/v1/memory/:segment/:offset/:len",               ReadMemoryCommand::Get,
+	         Read	                                                                                      },
+	        {   HttpMethod::Put,        "/api/v1/memory/:offset",              WriteMemoryCommand::Put,   Write},
 	        {   HttpMethod::Put,
-	         "/api/v1/memory/:segment/:offset",              WriteMemoryCommand::Put                  },
+	         "/api/v1/memory/:segment/:offset",              WriteMemoryCommand::Put,
+	         Write	                                                                                     },
 
-	        {   HttpMethod::Get,               "/api/v1/io/port",                 PortReadCommand::Get},
-	        {   HttpMethod::Put,               "/api/v1/io/port",                PortWriteCommand::Put},
-	        {   HttpMethod::Put,          "/api/v1/cpu/register",            WriteRegisterCommand::Put},
+	        {   HttpMethod::Get,               "/api/v1/io/port",                 PortReadCommand::Get,    Read},
+	        {   HttpMethod::Put,               "/api/v1/io/port",                PortWriteCommand::Put,   Write},
+	        {   HttpMethod::Put,          "/api/v1/cpu/register",            WriteRegisterCommand::Put,   Write},
 
-	        {  HttpMethod::Post,                 "/api/v1/batch",                   BatchCommand::Post},
+	        {  HttpMethod::Post,                 "/api/v1/batch",                   BatchCommand::Post,   Write},
 
-	        {   HttpMethod::Get,          "/api/v1/debug/status",              DebugStatusCommand::Get},
-	        {  HttpMethod::Post,           "/api/v1/debug/pause",              DebugPauseCommand::Post},
-	        {  HttpMethod::Post,        "/api/v1/debug/continue",           DebugContinueCommand::Post},
-	        {  HttpMethod::Post,            "/api/v1/debug/step",               DebugStepCommand::Post},
-	        {  HttpMethod::Post,       "/api/v1/debug/step_over",           DebugStepOverCommand::Post},
-	        {  HttpMethod::Post,          "/api/v1/debug/run_to",              DebugRunToCommand::Post},
-	        {  HttpMethod::Post,        "/api/v1/debug/step_out",            DebugStepOutCommand::Post},
-	        {   HttpMethod::Get,            "/api/v1/debug/wait",               DebugWaitHandlers::Get},
-
-	        {   HttpMethod::Get,
-	         "/api/v1/debug/disassemble/:segment/:offset/:count",              DisassembleCommand::Get},
-	        {   HttpMethod::Get,       "/api/v1/debug/backtrace",                BacktraceCommand::Get},
-
-	        {   HttpMethod::Get,
-	         "/api/v1/debug/breakpoints",     DebugListBreakpointsCommand::Get                        },
+	        {   HttpMethod::Get,          "/api/v1/debug/status",              DebugStatusCommand::Get,   Debug},
+	        {  HttpMethod::Post,           "/api/v1/debug/pause",              DebugPauseCommand::Post,   Debug},
+	        {  HttpMethod::Post,        "/api/v1/debug/continue",           DebugContinueCommand::Post,   Debug},
+	        {  HttpMethod::Post,            "/api/v1/debug/step",               DebugStepCommand::Post,   Debug},
 	        {  HttpMethod::Post,
-	         "/api/v1/debug/breakpoints",      DebugAddBreakpointCommand::Post                        },
+	         "/api/v1/debug/step_over",           DebugStepOverCommand::Post,
+	         Debug	                                                                                     },
+	        {  HttpMethod::Post,          "/api/v1/debug/run_to",              DebugRunToCommand::Post,   Debug},
+	        {  HttpMethod::Post,        "/api/v1/debug/step_out",            DebugStepOutCommand::Post,   Debug},
+	        {   HttpMethod::Get,            "/api/v1/debug/wait",               DebugWaitHandlers::Get,   Debug},
+
+	        {   HttpMethod::Get,
+	         "/api/v1/debug/disassemble/:segment/:offset/:count",              DisassembleCommand::Get,
+	         Debug	                                                                                     },
+	        {   HttpMethod::Get,       "/api/v1/debug/backtrace",                BacktraceCommand::Get,   Debug},
+
+	        {   HttpMethod::Get,
+	         "/api/v1/debug/breakpoints",     DebugListBreakpointsCommand::Get,
+	         Debug	                                                                                     },
+	        {  HttpMethod::Post,
+	         "/api/v1/debug/breakpoints",      DebugAddBreakpointCommand::Post,
+	         Debug	                                                                                     },
 	        {HttpMethod::Delete,
-	         "/api/v1/debug/breakpoints", DebugDeleteBreakpointCommand::Delete                        },
+	         "/api/v1/debug/breakpoints", DebugDeleteBreakpointCommand::Delete,
+	         Debug	                                                                                     },
 
-	        {  HttpMethod::Post,        "/api/v1/input/sequence",           InputSequenceCommand::Post},
-	        {  HttpMethod::Post,            "/api/v1/input/type",               InputTypeCommand::Post},
-	        {   HttpMethod::Get,   "/api/v1/input/replay/status",            ReplayHandlers::GetStatus},
-	        {HttpMethod::Delete,          "/api/v1/input/replay",          ReplayCancelCommand::Delete},
-	        {   HttpMethod::Get,           "/api/v1/input/mouse",         MouseGetPositionCommand::Get},
-	        {  HttpMethod::Post,           "/api/v1/input/mouse",        MouseSetPositionCommand::Post},
-
-	        {   HttpMethod::Get,           "/api/v1/video/frame",              VideoHandlers::GetFrame},
-	        {   HttpMethod::Get,      "/api/v1/video/frame/info",          VideoHandlers::GetFrameInfo},
-	        {   HttpMethod::Get,            "/api/v1/video/text",               ScreenTextCommand::Get},
-
-	        {   HttpMethod::Get,         "/api/v1/program/state",     ControlHandlers::GetProgramState},
-	        {   HttpMethod::Get,                "/api/v1/status",           ControlHandlers::GetStatus},
-	        {  HttpMethod::Post,      "/api/v1/control/shutdown",                ShutdownCommand::Post},
-	        {   HttpMethod::Get,                 "/api/v1/hello",            ControlHandlers::GetHello},
-
-	        {  HttpMethod::Post,                  "/api/v1/wait",                   WaitHandlers::Post},
-
-	        {   HttpMethod::Get,                 "/api/v1/drive",                DriveListCommand::Get},
-	        {  HttpMethod::Post,            "/api/v1/drive/swap",               DriveSwapCommand::Post},
-
-	        {  HttpMethod::Post,            "/api/v1/mount/lock",              MountHandlers::PostLock},
-	        {   HttpMethod::Get,            "/api/v1/mount/lock",               MountHandlers::GetLock},
-	        {   HttpMethod::Get,          "/api/v1/mount/policy",             MountHandlers::GetPolicy},
-	        {   HttpMethod::Get,          "/api/v1/mount/images",             MountHandlers::GetImages},
-
-	        {  HttpMethod::Post,
-	         "/api/v1/input/record/start",         RecordingHandlers::PostStart                       },
-	        {  HttpMethod::Post,
-	         "/api/v1/input/record/pause",         RecordingHandlers::PostPause                       },
-	        {  HttpMethod::Post,     "/api/v1/input/record/stop",          RecordingHandlers::PostStop},
+	        {  HttpMethod::Post,        "/api/v1/input/sequence",           InputSequenceCommand::Post,   Input},
+	        {  HttpMethod::Post,            "/api/v1/input/type",               InputTypeCommand::Post,   Input},
 	        {   HttpMethod::Get,
-	         "/api/v1/input/record/status",         RecordingHandlers::GetStatus                      },
-	        {   HttpMethod::Get,
-	         "/api/v1/input/recordings",      RecordingStoreHandlers::GetList                         },
+	         "/api/v1/input/replay/status",            ReplayHandlers::GetStatus,
+	         Input	                                                                                     },
 	        {HttpMethod::Delete,
-	         "/api/v1/input/recordings/:name",       RecordingStoreHandlers::Delete                   },
+	         "/api/v1/input/replay",          ReplayCancelCommand::Delete,
+	         Input	                                                                                     },
+	        {   HttpMethod::Get,           "/api/v1/input/mouse",         MouseGetPositionCommand::Get,   Input},
+	        {  HttpMethod::Post,           "/api/v1/input/mouse",        MouseSetPositionCommand::Post,   Input},
 
-	        {  HttpMethod::Post,           "/api/v1/script/load",            Lua::LuaLoadCommand::Post},
-	        {  HttpMethod::Post,          "/api/v1/script/start",           Lua::LuaStartCommand::Post},
-	        {  HttpMethod::Post,           "/api/v1/script/stop",            Lua::LuaStopCommand::Post},
-	        {   HttpMethod::Get,         "/api/v1/script/status",           Lua::LuaStatusCommand::Get},
-	        {   HttpMethod::Get,            "/api/v1/script/log",              Lua::LuaLogCommand::Get},
+	        {   HttpMethod::Get,           "/api/v1/video/frame",              VideoHandlers::GetFrame,   Media},
+	        {   HttpMethod::Get,
+	         "/api/v1/video/frame/info",          VideoHandlers::GetFrameInfo,
+	         Media	                                                                                     },
+	        {   HttpMethod::Get,            "/api/v1/video/text",               ScreenTextCommand::Get,   Media},
+
+	        {   HttpMethod::Get,
+	         "/api/v1/program/state",     ControlHandlers::GetProgramState,
+	         Read	                                                                                      },
+	        {   HttpMethod::Get,                "/api/v1/status",           ControlHandlers::GetStatus,    Read},
+	        {  HttpMethod::Post,      "/api/v1/control/shutdown",                ShutdownCommand::Post, Control},
+	        {   HttpMethod::Get,                 "/api/v1/hello",            ControlHandlers::GetHello,    Read},
+
+	        {  HttpMethod::Post,                  "/api/v1/wait",                   WaitHandlers::Post,    Read},
+
+	        {   HttpMethod::Get,                 "/api/v1/drive",                DriveListCommand::Get,    Read},
+	        {  HttpMethod::Post,            "/api/v1/drive/swap",               DriveSwapCommand::Post, Control},
+
+	        {  HttpMethod::Post,            "/api/v1/mount/lock",              MountHandlers::PostLock, Control},
+	        {   HttpMethod::Get,            "/api/v1/mount/lock",               MountHandlers::GetLock,    Read},
+	        {   HttpMethod::Get,          "/api/v1/mount/policy",             MountHandlers::GetPolicy,    Read},
+	        {   HttpMethod::Get,          "/api/v1/mount/images",             MountHandlers::GetImages,    Read},
 
 	        {  HttpMethod::Post,
-	         "/api/v1/capture/video/start",            CaptureStartCommand::Post                      },
-	        {  HttpMethod::Post,    "/api/v1/capture/video/stop",             CaptureStopCommand::Post},
+	         "/api/v1/input/record/start",         RecordingHandlers::PostStart,
+	         Input	                                                                                     },
+	        {  HttpMethod::Post,
+	         "/api/v1/input/record/pause",         RecordingHandlers::PostPause,
+	         Input	                                                                                     },
+	        {  HttpMethod::Post,
+	         "/api/v1/input/record/stop",          RecordingHandlers::PostStop,
+	         Input	                                                                                     },
 	        {   HttpMethod::Get,
-	         "/api/v1/capture/video/status",            CaptureStatusCommand::Get                     },
+	         "/api/v1/input/record/status",         RecordingHandlers::GetStatus,
+	         Input	                                                                                     },
 	        {   HttpMethod::Get,
-	         "/api/v1/capture/video/compression",    CaptureCompressionGetCommand::Get                },
+	         "/api/v1/input/recordings",      RecordingStoreHandlers::GetList,
+	         Input	                                                                                     },
+	        {HttpMethod::Delete,
+	         "/api/v1/input/recordings/:name",       RecordingStoreHandlers::Delete,
+	         Input	                                                                                     },
+
+	        {  HttpMethod::Post,           "/api/v1/script/load",            Lua::LuaLoadCommand::Post,  Script},
+	        {  HttpMethod::Post,          "/api/v1/script/start",           Lua::LuaStartCommand::Post,  Script},
+	        {  HttpMethod::Post,           "/api/v1/script/stop",            Lua::LuaStopCommand::Post,  Script},
+	        {   HttpMethod::Get,         "/api/v1/script/status",           Lua::LuaStatusCommand::Get,  Script},
+	        {   HttpMethod::Get,            "/api/v1/script/log",              Lua::LuaLogCommand::Get,  Script},
+
+	        {  HttpMethod::Post,
+	         "/api/v1/capture/video/start",            CaptureStartCommand::Post,
+	         Media	                                                                                     },
+	        {  HttpMethod::Post,
+	         "/api/v1/capture/video/stop",             CaptureStopCommand::Post,
+	         Media	                                                                                     },
+	        {   HttpMethod::Get,
+	         "/api/v1/capture/video/status",            CaptureStatusCommand::Get,
+	         Media	                                                                                     },
+	        {   HttpMethod::Get,
+	         "/api/v1/capture/video/compression",    CaptureCompressionGetCommand::Get,
+	         Media	                                                                                     },
 	        {   HttpMethod::Put,
-	         "/api/v1/capture/video/compression",    CaptureCompressionSetCommand::Put                },
+	         "/api/v1/capture/video/compression",    CaptureCompressionSetCommand::Put,
+	         Media	                                                                                     },
 	};
 	return routes;
 }
@@ -358,6 +398,135 @@ std::vector<std::pair<std::string, std::string>> RegisteredApiRoutes()
 	// state rather than being a plain static function.
 	routes.emplace_back("GET", "/api/v1/dosbox/info");
 	return routes;
+}
+
+std::string TokenScopeName(const TokenScope scope)
+{
+	switch (scope) {
+	case TokenScope::Read: return "read";
+	case TokenScope::Write: return "write";
+	case TokenScope::Input: return "input";
+	case TokenScope::Script: return "script";
+	case TokenScope::Media: return "media";
+	case TokenScope::Debug: return "debug";
+	case TokenScope::Control: return "control";
+	}
+	return "";
+}
+
+static const std::vector<std::pair<std::string, TokenScope>>& scope_names_table()
+{
+	static const std::vector<std::pair<std::string, TokenScope>> names = {
+	        {   TokenScopeName(TokenScope::Read),    TokenScope::Read},
+	        {  TokenScopeName(TokenScope::Write),   TokenScope::Write},
+	        {  TokenScopeName(TokenScope::Input),   TokenScope::Input},
+	        { TokenScopeName(TokenScope::Script),  TokenScope::Script},
+	        {  TokenScopeName(TokenScope::Media),   TokenScope::Media},
+	        {  TokenScopeName(TokenScope::Debug),   TokenScope::Debug},
+	        {TokenScopeName(TokenScope::Control), TokenScope::Control},
+	};
+	return names;
+}
+
+std::optional<std::set<TokenScope>> ParseTokenScopes(const std::string& value)
+{
+	if (value.empty()) {
+		return std::nullopt;
+	}
+	std::set<TokenScope> granted = {};
+	std::stringstream stream(value);
+	std::string entry;
+	while (std::getline(stream, entry, ',')) {
+		// Trim surrounding whitespace so "read, input" parses the same
+		// as "read,input".
+		const auto first = entry.find_first_not_of(" \t");
+		const auto last  = entry.find_last_not_of(" \t");
+		if (first == std::string::npos) {
+			continue;
+		}
+		entry = entry.substr(first, last - first + 1);
+
+		const auto it = std::find_if(scope_names_table().begin(),
+		                             scope_names_table().end(),
+		                             [&](const auto& pair) {
+			                             return pair.first == entry;
+		                             });
+		if (it == scope_names_table().end()) {
+			LOG_WARNING(
+			        "WEBSERVER: Unknown webserver_token_scopes entry "
+			        "'%s', ignoring",
+			        entry.c_str());
+			continue;
+		}
+		granted.insert(it->second);
+	}
+	return granted;
+}
+
+// httplib's own path pattern matches segment-by-segment, with a ':name'
+// segment accepting any single non-empty path segment - this reimplements
+// just that subset so scope lookup can classify a route before httplib's
+// real router runs (the pre-routing handler fires first, on the request's
+// concrete path, not the matched pattern).
+static bool path_matches_pattern(const std::string& path, const std::string& pattern)
+{
+	const auto split = [](const std::string& s) {
+		std::vector<std::string> parts;
+		std::stringstream stream(s);
+		std::string part;
+		while (std::getline(stream, part, '/')) {
+			parts.push_back(part);
+		}
+		return parts;
+	};
+	const auto path_parts    = split(path);
+	const auto pattern_parts = split(pattern);
+	if (path_parts.size() != pattern_parts.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < pattern_parts.size(); ++i) {
+		const auto& p = pattern_parts[i];
+		if (!p.empty() && p[0] == ':') {
+			if (path_parts[i].empty()) {
+				return false;
+			}
+			continue;
+		}
+		if (path_parts[i] != p) {
+			return false;
+		}
+	}
+	return true;
+}
+
+std::optional<TokenScope> RequiredScopeFor(const std::string& method_in,
+                                           const std::string& path)
+{
+	// httplib answers HEAD from a registered GET handler without a
+	// separate registration (same reason IsPublicDocPath/IsPublicApiPath
+	// both explicitly accept HEAD alongside GET) - classify it the same
+	// as GET, or every HEAD request would 403 as soon as scoping is
+	// turned on even though the identical GET keeps working.
+	const std::string& method = (method_in == "HEAD") ? "GET" : method_in;
+
+	// See get_api_route_table()'s comment: registered outside that table
+	// because its handler closes over per-instance runtime state.
+	if (method == "GET" && path == "/api/v1/dosbox/info") {
+		return TokenScope::Read;
+	}
+	for (const auto& route : get_api_route_table()) {
+		const char* route_method = "GET";
+		switch (route.method) {
+		case HttpMethod::Get: route_method = "GET"; break;
+		case HttpMethod::Post: route_method = "POST"; break;
+		case HttpMethod::Put: route_method = "PUT"; break;
+		case HttpMethod::Delete: route_method = "DELETE"; break;
+		}
+		if (method == route_method && path_matches_pattern(path, route.path)) {
+			return route.required_scope;
+		}
+	}
+	return std::nullopt;
 }
 
 static std::string strip_port(const std::string& host)
@@ -524,7 +693,8 @@ static std::string extract_bearer_token(const std::string& auth_header)
 }
 
 static void setup_security(const std::string& addr, int port,
-                           const std::string& api_token)
+                           const std::string& api_token,
+                           const std::optional<std::set<TokenScope>>& granted_scopes)
 {
 	std::set<std::string> allowed_hosts;
 
@@ -546,8 +716,9 @@ static void setup_security(const std::string& addr, int port,
 	}
 
 	server.set_pre_routing_handler([allowed_hosts = std::move(allowed_hosts),
-	                                api_token](const httplib::Request& req,
-	                                           httplib::Response& res) {
+	                                api_token,
+	                                granted_scopes](const httplib::Request& req,
+	                                                httplib::Response& res) {
 		const auto host = strip_port(req.get_header_value("Host"));
 
 		if (allowed_hosts.find(host) == allowed_hosts.end()) {
@@ -580,6 +751,34 @@ static void setup_security(const std::string& addr, int port,
 			return httplib::Server::HandlerResponse::Handled;
 		}
 
+		// webserver_token_scopes (4.7): unset (nullopt) means no
+		// restriction was configured - one all-powerful token, today's
+		// default behavior. When set, a route this server doesn't
+		// recognize (RequiredScopeFor returning nullopt) denies rather
+		// than allows, so a route someone forgot to classify fails
+		// closed instead of silently bypassing the check.
+		if (granted_scopes.has_value()) {
+			const auto required = RequiredScopeFor(req.method, req.path);
+			const bool ok = required.has_value() &&
+			                granted_scopes->count(*required) > 0;
+			if (!ok) {
+				LOG_WARNING(
+				        "WEBSERVER: Rejected %s %s - token lacks "
+				        "required scope",
+				        req.method.c_str(),
+				        req.path.c_str());
+				send_error(res,
+				           httplib::StatusCode::Forbidden_403,
+				           required.has_value()
+				                   ? "Token is missing the '" +
+				                             TokenScopeName(*required) +
+				                             "' scope"
+				                   : "Token scope not configured for this route",
+				           "insufficient_scope");
+				return httplib::Server::HandlerResponse::Handled;
+			}
+		}
+
 		return httplib::Server::HandlerResponse::Unhandled;
 	});
 
@@ -595,9 +794,11 @@ static void setup_security(const std::string& addr, int port,
 }
 
 static void run(const std::string addr, const int port,
-                const std::string resource_home, const bool use_token_file)
+                const std::string resource_home, const bool use_token_file,
+                const std::string token_scopes_setting)
 {
 	const auto config_home = (get_config_dir() / DefaultWebserverDir).string();
+	const auto granted_scopes = ParseTokenScopes(token_scopes_setting);
 
 	// Channel A: a launcher can supply the token via env var so it
 	// never needs to scrape stderr or read a file.
@@ -643,7 +844,7 @@ static void run(const std::string addr, const int port,
 	server.set_mount_point("/", resource_home);
 
 	setup_api_handlers();
-	setup_security(addr, port, api_token);
+	setup_security(addr, port, api_token, granted_scopes);
 
 	server.set_exception_handler(error_handler);
 
@@ -738,6 +939,25 @@ static void init_config_settings(SectionProp& section)
 	        "token is not obtainable. Has no effect when DOSBOX_API_TOKEN is set\n"
 	        "via environment variable.");
 
+	auto token_scopes = section.AddString("webserver_token_scopes", OnlyAtStart, "");
+	token_scopes->SetHelp(
+	        "Restrict what the API token can do, as a comma-separated list of\n"
+	        "scopes (unset by default, meaning no restriction - the token can do\n"
+	        "everything). Available scopes: read, write, input, script, media,\n"
+	        "debug, control. A route this build does not recognize is refused\n"
+	        "once any scope is configured, even if the list would otherwise seem\n"
+	        "to cover it. Example: \"read,input,media\" for an agent that should\n"
+	        "only observe the screen and send input, never write memory, load\n"
+	        "scripts, use the debugger, or shut the machine down.\n"
+	        "\n"
+	        "This only restricts the REST API. A Lua script started via\n"
+	        "script/load and script/start runs on the emulation thread and\n"
+	        "reaches memory, input, and capture directly - it is not an HTTP\n"
+	        "request, so this setting cannot scope what it does. Granting the\n"
+	        "'script' scope is equivalent to granting write, input, media,\n"
+	        "debug, and control together; withhold it for a token that must\n"
+	        "not have those.");
+
 	auto osd = section.AddBool("webserver_osd", OnlyAtStart, true);
 	osd->SetHelp(
 	        "Show on-screen indicators while automation is driving the machine\n"
@@ -815,10 +1035,16 @@ void WEBSERVER_Init()
 		const auto port = section->GetInt("webserver_port");
 		const auto resource_home = get_resource_path("webserver").string();
 		const auto use_token_file = section->GetBool("webserver_token_file");
+		const auto token_scopes = section->GetString("webserver_token_scopes");
 
 		Webserver::InputRecording::InstallHooks();
 
-		std::thread thread(Webserver::run, addr, port, resource_home, use_token_file);
+		std::thread thread(Webserver::run,
+		                   addr,
+		                   port,
+		                   resource_home,
+		                   use_token_file,
+		                   token_scopes);
 
 		thread.detach();
 	}

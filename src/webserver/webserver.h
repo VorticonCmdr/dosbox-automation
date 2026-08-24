@@ -10,6 +10,8 @@
 #include <exception>
 #include <functional>
 #include <limits>
+#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -123,6 +125,37 @@ bool IsPublicApiPath(const std::string& method, const std::string& path);
 // this against resources/webserver/openapi.json so the spec can't drift
 // out of sync with the real route table again (4.1).
 std::vector<std::pair<std::string, std::string>> RegisteredApiRoutes();
+
+// Least-privilege grouping for webserver_token_scopes (4.7): every
+// registered route requires exactly one of these. The engine still
+// issues one token per instance - this restricts what that token can
+// do, it does not create per-scope tokens.
+enum class TokenScope { Read, Write, Input, Script, Media, Debug, Control };
+
+// Human-readable scope name (lowercase, matches the config setting's
+// vocabulary) - for error messages and the config-value parser below.
+std::string TokenScopeName(TokenScope scope);
+
+// The scope a registered route requires. Looked up against the same
+// table setup_api_handlers() registers from, so it cannot drift from
+// the real route set the way openapi.json once did (4.1) - there is no
+// separate list to keep in sync. Returns nullopt only for a path/method
+// this server does not recognize at all; the pre-routing handler
+// treats that as a deny whenever scoping is active, never as an
+// implicit allow, so a route someone forgot to classify fails closed
+// instead of silently bypassing the check.
+std::optional<TokenScope> RequiredScopeFor(const std::string& method,
+                                           const std::string& path);
+
+// Parses webserver_token_scopes (comma-separated scope names, e.g.
+// "read,input,media") into the set of granted scopes. An empty string
+// - the default - means "no restriction configured" and returns
+// nullopt; the pre-routing handler skips the scope check entirely in
+// that case, preserving today's single-all-powerful-token behavior.
+// An unrecognized name is logged and dropped rather than rejected
+// outright: a typo can only narrow what the token can do, never widen
+// it beyond what was written in the config file.
+std::optional<std::set<TokenScope>> ParseTokenScopes(const std::string& value);
 
 // The JSON error shape and HTTP status a caught exception maps to.
 // `message` stays a plain, caller-facing string; `code` and `retryable`
