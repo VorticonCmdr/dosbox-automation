@@ -37,6 +37,7 @@ add_executable(dosbox_tests
     webserver_scope_tests.cpp
     osd_tests.cpp
     mount_policy_tests.cpp
+    debugger_log_tests.cpp
     lua_engine_tests.cpp
     lua_coroutine_tests.cpp
     lua_api_tests.cpp

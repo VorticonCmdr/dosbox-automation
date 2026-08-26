@@ -6,6 +6,7 @@
 #if C_DEBUGGER
 #include "config/config.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -13,7 +14,10 @@
 #include <deque>
 #include <iterator>
 #include <list>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <SDL3/SDL.h>
 
@@ -36,6 +40,10 @@ struct _LogGroup {
 	bool enabled      = false;
 };
 
+// Written from any thread that logs (the webserver runs its handlers off the
+// emulation thread) and read by DBGUI_DrawOutputWindow on the emulation
+// thread.
+static std::mutex log_mutex           = {};
 static std::list<std::string> logBuff = {};
 
 // Scroll state for Output window (lines from bottom, 0 = at bottom)
@@ -144,12 +152,52 @@ bool DBGUI_HasKey()
 	return !key_buffer.empty() || !debugger_event_queue.empty();
 }
 
-void DEBUG_ShowMsg(const char* format, ...)
+// Each sink applies its own line ending: loguru appends one, the Output
+// window and log file store lines with an explicit '\n'.
+std::string_view DBGUI_TrimTrailingNewlines(const std::string_view text)
 {
-	if (!imgui_initialized) {
-		return;
+	const auto last = text.find_last_not_of("\r\n");
+	if (last == std::string_view::npos) {
+		return {};
+	}
+	return text.substr(0, last + 1);
+}
+
+// Mirror to loguru, the sink a non-debugger build writes to. Without this a
+// C_DEBUGGER build stays silent on stderr whenever the debugger's Output
+// window isn't up, which is always in a headless run.
+static void MirrorToHostLog(const LOG_SEVERITIES severity, const std::string& line)
+{
+	// Pass the text as an argument, never as the format string: it is
+	// already formatted and can carry per-cent signs from guest data.
+	switch (severity) {
+	case LOG_NORMAL: LOG_F(INFO, "%s", line.c_str()); break;
+	case LOG_WARN: LOG_F(WARNING, "%s", line.c_str()); break;
+	case LOG_ERROR: LOG_F(ERROR, "%s", line.c_str()); break;
+	}
+}
+
+// Record a line in the debugger's Output window and log file. Both are
+// optional: the window never starts up headless and the file only exists
+// when '[log] logfile' is set. Neither may decide whether a message is kept.
+static void AppendOutputLine(const std::string& line)
+{
+	const std::lock_guard<std::mutex> lock(log_mutex);
+
+	if (debuglog) {
+		fprintf(debuglog, "%s\n", line.c_str());
+		fflush(debuglog);
 	}
 
+	logBuff.emplace_back(line + "\n");
+	if (logBuff.size() > DBGUI::MaxLogBuffer) {
+		logBuff.pop_front();
+	}
+	// Don't reset scroll offset - let user stay at their scroll position
+}
+
+void DEBUG_ShowMsg(const char* format, ...)
+{
 	char buf[DBGUI::MsgBufferSize];
 	va_list msg;
 	va_start(msg, format);
@@ -158,22 +206,10 @@ void DEBUG_ShowMsg(const char* format, ...)
 
 	buf[sizeof(buf) - 1] = '\0';
 
-	/* Add newline if not present */
-	size_t len = safe_strlen(buf);
-	if (len > 0 && buf[len - 1] != '\n' && len + 1 < sizeof(buf)) {
-		strcat(buf, "\n");
-	}
+	const std::string line(DBGUI_TrimTrailingNewlines(buf));
 
-	if (debuglog) {
-		fprintf(debuglog, "%s", buf);
-		fflush(debuglog);
-	}
-
-	logBuff.emplace_back(buf);
-	if (logBuff.size() > DBGUI::MaxLogBuffer) {
-		logBuff.pop_front();
-	}
-	// Don't reset scroll offset - let user stay at their scroll position
+	MirrorToHostLog(LOG_NORMAL, line);
+	AppendOutputLine(line);
 }
 
 void DEBUG_RefreshPage(int scroll)
@@ -195,22 +231,45 @@ void DEBUG_RefreshPage(int scroll)
 
 void LOG::operator()(const char* format, ...)
 {
-	char buf[DBGUI::MsgBufferSize];
-	va_list msg;
-	va_start(msg, format);
-	vsnprintf(buf, sizeof(buf), format, msg);
-	va_end(msg);
-
 	if (d_type >= LOG_MAX) {
 		return;
 	}
 	if ((d_severity != LOG_ERROR) && (!loggrp[d_type].enabled)) {
 		return;
 	}
-	DEBUG_ShowMsg("%10u: %s:%s\n",
-	              static_cast<uint32_t>(cycle_count),
-	              loggrp[d_type].front,
-	              buf);
+
+	char buf[DBGUI::MsgBufferSize];
+	va_list msg;
+	va_start(msg, format);
+	vsnprintf(buf, sizeof(buf), format, msg);
+	va_end(msg);
+
+	buf[sizeof(buf) - 1] = '\0';
+
+	const std::string message(DBGUI_TrimTrailingNewlines(buf));
+
+	// Only LOG_ALL, the group behind LOG_INFO/LOG_WARNING/LOG_ERR, reaches
+	// stderr. Per-subsystem LOG(group, ...) calls compile to a no-op in a
+	// non-debugger build and every group defaults to enabled, so mirroring
+	// those too would bury what a release build does print under
+	// VGA/PIC/CPU chatter it never emits.
+	if (d_type == LOG_ALL) {
+		MirrorToHostLog(d_severity, message);
+	}
+
+	// 'front' is only filled in by LOG_StartUp. An ERROR logged before that
+	// runs skips the enabled check above, so it can reach here with none set.
+	const char* group = loggrp[d_type].front ? loggrp[d_type].front : "";
+
+	// The message is already capped at MsgBufferSize by the vsnprintf
+	// above; format_str sizes the prefix on top of that instead of
+	// squeezing it into the same buffer, so a maximum-length message keeps
+	// the dozen characters the prefix used to cut off its tail.
+
+	AppendOutputLine(format_str("%10u: %s:%s",
+	                            static_cast<uint32_t>(cycle_count),
+	                            group,
+	                            message.c_str()));
 }
 
 void LOG_Init()
@@ -220,10 +279,14 @@ void LOG_Init()
 
 	std::string logfile = section->GetString("logfile");
 
-	if (!logfile.empty() && (debuglog = fopen(logfile.c_str(), "wt+"))) {
-		;
-	} else {
-		debuglog = nullptr;
+	{
+		const std::lock_guard<std::mutex> lock(log_mutex);
+
+		if (!logfile.empty() && (debuglog = fopen(logfile.c_str(), "wt+"))) {
+			;
+		} else {
+			debuglog = nullptr;
+		}
 	}
 
 	char buf[DBGUI::LogNameBufferSize];
@@ -238,6 +301,8 @@ void LOG_Init()
 
 void LOG_Destroy()
 {
+	const std::lock_guard<std::mutex> lock(log_mutex);
+
 	if (debuglog) {
 		fclose(debuglog);
 	}
@@ -689,29 +754,46 @@ void DBGUI_DrawOutputWindow(void)
 		}
 
 		// Calculate how many lines we can display
-		int visible_lines = dbg.rows_output - 1; // -1 for title bar
-		int total_lines = static_cast<int>(logBuff.size());
+		const int visible_lines = std::max(dbg.rows_output - 1, 0); // -1 for title bar
 
-		// Clamp scroll offset to valid range
-		int max_offset = total_lines > visible_lines ? total_lines - visible_lines : 0;
-		if (output_scroll_offset > max_offset) {
-			output_scroll_offset = max_offset;
-		}
+		// Copy the visible slice out rather than rendering straight from
+		// logBuff: logging threads append and trim it concurrently, and
+		// holding log_mutex across ImGui calls would self-deadlock the
+		// emulation thread the moment any of them logs.
+		std::vector<std::string> visible = {};
+		{
+			const std::lock_guard<std::mutex> lock(log_mutex);
 
-		// Calculate start index (from the end, accounting for offset)
-		int start_idx = total_lines - visible_lines - output_scroll_offset;
-		if (start_idx < 0) {
-			start_idx = 0;
+			int total_lines = static_cast<int>(logBuff.size());
+
+			// Clamp scroll offset to valid range
+			int max_offset = total_lines > visible_lines
+			                       ? total_lines - visible_lines
+			                       : 0;
+			if (output_scroll_offset > max_offset) {
+				output_scroll_offset = max_offset;
+			}
+
+			// Calculate start index (from the end, accounting for
+			// offset)
+			int start_idx = total_lines - visible_lines -
+			                output_scroll_offset;
+			if (start_idx < 0) {
+				start_idx = 0;
+			}
+
+			auto it = logBuff.begin();
+			std::advance(it, start_idx);
+			while (it != logBuff.end() &&
+			       visible.size() < static_cast<size_t>(visible_lines)) {
+				visible.emplace_back(*it);
+				++it;
+			}
 		}
 
 		// Display visible lines
-		auto it = logBuff.begin();
-		std::advance(it, start_idx);
-		int lines_shown = 0;
-		while (it != logBuff.end() && lines_shown < visible_lines) {
-			ImGui::TextUnformatted(it->c_str());
-			++it;
-			++lines_shown;
+		for (const auto& line : visible) {
+			ImGui::TextUnformatted(line.c_str());
 		}
 	}
 	EndWindowWithStyledTitle();

@@ -10,6 +10,7 @@
 #include "hardware/memory.h"
 
 #include <cstdint>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -181,6 +182,9 @@ std::vector<DebugBreakpointInfo> DEBUG_ListBreakpoints(void);
 void LOG_StartUp();
 void LOG_Init();
 void LOG_Destroy();
+
+// Strips trailing CR/LF so each log sink can apply its own line ending.
+std::string_view DBGUI_TrimTrailingNewlines(const std::string_view text);
 
 extern Bitu cycle_count;
 extern Bitu debugCallback;
