@@ -475,7 +475,11 @@ RenderedImage SdlRenderer::ReadPixelsPostShader(const DosBox::Rect output_rect_p
 	const auto image_size_bytes = check_cast<uint32_t>(image.params.height *
 	                                                   image.pitch);
 
-	image.image_data   = new uint8_t[image_size_bytes];
+	// Value-initialised, not just allocated: both failure paths below
+	// return this buffer as-is, and it goes on to be encoded and sent to an
+	// HTTP client. Uninitialised heap must never be what they get. A failed
+	// read yields a black frame, and says so in the log.
+	image.image_data = new uint8_t[image_size_bytes]();
 
 	image.is_flipped_vertically = false;
 

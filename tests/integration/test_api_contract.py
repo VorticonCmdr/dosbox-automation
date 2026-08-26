@@ -813,6 +813,29 @@ def test_frame_mode_rendered(dosbox):
     assert img.height > 0
 
 
+@pytest.mark.parametrize("mode", ["raw", "rendered"])
+def test_frame_returns_structured_image_not_noise(dosbox, mode):
+    # A DOS text mode uses at most 16 colours and the capture path scales
+    # without blending, so a real frame lands well under this. Whatever the
+    # screen happens to show, a capture that came back as arbitrary memory
+    # would run into the thousands.
+    #
+    # Note this exercises the success path only. The read-failure branches in
+    # ReadPixelsPostShader, which used to hand back their buffer unwritten,
+    # need a failing SDL or GL call to reach and nothing here provokes one.
+    max_colors = 64
+
+    r = dosbox.frame(fmt="png", mode=mode)
+    assert r.status_code == 200
+
+    img = Image.open(BytesIO(r.content)).convert("RGB")
+
+    # getcolors() returns None once the image exceeds maxcolors
+    assert (
+        img.getcolors(maxcolors=max_colors) is not None
+    ), f"{mode} capture has more than {max_colors} distinct colours"
+
+
 def test_frame_mode_rejects_unknown_value(dosbox):
     r = dosbox.frame(fmt="png", mode="bogus")
     assert r.status_code == 400
