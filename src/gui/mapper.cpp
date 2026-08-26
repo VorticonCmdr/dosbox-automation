@@ -3021,7 +3021,42 @@ SDL_Surface *SDL_CreateRGBSurfaceFrom(void *pixels, int width, int height, int d
                                  pixels, pitch);
 }
 
-void MAPPER_DisplayUI() {
+// SDL's 'dummy' and 'offscreen' drivers both hand out a window and a renderer
+// that nothing can see and no one can type into. That is fatal for the mapper
+// specifically: its event loop below only ends when the user clicks Exit or
+// presses a key, so on these drivers it spins forever on the emulation thread
+// and takes the whole emulator, the Bridge and the webserver down with it.
+bool MAPPER_IsHeadlessVideoDriver(const std::string_view driver_name)
+{
+	// An unnamed driver means SDL could not tell us what it is running on,
+	// which is no basis for opening a window we can never close.
+	if (driver_name.empty()) {
+		return true;
+	}
+
+	std::string name(driver_name);
+	lowcase(name);
+	return name == "dummy" || name == "offscreen";
+}
+
+static bool is_using_headless_video_driver()
+{
+	assert(SDL_WasInit(SDL_INIT_VIDEO));
+
+	const auto driver = SDL_GetCurrentVideoDriver();
+	return MAPPER_IsHeadlessVideoDriver(driver ? driver : "");
+}
+
+bool MAPPER_DisplayUI()
+{
+	if (is_using_headless_video_driver()) {
+		LOG_WARNING(
+		        "MAPPER: Not opening the mapper GUI, the '%s' video "
+		        "driver has no display or keyboard to drive it",
+		        SDL_GetCurrentVideoDriver());
+		return false;
+	}
+
 	MOUSE_NotifyTakeOver(true);
 
 	// The mapper is about to take-over SDL's surface and rendering
@@ -3185,6 +3220,7 @@ void MAPPER_DisplayUI() {
 #endif
 	GFX_ResetScreen();
 	MOUSE_NotifyTakeOver(false);
+	return true;
 }
 
 void MAPPER_Destroy() {

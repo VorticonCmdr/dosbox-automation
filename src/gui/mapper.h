@@ -8,6 +8,7 @@
 #include "dosbox.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -55,7 +56,14 @@ void MAPPER_AddHandler(MAPPER_Handler *handler,
 
 void MAPPER_BindKeys(Section *sec);
 void MAPPER_Run(bool pressed);
-void MAPPER_DisplayUI();
+
+// Returns false without opening anything when the current SDL video driver
+// cannot present a window or deliver input, i.e. in a headless run.
+bool MAPPER_DisplayUI();
+
+// True for SDL video drivers that hand out a window nobody can see or type
+// into. Exposed for testing; callers want MAPPER_DisplayUI's return value.
+bool MAPPER_IsHeadlessVideoDriver(const std::string_view driver_name);
 void MAPPER_LosingFocus();
 
 bool MAPPER_IsUsingJoysticks();

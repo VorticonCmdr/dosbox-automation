@@ -698,8 +698,10 @@ int main(int argc, char* argv[])
 		// to ensure their hotkeys appear in the graphical mapper.
 		MAPPER_BindKeys(get_sdl_section());
 
-		if (arguments->startmapper) {
-			MAPPER_DisplayUI();
+		// Asking for the mapper on a driver that cannot show it is a
+		// dead end, so say so instead of silently booting into DOS.
+		if (arguments->startmapper && !MAPPER_DisplayUI()) {
+			E_Exit("MAPPER: --startmapper needs a display");
 		}
 
 		// Start emulation
