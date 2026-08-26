@@ -138,6 +138,17 @@ public:
 	// `prebuffer`, etc.)
 	void SetHelp(const std::string& help_text);
 
+	// True once some setting has registered help under this property's
+	// name. Help messages are keyed on the property name alone, so two
+	// same-named settings in different sections share one entry; callers
+	// that would otherwise overwrite another section's text check this
+	// first.
+	//
+	// Always true in dosbox_tests: it links messages_stubs.cpp, whose
+	// MSG_Exists returns true for every key. Don't gate test-reachable
+	// logic on this.
+	bool HasHelp() const;
+
 	void SetOptionHelp(const std::string& option, const std::string& help_text);
 	void SetOptionHelp(const std::string& help_text);
 

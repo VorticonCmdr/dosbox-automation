@@ -262,6 +262,11 @@ void Property::SetHelp(const std::string& help_text)
 	MSG_Add(create_setting_help_msg_name(propname), help_text);
 }
 
+bool Property::HasHelp() const
+{
+	return MSG_Exists(create_setting_help_msg_name(propname));
+}
+
 static std::string create_config_item_name(const std::string& propname,
                                            const std::string& item)
 {

@@ -357,7 +357,16 @@ void LOG_StartUp()
 		safe_strcpy(buf, loggrp[i].front);
 		lowcase(buf);
 		PropBool* pbool = sect->AddBool(buf, Property::Changeable::Always, true);
-		pbool->SetHelp("Enable/disable logging of this type.");
+
+		// Help messages are keyed on the property name alone, and a
+		// couple of log groups are named after real settings elsewhere
+		// ('reelmagic' is one). Those settings register first, in
+		// DOSBOX_Init; overwriting their text with our boilerplate
+		// would invalidate the entry and leave both showing an error
+		// placeholder instead of help.
+		if (!pbool->HasHelp()) {
+			pbool->SetHelp("Enable/disable logging of this type.");
+		}
 	}
 }
 
