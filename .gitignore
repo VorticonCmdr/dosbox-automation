@@ -103,6 +103,10 @@ cmake-build-*/
 # Tests
 /Testing
 
+# Per-run scratch dirs from tests/integration (conftest.py writes each live
+# engine's HOME, config and stderr log here)
+/.workspace
+
 # VS Code CMake Tools test discovery cache
 cmake_test_discovery_*.json
 
