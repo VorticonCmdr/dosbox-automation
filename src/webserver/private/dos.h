@@ -7,6 +7,7 @@
 
 #include "webserver/bridge.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -19,6 +20,8 @@
 
 #include "hardware/memory.h"
 #include "http/http.h"
+#include "ints/ems.h"
+#include "ints/xms.h"
 
 namespace Webserver {
 
@@ -54,6 +57,32 @@ class DosInternalsCommand : public Command {
 	PhysPt first_shell               = {};
 	std::vector<McbBlock> memory_map = {};
 	bool memory_map_truncated        = false;
+
+public:
+	void Execute() override;
+	static void Get(const httplib::Request& req, httplib::Response& res);
+};
+
+// A DOS handle's raw 8-byte name field (ems.h's EmsHandleInfo::name)
+// is not NUL-terminated and may hold arbitrary bytes (uninitialized,
+// or leftover from a previous handle) - stop at the first NUL or
+// non-printable byte, matching how DOS itself treats it as an 8-char
+// field, not a C string. A pure function (not a Command) so it's
+// unit-testable with synthetic byte arrays.
+std::string SanitizeDosHandleName(const std::array<char, 8>& raw);
+
+class EmsInternalsCommand : public Command {
+	EmsStatus status                   = {};
+	std::vector<EmsHandleInfo> handles = {};
+
+public:
+	void Execute() override;
+	static void Get(const httplib::Request& req, httplib::Response& res);
+};
+
+class XmsInternalsCommand : public Command {
+	XmsStatus status                   = {};
+	std::vector<XmsHandleInfo> handles = {};
 
 public:
 	void Execute() override;

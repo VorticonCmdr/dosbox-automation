@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 #include "config/setup.h"
 #include "cpu/callback.h"
@@ -17,6 +18,7 @@
 #include "hardware/memory.h"
 #include "hardware/port.h"
 #include "ints/bios.h"
+#include "ints/xms.h"
 #include "misc/support.h"
 #include "utils/bitops.h"
 #include "utils/checks.h"
@@ -832,3 +834,36 @@ void XMS_Destroy()
 	xms_module = {};
 }
 
+XmsStatus XMS_GetStatus()
+{
+	XmsStatus status       = {};
+	status.enabled         = xms.is_available;
+	status.total_kb        = get_mem_free_total_kb();
+	status.largest_free_kb = get_mem_free_largest_kb();
+
+	status.a20_enabled       = a20.enable_global;
+	status.a20_times_enabled = a20.num_times_enabled;
+
+	status.hma_available       = hma.is_available;
+	status.hma_dos_has_control = hma.dos_has_control;
+	status.hma_app_has_control = hma.app_has_control;
+
+	status.umb_available = umb.is_available;
+	return status;
+}
+
+std::vector<XmsHandleInfo> XMS_GetHandles()
+{
+	std::vector<XmsHandleInfo> handles = {};
+	for (uint16_t i = 1; i < NumXmsHandles; ++i) {
+		if (xms.handles[i].is_free) {
+			continue;
+		}
+		XmsHandleInfo info = {};
+		info.handle        = i;
+		info.size_kb       = xms.handles[i].size_kb;
+		info.lock_count    = xms.handles[i].lock_count;
+		handles.push_back(info);
+	}
+	return handles;
+}

@@ -225,6 +225,8 @@ static const std::vector<ApiRoute>& get_api_route_table()
 	        {   HttpMethod::Get,"/api/v1/cpu/state",                 CpuStateCommand::Get,Read	                                                                                                   },
 
 	        {   HttpMethod::Get,         "/api/v1/dos/internals",             DosInternalsCommand::Get,    Read},
+	        {   HttpMethod::Get,               "/api/v1/dos/ems",             EmsInternalsCommand::Get,    Read},
+	        {   HttpMethod::Get,               "/api/v1/dos/xms",             XmsInternalsCommand::Get,    Read},
 
 	        {  HttpMethod::Post,       "/api/v1/dosbox/shutdown",                ShutdownCommand::Post, Control},
 

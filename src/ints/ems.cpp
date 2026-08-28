@@ -1584,3 +1584,38 @@ void EMS_Destroy()
 	ems_module = {};
 }
 
+EmsStatus EMS_GetStatus()
+{
+	EmsStatus status   = {};
+	status.enabled     = ems_type != 0;
+	status.total_pages = get_total_pages();
+	status.free_pages  = get_free_pages();
+	return status;
+}
+
+std::vector<EmsHandleInfo> EMS_GetHandles()
+{
+	std::vector<EmsHandleInfo> handles = {};
+	for (uint16_t i = 0; i < EMM_MAX_HANDLES; ++i) {
+		if (emm_handles[i].pages == NULL_HANDLE) {
+			continue;
+		}
+		EmsHandleInfo info = {};
+		info.handle        = i;
+		std::copy(std::begin(emm_handles[i].name),
+		          std::end(emm_handles[i].name),
+		          info.name.begin());
+		info.pages = emm_handles[i].pages;
+		for (uint8_t phys = 0; phys < EMM_MAX_PHYS; ++phys) {
+			if (emm_mappings[phys].handle != i) {
+				continue;
+			}
+			EmsPageMapping mapping = {};
+			mapping.physical_page  = phys;
+			mapping.logical_page   = emm_mappings[phys].page;
+			info.page_mappings.push_back(mapping);
+		}
+		handles.push_back(info);
+	}
+	return handles;
+}

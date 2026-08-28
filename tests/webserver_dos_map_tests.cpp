@@ -4,10 +4,13 @@
 
 #include "webserver/private/dos.h"
 
+#include <array>
+
 #include <gtest/gtest.h>
 
 using Webserver::McbBlock;
 using Webserver::McbChainTruncated;
+using Webserver::SanitizeDosHandleName;
 using Webserver::WalkMcbChain;
 
 namespace {
@@ -97,6 +100,38 @@ TEST(McbChainTruncatedTest, TrueWhenAnInvalidTypeByteAbortedTheWalk)
 TEST(McbChainTruncatedTest, TrueForAnEmptyChain)
 {
 	EXPECT_TRUE(McbChainTruncated({}));
+}
+
+TEST(SanitizeDosHandleNameTest, FullEightCharName)
+{
+	std::array<char, 8> raw = {'T', 'E', 'S', 'T', 'P', 'R', 'O', 'G'};
+	EXPECT_EQ(SanitizeDosHandleName(raw), "TESTPROG");
+}
+
+TEST(SanitizeDosHandleNameTest, StopsAtEmbeddedNul)
+{
+	std::array<char, 8> raw = {'A', 'B', 'C', '\0', 'D', 'E', 'F', 'G'};
+	EXPECT_EQ(SanitizeDosHandleName(raw), "ABC");
+}
+
+TEST(SanitizeDosHandleNameTest, StopsAtNonPrintableByte)
+{
+	std::array<char, 8> raw = {
+	        'A', 'B', static_cast<char>(0x01), 'C', 'D', 'E', 'F', 'G'};
+	EXPECT_EQ(SanitizeDosHandleName(raw), "AB");
+}
+
+TEST(SanitizeDosHandleNameTest, EmptyForAllZeroBytes)
+{
+	std::array<char, 8> raw = {};
+	EXPECT_EQ(SanitizeDosHandleName(raw), "");
+}
+
+TEST(SanitizeDosHandleNameTest, HighBitBytesAreNonPrintable)
+{
+	std::array<char, 8> raw = {
+	        static_cast<char>(0xFF), 'A', 'B', 'C', 'D', 'E', 'F', 'G'};
+	EXPECT_EQ(SanitizeDosHandleName(raw), "");
 }
 
 } // namespace

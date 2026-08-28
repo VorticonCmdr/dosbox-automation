@@ -336,6 +336,174 @@
         }
       }
     },
+    "/api/v1/dos/ems": {
+      "get": {
+        "tags": [
+          "DOS"
+        ],
+        "summary": "EMS (expanded memory) status and handle table",
+        "operationId": "getDosEms",
+        "description": "Guest-visible EMS state: whether the driver is enabled, total/free 16KB pages, and every active handle's name, page count, and current page-frame mapping. Distinct from mem/allocate?area=XMS, which is this API's own scratch allocator over the raw page pool, not the guest's EMS driver.",
+        "responses": {
+          "200": {
+            "description": "EMS status and active handles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Whether the EMS driver is enabled for this session."
+                    },
+                    "totalPages": {
+                      "type": "integer",
+                      "description": "Total 16KB EMS pages available system-wide."
+                    },
+                    "freePages": {
+                      "type": "integer",
+                      "description": "Free 16KB EMS pages system-wide."
+                    },
+                    "handles": {
+                      "type": "array",
+                      "description": "Every currently active EMS handle (unused handle slots are omitted).",
+                      "items": {
+                        "$ref": "#/components/schemas/EmsHandle"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "enabled": true,
+                  "totalPages": 1024,
+                  "freePages": 932,
+                  "handles": [
+                    {
+                      "handle": 1,
+                      "name": "TESTPROG",
+                      "pages": 128,
+                      "pageMappings": [
+                        {
+                          "physicalPage": 0,
+                          "logicalPage": 4
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/dos/xms": {
+      "get": {
+        "tags": [
+          "DOS"
+        ],
+        "summary": "XMS (extended memory) status and handle table",
+        "operationId": "getDosXms",
+        "description": "Guest-visible XMS state: free/largest-free KB, A20 line state, HMA/UMB ownership, and every currently allocated handle's size and lock count. Distinct from mem/allocate?area=XMS, which is this API's own scratch allocator over the raw page pool, not the guest's XMS driver.",
+        "responses": {
+          "200": {
+            "description": "XMS status and allocated handles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Whether the XMS driver is enabled for this session."
+                    },
+                    "totalKb": {
+                      "type": "integer",
+                      "description": "Total free extended memory in KB."
+                    },
+                    "largestFreeKb": {
+                      "type": "integer",
+                      "description": "Largest contiguous free extended-memory block in KB."
+                    },
+                    "a20": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "timesEnabled": {
+                          "type": "integer",
+                          "description": "HIMEM.SYS-style local enable count."
+                        }
+                      }
+                    },
+                    "hma": {
+                      "type": "object",
+                      "properties": {
+                        "available": {
+                          "type": "boolean"
+                        },
+                        "dosHasControl": {
+                          "type": "boolean"
+                        },
+                        "appHasControl": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    "umb": {
+                      "type": "object",
+                      "properties": {
+                        "available": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    "handles": {
+                      "type": "array",
+                      "description": "Every currently allocated XMS handle (free slots are omitted).",
+                      "items": {
+                        "$ref": "#/components/schemas/XmsHandle"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "enabled": true,
+                  "totalKb": 65536,
+                  "largestFreeKb": 61440,
+                  "a20": {
+                    "enabled": false,
+                    "timesEnabled": 12
+                  },
+                  "hma": {
+                    "available": true,
+                    "dosHasControl": true,
+                    "appHasControl": false
+                  },
+                  "umb": {
+                    "available": true
+                  },
+                  "handles": [
+                    {
+                      "handle": 1,
+                      "sizeKb": 1024,
+                      "lockCount": 0
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/api/v1/memory/allocate": {
       "post": {
         "tags": [
@@ -4564,6 +4732,57 @@
           "isLast": {
             "type": "boolean",
             "description": "True if this is the last block in the chain."
+          }
+        }
+      },
+      "EmsHandle": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "integer",
+            "description": "EMS handle number."
+          },
+          "name": {
+            "type": "string",
+            "description": "The handle's DOS-assigned name, up to 8 characters (empty if never set)."
+          },
+          "pages": {
+            "type": "integer",
+            "description": "16KB pages this handle owns."
+          },
+          "pageMappings": {
+            "type": "array",
+            "description": "Which of this handle's logical pages are currently mapped into the page frame.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "physicalPage": {
+                  "type": "integer",
+                  "description": "Physical page-frame slot (0-3)."
+                },
+                "logicalPage": {
+                  "type": "integer",
+                  "description": "This handle's own page number mapped into that slot."
+                }
+              }
+            }
+          }
+        }
+      },
+      "XmsHandle": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "integer",
+            "description": "XMS handle number."
+          },
+          "sizeKb": {
+            "type": "integer",
+            "description": "Block size in KB."
+          },
+          "lockCount": {
+            "type": "integer",
+            "description": "How many times this block is currently locked."
           }
         }
       },

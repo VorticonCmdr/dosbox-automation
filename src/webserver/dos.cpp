@@ -7,6 +7,7 @@
 #include "webserver.h"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <mutex>
 
@@ -106,6 +107,105 @@ void DosInternalsCommand::Get(const httplib::Request&, httplib::Response& res)
 	}
 	j["memoryMap"]          = map;
 	j["memoryMapTruncated"] = cmd.memory_map_truncated;
+
+	send_json(res, j);
+}
+
+std::string SanitizeDosHandleName(const std::array<char, 8>& raw)
+{
+	std::string name;
+	for (const char c : raw) {
+		if (c == '\0' || !std::isprint(static_cast<unsigned char>(c))) {
+			break;
+		}
+		name += c;
+	}
+	return name;
+}
+
+void EmsInternalsCommand::Execute()
+{
+	status  = EMS_GetStatus();
+	handles = EMS_GetHandles();
+
+	LOG_DEBUG("API: EmsInternalsCommand()");
+}
+
+void EmsInternalsCommand::Get(const httplib::Request&, httplib::Response& res)
+{
+	EmsInternalsCommand cmd;
+	cmd.WaitForCompletion();
+
+	json j;
+	j["enabled"]    = cmd.status.enabled;
+	j["totalPages"] = cmd.status.total_pages;
+	j["freePages"]  = cmd.status.free_pages;
+
+	json handles = json::array();
+	for (const auto& h : cmd.handles) {
+		json entry;
+		entry["handle"] = h.handle;
+		entry["name"]   = SanitizeDosHandleName(h.name);
+		entry["pages"]  = h.pages;
+
+		json page_mappings = json::array();
+		for (const auto& m : h.page_mappings) {
+			json mapping;
+			mapping["physicalPage"] = m.physical_page;
+			mapping["logicalPage"]  = m.logical_page;
+			page_mappings.push_back(mapping);
+		}
+		entry["pageMappings"] = page_mappings;
+
+		handles.push_back(entry);
+	}
+	j["handles"] = handles;
+
+	send_json(res, j);
+}
+
+void XmsInternalsCommand::Execute()
+{
+	status  = XMS_GetStatus();
+	handles = XMS_GetHandles();
+
+	LOG_DEBUG("API: XmsInternalsCommand()");
+}
+
+void XmsInternalsCommand::Get(const httplib::Request&, httplib::Response& res)
+{
+	XmsInternalsCommand cmd;
+	cmd.WaitForCompletion();
+
+	json j;
+	j["enabled"]       = cmd.status.enabled;
+	j["totalKb"]       = cmd.status.total_kb;
+	j["largestFreeKb"] = cmd.status.largest_free_kb;
+
+	json a20;
+	a20["enabled"]      = cmd.status.a20_enabled;
+	a20["timesEnabled"] = cmd.status.a20_times_enabled;
+	j["a20"]            = a20;
+
+	json hma;
+	hma["available"]     = cmd.status.hma_available;
+	hma["dosHasControl"] = cmd.status.hma_dos_has_control;
+	hma["appHasControl"] = cmd.status.hma_app_has_control;
+	j["hma"]             = hma;
+
+	json umb;
+	umb["available"] = cmd.status.umb_available;
+	j["umb"]         = umb;
+
+	json handles = json::array();
+	for (const auto& h : cmd.handles) {
+		json entry;
+		entry["handle"]    = h.handle;
+		entry["sizeKb"]    = h.size_kb;
+		entry["lockCount"] = h.lock_count;
+		handles.push_back(entry);
+	}
+	j["handles"] = handles;
 
 	send_json(res, j);
 }
