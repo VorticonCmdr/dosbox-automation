@@ -3,6 +3,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import sys
 import textwrap
 import threading
 from pathlib import Path
@@ -10,6 +11,23 @@ from pathlib import Path
 import pytest
 
 from dosbox_client import DosboxClient
+
+
+def expected_config_dir(work_dir):
+    """Where the engine actually creates its config dir for a HOME/
+    XDG_CONFIG_HOME override pointed at work_dir, mirroring
+    get_or_create_config_dir() (src/misc/cross.cpp) per platform.
+
+    macOS ignores XDG_CONFIG_HOME entirely and always resolves to
+    ~/Library/Preferences/dosbox-automation (confirmed live: the engine
+    logs "WEBSERVER: Token written to <HOME>/Library/Preferences/..."
+    even with XDG_CONFIG_HOME set) - only Linux/BSD and Windows honor
+    XDG_CONFIG_HOME, which is what these fixtures set to work_dir/.config.
+    """
+    if sys.platform == "darwin":
+        return work_dir / "Library" / "Preferences" / "dosbox-automation"
+    return work_dir / ".config" / "dosbox-automation"
+
 
 SETTING_SECTIONS = {
     "cpu_cycles": "cpu",
@@ -199,7 +217,7 @@ def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
     # the build resource directory so the internal auto-mount succeeds.
     dosbox_bin = Path(DOSBOX_BIN).resolve()
     resource_dir = dosbox_bin.parent / "resources"
-    config_dir = work_dir / ".config" / "dosbox-automation"
+    config_dir = expected_config_dir(work_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     primary_conf = config_dir / "dosbox-automation.conf"
 

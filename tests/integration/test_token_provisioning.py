@@ -12,29 +12,17 @@ is removed on clean shutdown.
 
 import os
 import stat
-import sys
 from pathlib import Path
 
 import pytest
 import requests
 
-from conftest import find_free_port, start_dosbox_instance, WORKSPACE
-
-
-def expected_config_dir(work_dir):
-    """Where the engine actually creates its config dir for a HOME/
-    XDG_CONFIG_HOME override pointed at work_dir, mirroring
-    get_or_create_config_dir() (src/misc/cross.cpp) per platform.
-
-    macOS ignores XDG_CONFIG_HOME entirely and always resolves to
-    ~/Library/Preferences/dosbox-automation (confirmed live: the engine
-    logs "WEBSERVER: Token written to <HOME>/Library/Preferences/..."
-    even with XDG_CONFIG_HOME set) - only Linux/BSD and Windows honor
-    XDG_CONFIG_HOME, which is what these fixtures set to work_dir/.config.
-    """
-    if sys.platform == "darwin":
-        return work_dir / "Library" / "Preferences" / "dosbox-automation"
-    return work_dir / ".config" / "dosbox-automation"
+from conftest import (
+    expected_config_dir,
+    find_free_port,
+    start_dosbox_instance,
+    WORKSPACE,
+)
 
 
 def start_with_token_file(work_dir, use_env_token=False, token_file_setting=True):
