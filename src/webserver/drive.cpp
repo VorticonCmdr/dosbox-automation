@@ -6,10 +6,12 @@
 #include "bridge.h"
 #include "webserver.h"
 
+#include "config/setup.h"
 #include "dos/dos.h"
 #include "dos/drives.h"
 #include "dos/programs/mount_policy.h"
 #include "ints/bios_disk.h"
+#include "misc/cross.h"
 
 #include "libs/json/json.h"
 
@@ -180,6 +182,195 @@ void DriveSwapCommand::Post(const Request& req, Response& res)
 		} else if (cmd.mount_failed) {
 			res.status = httplib::StatusCode::InternalServerError_500;
 			err["error_code"] = "mount_failed";
+		} else {
+			res.status        = httplib::StatusCode::BadRequest_400;
+			err["error_code"] = "unknown";
+		}
+		send_json(res, err);
+		return;
+	}
+
+	json result;
+	result["status"] = "ok";
+	result["drive"]  = std::string(1,
+	                               static_cast<char>(std::toupper(
+	                                       static_cast<unsigned char>(
+	                                               drive_str[0]))));
+	send_json(res, result);
+}
+
+DriveMountCommand::DriveMountCommand(char drive_letter, std::string host_path,
+                                     bool readonly, std::string label)
+        : drive_letter(drive_letter),
+          host_path(std::move(host_path)),
+          readonly(readonly),
+          label(std::move(label))
+{}
+
+void DriveMountCommand::Execute()
+{
+	// Same authoritative, emulation-thread check as DriveSwapCommand.
+	if (MountPolicy::IsLocked()) {
+		locked = true;
+		error  = "mount is locked";
+		LOG_WARNING("DRIVE-MOUNT: Blocked - locked");
+		return;
+	}
+
+	// WhitelistEnforced unconditionally: this code path is only reachable
+	// with the webserver running, so GetCurrentDirPolicy()'s own check for
+	// that would always resolve the same way. No conf file is behind an
+	// API-driven mount, so conf_anchor is empty - ValidateDirectoryMount
+	// already treats that as "no conf-relative root", not as "allow
+	// everything".
+	const auto verdict = MountPolicy::ValidateDirectoryMount(
+	        std::filesystem::path(host_path),
+	        /*conf_anchor=*/{},
+	        MountPolicy::AllowedBases(),
+	        DirMountPolicy::WhitelistEnforced);
+	if (!verdict.allowed) {
+		deny_reason = verdict.reason;
+		error       = "Blocked by mount policy";
+		LOG_WARNING("DRIVE-MOUNT: Blocked - policy violation (%s)",
+		            std::string(DriveDenyReasonCode(deny_reason)).c_str());
+		return;
+	}
+
+	// Use the canonical path from validation, not the raw request string.
+	const auto& resolved = verdict.resolved;
+
+	// ValidateDirectoryMount validates the path against policy but never
+	// checks it is actually a directory - MOUNT.COM does that itself
+	// before ever calling it. This is that check.
+	std::error_code ec = {};
+	if (!std::filesystem::is_directory(resolved, ec) || ec) {
+		not_a_directory = true;
+		error           = "Not a directory";
+		return;
+	}
+
+	const auto drv_idx = static_cast<uint8_t>(
+	        std::toupper(static_cast<unsigned char>(drive_letter)) - 'A');
+	if (drv_idx >= DOS_DRIVES) {
+		invalid_drive = true;
+		error         = "Invalid drive letter";
+		return;
+	}
+
+	auto final_path = resolved.string();
+	if (!final_path.empty() && final_path.back() != CROSS_FILESPLIT) {
+		final_path += CROSS_FILESPLIT;
+	}
+
+	// Geometry left at the engine's own defaults (0,0,0,0 = autodetect
+	// from the host filesystem), same as a bare `MOUNT <drive> <path>`
+	// with no `-size` override. Read-only files under `allow_write_
+	// protected_files` mirror MOUNT.COM's own handling of that setting.
+	const auto section = get_section("dosbox");
+	auto new_drive     = std::make_shared<localDrive>(
+	        final_path.c_str(),
+	        0,
+	        0,
+	        0,
+	        0,
+	        MediaId::HardDisk,
+	        readonly,
+	        section->GetBool("allow_write_protected_files"));
+
+	// RegisterFilesystemImage replaces this slot's swap-disk list outright
+	// (drive_infos.at(idx).disks = {new_drive}), so a directory mount over
+	// a letter that a prior drive_swap left in managed, multi-disk state
+	// cannot leave stale swap-slot bookkeeping behind. Overwriting an
+	// already-mounted letter without requiring an unmount first mirrors
+	// MOUNT.COM's own directory-mount behavior exactly - it has never
+	// required `-u` before remounting either.
+	DriveManager::RegisterFilesystemImage(drv_idx, new_drive);
+	Drives.at(drv_idx) = new_drive;
+
+	mem_writeb(RealToPhysical(dos.tables.mediaid) + drv_idx * 9,
+	           new_drive->GetMediaByte());
+
+	// Matches MountLocal's own default when no label is given, and its
+	// choice to lock the label at mount time (allowupdate=false) rather
+	// than let a later on-disk label file silently override it.
+	const auto effective_label =
+	        label.empty() ? std::string(1,
+	                                    static_cast<char>(std::toupper(
+	                                            static_cast<unsigned char>(
+	                                                    drive_letter)))) +
+	                                "_DRIVE"
+	                      : label;
+	new_drive->dirCache.SetLabel(effective_label.c_str(), false, false);
+}
+
+void DriveMountCommand::Post(const Request& req, Response& res)
+{
+	auto body = json::parse(req.body);
+
+	if (!body.contains("drive") || !body.contains("path")) {
+		res.status = httplib::StatusCode::BadRequest_400;
+		json err;
+		err["error"]      = "Missing 'drive' or 'path' field";
+		err["error_code"] = "missing_field";
+		err["retryable"]  = false;
+		send_json(res, err);
+		return;
+	}
+
+	const auto drive_str = body["drive"].get<std::string>();
+	if (drive_str.empty() ||
+	    !std::isalpha(static_cast<unsigned char>(drive_str[0]))) {
+		res.status = httplib::StatusCode::BadRequest_400;
+		json err;
+		err["error"]      = "Invalid drive letter";
+		err["error_code"] = "invalid_drive_letter";
+		err["retryable"]  = false;
+		send_json(res, err);
+		return;
+	}
+
+	// Early, clean check before touching the Bridge, same as
+	// DriveSwapCommand::Post. The authoritative check still happens in
+	// Execute() on the emulation thread, since the latch can flip
+	// between this check and that one.
+	if (MountPolicy::IsLocked()) {
+		res.status = httplib::StatusCode::Forbidden_403;
+		json err;
+		err["error"]      = "mount is locked";
+		err["error_code"] = "mount_locked";
+		err["retryable"]  = false;
+		send_json(res, err);
+		return;
+	}
+
+	const auto readonly = body.value("readonly", false);
+	const auto label    = body.value("label", std::string{});
+
+	DriveMountCommand cmd(drive_str[0],
+	                      body["path"].get<std::string>(),
+	                      readonly,
+	                      label);
+	cmd.WaitForCompletion(5000);
+
+	if (!cmd.error.empty()) {
+		json err;
+		err["error"]     = cmd.error;
+		err["retryable"] = false;
+		// Structured error_code/retryable alongside the message, same
+		// shape as every other route (webserver.cpp's send_error).
+		if (cmd.locked) {
+			res.status        = httplib::StatusCode::Forbidden_403;
+			err["error_code"] = "mount_locked";
+		} else if (cmd.deny_reason != DenyReason::None) {
+			res.status        = httplib::StatusCode::BadRequest_400;
+			err["error_code"] = std::string(
+			        DriveDenyReasonCode(cmd.deny_reason));
+		} else if (cmd.not_a_directory) {
+			res.status        = httplib::StatusCode::BadRequest_400;
+			err["error_code"] = "not_a_directory";
+		} else if (cmd.invalid_drive) {
+			res.status        = httplib::StatusCode::BadRequest_400;
+			err["error_code"] = "invalid_drive_letter";
 		} else {
 			res.status        = httplib::StatusCode::BadRequest_400;
 			err["error_code"] = "unknown";

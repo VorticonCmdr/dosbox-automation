@@ -311,6 +311,7 @@ static const std::vector<ApiRoute>& get_api_route_table()
 
 	        {   HttpMethod::Get,                 "/api/v1/drive",                DriveListCommand::Get,    Read},
 	        {  HttpMethod::Post,            "/api/v1/drive/swap",               DriveSwapCommand::Post, Control},
+	        {  HttpMethod::Post,           "/api/v1/drive/mount",              DriveMountCommand::Post, Control},
 
 	        {  HttpMethod::Post,            "/api/v1/mount/lock",              MountHandlers::PostLock, Control},
 	        {   HttpMethod::Get,            "/api/v1/mount/lock",               MountHandlers::GetLock,    Read},

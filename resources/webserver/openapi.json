@@ -1275,6 +1275,88 @@
         }
       }
     },
+    "/api/v1/drive/mount": {
+      "post": {
+        "tags": [
+          "Drive"
+        ],
+        "summary": "Mount a host directory as a drive",
+        "operationId": "driveMount",
+        "description": "Mount a host directory as a drive letter - the REST equivalent of the guest's own MOUNT command, directory form only (image files stay on POST /drive/swap). Mirrors an already-mounted letter the same way MOUNT itself does: it overwrites whatever was there, no unmount required first. GET /mount/policy shows the configured directory roots a policy-denied path must be under.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DriveMount"
+              },
+              "example": {
+                "drive": "C",
+                "path": "/path/to/game/files",
+                "readonly": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Mounted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "drive": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "status": "ok",
+                  "drive": "C"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Rejected: a missing field, an invalid drive letter, the path isn't a directory, or it failed mount policy. error_code is one of missing_field, invalid_drive_letter, not_a_directory, does_not_resolve, symlink_component, system_path, outside_whitelist - see GET /mount/policy for the configured roots a policy-denied path must be under.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "Blocked by mount policy",
+                  "error_code": "outside_whitelist",
+                  "retryable": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Mounting is locked (POST /mount/lock) - a one-way latch for the life of the process.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "mount is locked",
+                  "error_code": "mount_locked",
+                  "retryable": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/mount/lock": {
       "post": {
         "tags": [
@@ -4958,6 +5040,31 @@
                 "type": "integer"
               }
             }
+          }
+        }
+      },
+      "DriveMount": {
+        "type": "object",
+        "required": [
+          "drive",
+          "path"
+        ],
+        "properties": {
+          "drive": {
+            "type": "string",
+            "description": "Drive letter, e.g. C."
+          },
+          "path": {
+            "type": "string",
+            "description": "Host directory to mount."
+          },
+          "readonly": {
+            "type": "boolean",
+            "description": "Mount read-only (default false)."
+          },
+          "label": {
+            "type": "string",
+            "description": "Volume label (default '<LETTER>_DRIVE')."
           }
         }
       }

@@ -215,12 +215,31 @@ class DosboxClient:
 
     # --- Drive ---
 
+    def drive_list(self) -> requests.Response:
+        return self._get("/api/v1/drive")
+
     def drive_swap(self, drive: str, image: str) -> requests.Response:
         return self._post("/api/v1/drive/swap", json={"drive": drive, "image": image})
 
     def drive_swap_raw(self, body: str) -> requests.Response:
         return self._post(
             "/api/v1/drive/swap",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+    def drive_mount(self, drive: str, path: str, readonly: bool = False,
+                    label: str = None) -> requests.Response:
+        body = {"drive": drive, "path": path}
+        if readonly:
+            body["readonly"] = readonly
+        if label is not None:
+            body["label"] = label
+        return self._post("/api/v1/drive/mount", json=body)
+
+    def drive_mount_raw(self, body: str) -> requests.Response:
+        return self._post(
+            "/api/v1/drive/mount",
             data=body,
             headers={"Content-Type": "application/json"},
         )

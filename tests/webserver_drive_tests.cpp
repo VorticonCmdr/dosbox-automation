@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include "libs/json/json.h"
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -211,6 +213,63 @@ TEST_F(ScanImageRootTest, DefaultEntriesScannedBoundDoesNotFalselyTruncateAnOrdi
 
 	EXPECT_EQ(result.images.size(), 1u);
 	EXPECT_FALSE(result.truncated);
+}
+
+// -- DriveMountCommand::Post: HTTP-level request handling --
+//
+// Only the branches that respond before DriveMountCommand is constructed
+// are covered here - everything past that point needs the Bridge and a
+// booted emulator. mount_locked is deliberately not exercised: IsLocked()
+// is a one-way process-wide latch (MountPolicy::Lock() cannot be undone),
+// so a test that locked it would poison every other test in this binary.
+// That branch is live-verified instead.
+
+TEST(DriveMountPost, RejectsMissingDriveField)
+{
+	httplib::Request req;
+	req.body = R"({"path": "/some/dir"})";
+	httplib::Response res;
+	DriveMountCommand::Post(req, res);
+
+	EXPECT_EQ(res.status, 400);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("error_code").get<std::string>(), "missing_field");
+}
+
+TEST(DriveMountPost, RejectsMissingPathField)
+{
+	httplib::Request req;
+	req.body = R"({"drive": "W"})";
+	httplib::Response res;
+	DriveMountCommand::Post(req, res);
+
+	EXPECT_EQ(res.status, 400);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("error_code").get<std::string>(), "missing_field");
+}
+
+TEST(DriveMountPost, RejectsEmptyDriveString)
+{
+	httplib::Request req;
+	req.body = R"({"drive": "", "path": "/some/dir"})";
+	httplib::Response res;
+	DriveMountCommand::Post(req, res);
+
+	EXPECT_EQ(res.status, 400);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("error_code").get<std::string>(), "invalid_drive_letter");
+}
+
+TEST(DriveMountPost, RejectsNonAlphabeticDriveLetter)
+{
+	httplib::Request req;
+	req.body = R"({"drive": "1", "path": "/some/dir"})";
+	httplib::Response res;
+	DriveMountCommand::Post(req, res);
+
+	EXPECT_EQ(res.status, 400);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("error_code").get<std::string>(), "invalid_drive_letter");
 }
 
 } // namespace

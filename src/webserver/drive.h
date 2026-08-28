@@ -46,6 +46,33 @@ private:
 	bool mount_failed      = false;
 };
 
+// POST /api/v1/drive/mount - mount a host directory as a drive letter, the
+// REST equivalent of the guest's own MOUNT command (directory form only;
+// image files stay on DriveSwapCommand/IMGMOUNT). Mirrors an existing,
+// already-mounted letter the same way MOUNT itself does: it overwrites it,
+// no unmount required first.
+class DriveMountCommand : public Command {
+public:
+	DriveMountCommand(char drive_letter, std::string host_path,
+	                  bool readonly, std::string label);
+	void Execute() override;
+	static void Post(const httplib::Request& req, httplib::Response& res);
+
+private:
+	char drive_letter     = 'A';
+	std::string host_path = {};
+	bool readonly         = false;
+	std::string label     = {};
+
+	// Set by Execute() on failure, alongside Command::error's
+	// human-readable message, mirroring DriveSwapCommand's split between
+	// a stable error_code and the message meant for a human.
+	bool locked            = false;
+	DenyReason deny_reason = DenyReason::None;
+	bool invalid_drive     = false;
+	bool not_a_directory   = false;
+};
+
 // Non-recursive per-root cap for GET /mount/images - a backstop
 // against a misconfigured root pointing at a directory with tens of
 // thousands of files, not a realistic expectation for a game/image

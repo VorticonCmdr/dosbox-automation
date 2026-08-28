@@ -425,3 +425,169 @@ def test_drive_swap_malformed_json(dosbox_e2e, tmp_path):
     # Server should still be responsive
     r2 = inst.client.status()
     assert r2.status_code == 200
+
+
+# -----------------------------------------------------------------------
+# Drive mount: mount a host directory as a drive letter
+# -----------------------------------------------------------------------
+
+def test_drive_mount_valid_directory(dosbox_e2e, tmp_path):
+    """A directory under allowed_bases mounts and shows up in the drive list."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "FILE.TXT").write_text("hello")
+
+    inst = dosbox_e2e(conf_dir=game_dir, allowed_bases=[data_dir])
+    r = inst.client.drive_mount("W", str(data_dir))
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+    assert r.json().get("drive") == "W"
+
+    listing = inst.client.drive_list().json()
+    entry = next(d for d in listing["drives"] if d["letter"] == "W")
+    assert entry["mounted"] is True
+    assert entry["type"] == "local"
+    assert entry["read_only"] is False
+
+
+def test_drive_mount_readonly_and_label(dosbox_e2e, tmp_path):
+    """readonly and label are honored and visible via drive_list."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    inst = dosbox_e2e(conf_dir=game_dir, allowed_bases=[data_dir])
+    r = inst.client.drive_mount("W", str(data_dir), readonly=True, label="MYDATA")
+    assert r.status_code == 200
+
+    listing = inst.client.drive_list().json()
+    entry = next(d for d in listing["drives"] if d["letter"] == "W")
+    assert entry["read_only"] is True
+
+
+def test_drive_mount_outside_allowed_bases_rejected(dosbox_e2e, tmp_path):
+    """A directory outside allowed_bases is rejected."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    inst = dosbox_e2e(conf_dir=game_dir)
+    r = inst.client.drive_mount("W", str(elsewhere))
+    assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text}"
+    assert r.json().get("error_code") == "outside_whitelist"
+
+
+def test_drive_mount_symlink_rejected(dosbox_e2e, tmp_path):
+    """A symlink to an allowed directory must still be rejected."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(data_dir)
+
+    inst = dosbox_e2e(conf_dir=game_dir, allowed_bases=[data_dir])
+    r = inst.client.drive_mount("W", str(link))
+    assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text}"
+
+
+@pytest.mark.skipif(not os.path.exists("/etc"), reason="/etc not available")
+def test_drive_mount_system_path_rejected(dosbox_e2e, tmp_path):
+    """Trying to mount a system directory must be rejected."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+
+    inst = dosbox_e2e(conf_dir=game_dir)
+    r = inst.client.drive_mount("W", "/etc")
+    assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text}"
+
+
+def test_drive_mount_file_rejected(dosbox_e2e, tmp_path):
+    """Mounting a regular file, not a directory, is rejected."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    a_file = data_dir / "FILE.TXT"
+    a_file.write_text("not a directory")
+
+    inst = dosbox_e2e(conf_dir=game_dir, allowed_bases=[data_dir])
+    r = inst.client.drive_mount("W", str(a_file))
+    assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text}"
+    assert r.json().get("error_code") == "not_a_directory"
+
+
+def test_drive_mount_remount_overwrites(dosbox_e2e, tmp_path):
+    """Mounting over an already-mounted letter overwrites it, no unmount needed."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    inst = dosbox_e2e(conf_dir=game_dir, allowed_bases=[data_dir])
+    r1 = inst.client.drive_mount("W", str(data_dir))
+    assert r1.status_code == 200
+    r2 = inst.client.drive_mount("W", str(data_dir), readonly=True)
+    assert r2.status_code == 200
+
+    listing = inst.client.drive_list().json()
+    entry = next(d for d in listing["drives"] if d["letter"] == "W")
+    assert entry["read_only"] is True
+
+
+def test_drive_mount_invalid_drive_letter(dosbox_e2e, tmp_path):
+    """A non-alpha drive letter is rejected at parse time."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    inst = dosbox_e2e(conf_dir=game_dir, allowed_bases=[data_dir])
+    r = inst.client.drive_mount("1", str(data_dir))
+    assert r.status_code == 400
+
+
+def test_drive_mount_missing_fields(dosbox_e2e, tmp_path):
+    """Missing required JSON fields returns 400."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+
+    inst = dosbox_e2e(conf_dir=game_dir)
+
+    r = inst.client.drive_mount_raw('{"drive": "W"}')
+    assert r.status_code == 400
+
+    r = inst.client.drive_mount_raw('{"path": "/tmp"}')
+    assert r.status_code == 400
+
+
+def test_drive_mount_malformed_json(dosbox_e2e, tmp_path):
+    """Malformed JSON body must not crash the server."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+
+    inst = dosbox_e2e(conf_dir=game_dir)
+    r = inst.client.drive_mount_raw("{not valid json")
+    assert r.status_code in (400, 500)
+
+    # Server should still be responsive
+    r2 = inst.client.status()
+    assert r2.status_code == 200
+
+
+def test_drive_mount_rejected_after_lock(dosbox_e2e, tmp_path):
+    """Once mount_lock engages, drive_mount is refused too."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    inst = dosbox_e2e(conf_dir=game_dir, allowed_bases=[data_dir])
+    inst.client.mount_lock()
+
+    r = inst.client.drive_mount("W", str(data_dir))
+    assert r.status_code == 403
+    assert r.json().get("error_code") == "mount_locked"

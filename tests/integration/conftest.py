@@ -190,7 +190,7 @@ class DosboxInstance:
 
 def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
                           conf_dir=None, allowed_image_roots=None,
-                          settings=None):
+                          allowed_bases=None, settings=None):
     """Start a headless DOSBox instance with optional autoexec and config.
 
     conf_dir: directory for the config file. The mount policy's conf
@@ -199,6 +199,10 @@ def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
 
     allowed_image_roots: list of paths to whitelist for API image mounting
     (drive swap). Written into the primary config as mount_allowed_image_roots.
+
+    allowed_bases: extra directory roots to whitelist for API directory
+    mounting (drive mount), appended to the resource_dir root every
+    instance already gets for the bundled Y: drive's own auto-mount.
 
     Returns a DosboxInstance with client, process, and work_dir.
     """
@@ -221,7 +225,8 @@ def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
     config_dir.mkdir(parents=True, exist_ok=True)
     primary_conf = config_dir / "dosbox-automation.conf"
 
-    primary_lines = [f"mount_allowed_bases = {resource_dir}"]
+    base_dirs = [resource_dir, *(allowed_bases or [])]
+    primary_lines = [f"mount_allowed_bases = {';'.join(str(p) for p in base_dirs)}"]
     if allowed_image_roots:
         roots_str = ";".join(str(p) for p in allowed_image_roots)
         primary_lines.append(f"mount_allowed_image_roots = {roots_str}")
@@ -324,12 +329,14 @@ def dosbox_e2e(tmp_path):
     instances = []
 
     def _factory(autoexec_lines=None, extra_sets=None, work_dir=None,
-                 conf_dir=None, allowed_image_roots=None, settings=None):
+                 conf_dir=None, allowed_image_roots=None,
+                 allowed_bases=None, settings=None):
         if work_dir is None:
             work_dir = WORKSPACE / f"e2e-{secrets.token_hex(4)}"
         inst = start_dosbox_instance(
             work_dir, autoexec_lines, extra_sets, conf_dir=conf_dir,
             allowed_image_roots=allowed_image_roots,
+            allowed_bases=allowed_bases,
             settings=settings,
         )
         instances.append(inst)
