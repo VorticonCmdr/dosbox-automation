@@ -285,6 +285,12 @@ static const std::vector<ApiRoute>& get_api_route_table()
 	         "/api/v1/debug/breakpoints", DebugDeleteBreakpointCommand::Delete,
 	         Debug	                                                                                     },
 
+	        {   HttpMethod::Get,         "/api/v1/debug/watches",         DebugListWatchesCommand::Get,   Debug},
+	        {  HttpMethod::Post,         "/api/v1/debug/watches",           DebugAddWatchCommand::Post,   Debug},
+	        {HttpMethod::Delete,
+	         "/api/v1/debug/watches",      DebugDeleteWatchCommand::Delete,
+	         Debug	                                                                                     },
+
 	        {  HttpMethod::Post,        "/api/v1/input/sequence",           InputSequenceCommand::Post,   Input},
 	        {  HttpMethod::Post,            "/api/v1/input/type",               InputTypeCommand::Post,   Input},
 	        {   HttpMethod::Get,

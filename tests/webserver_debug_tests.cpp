@@ -10,9 +10,12 @@
 #include "json/json.h"
 
 using Webserver::DebugAddBreakpointCommand;
+using Webserver::DebugAddWatchCommand;
 using Webserver::DebugContinueCommand;
 using Webserver::DebugDeleteBreakpointCommand;
+using Webserver::DebugDeleteWatchCommand;
 using Webserver::DebugListBreakpointsCommand;
+using Webserver::DebugListWatchesCommand;
 using Webserver::DebugPauseCommand;
 using Webserver::DebugRunToCommand;
 using Webserver::DebugStatusCommand;
@@ -172,6 +175,42 @@ TEST(WebserverDebugNotBuilt, DeleteBreakpointReturns501)
 	          std::string::npos);
 }
 
+TEST(WebserverDebugNotBuilt, AddWatchReturns501)
+{
+	httplib::Request req;
+	httplib::Response res;
+	DebugAddWatchCommand::Post(req, res);
+
+	EXPECT_EQ(res.status, httplib::StatusCode::NotImplemented_501);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_NE(j.at("error").get<std::string>().find("debug_watches"),
+	          std::string::npos);
+}
+
+TEST(WebserverDebugNotBuilt, ListWatchesReturns501)
+{
+	httplib::Request req;
+	httplib::Response res;
+	DebugListWatchesCommand::Get(req, res);
+
+	EXPECT_EQ(res.status, httplib::StatusCode::NotImplemented_501);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_NE(j.at("error").get<std::string>().find("debug_watches"),
+	          std::string::npos);
+}
+
+TEST(WebserverDebugNotBuilt, DeleteWatchReturns501)
+{
+	httplib::Request req;
+	httplib::Response res;
+	DebugDeleteWatchCommand::Delete(req, res);
+
+	EXPECT_EQ(res.status, httplib::StatusCode::NotImplemented_501);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_NE(j.at("error").get<std::string>().find("debug_watches"),
+	          std::string::npos);
+}
+
 // A 501-stub handler ignores the request entirely - a body that would be
 // rejected on a debugger build (or accepted and then queued) must still
 // just produce the same 501, never parse.
@@ -327,7 +366,98 @@ TEST(WebserverDebugValidation, AddMemoryBreakpointReturns501WithoutHeavyDebugger
 	EXPECT_NE(j.at("error").get<std::string>().find("C_HEAVY_DEBUGGER"),
 	          std::string::npos);
 }
+#else
+// Only reachable with C_HEAVY_DEBUGGER, same reasoning as the #if branch
+// above: "trigger" is only parsed once type == "memory" gets past the
+// heavy-debugger gate.
+TEST(WebserverDebugValidation, AddMemoryBreakpointRejectsUnknownTrigger)
+{
+	httplib::Request req;
+	req.body =
+	        R"({"type": "memory", "segment": 0, "offset": 0, "trigger": "bogus"})";
+	httplib::Response res;
+	EXPECT_THROW(DebugAddBreakpointCommand::Post(req, res), std::invalid_argument);
+}
 #endif // !C_HEAVY_DEBUGGER
+
+TEST(WebserverDebugValidation, AddWatchRejectsMissingName)
+{
+	httplib::Request req;
+	req.body = R"({"segment": 0, "offset": 0})";
+	httplib::Response res;
+	EXPECT_THROW(DebugAddWatchCommand::Post(req, res), std::invalid_argument);
+}
+
+TEST(WebserverDebugValidation, AddWatchRejectsEmptyName)
+{
+	httplib::Request req;
+	req.body = R"({"name": "", "segment": 0, "offset": 0})";
+	httplib::Response res;
+	EXPECT_THROW(DebugAddWatchCommand::Post(req, res), std::invalid_argument);
+}
+
+TEST(WebserverDebugValidation, AddWatchRejectsNameTooLong)
+{
+	httplib::Request req;
+	// 16 characters - one past the 15-char cap (IV's fixed 16-byte
+	// buffer, name + NUL).
+	req.body = R"({"name": "0123456789abcdef", "segment": 0, "offset": 0})";
+	httplib::Response res;
+	EXPECT_THROW(DebugAddWatchCommand::Post(req, res), std::invalid_argument);
+}
+
+TEST(WebserverDebugValidation, AddWatchAcceptsFifteenCharName)
+{
+	httplib::Request req;
+	req.body = R"({"name": "0123456789abcde", "segment": 0, "offset": 0})";
+	httplib::Response res;
+	// Passes JSON-body validation and reaches WaitForCompletion(), which
+	// has no Bridge pump running here - times out rather than throwing.
+	// That's fine: this test only asserts the 15-char name itself isn't
+	// what gets rejected, matching the boundary the "too long" test
+	// checks from the other side.
+	EXPECT_THROW(DebugAddWatchCommand::Post(req, res), std::exception);
+}
+
+TEST(WebserverDebugValidation, AddWatchRejectsMissingSegment)
+{
+	httplib::Request req;
+	req.body = R"({"name": "hp", "offset": 0})";
+	httplib::Response res;
+	EXPECT_THROW(DebugAddWatchCommand::Post(req, res), std::invalid_argument);
+}
+
+TEST(WebserverDebugValidation, AddWatchRejectsMissingOffset)
+{
+	httplib::Request req;
+	req.body = R"({"name": "hp", "segment": 0})";
+	httplib::Response res;
+	EXPECT_THROW(DebugAddWatchCommand::Post(req, res), std::invalid_argument);
+}
+
+TEST(WebserverDebugValidation, AddWatchRejectsMalformedJson)
+{
+	httplib::Request req;
+	req.body = "not json";
+	httplib::Response res;
+	EXPECT_THROW(DebugAddWatchCommand::Post(req, res), std::exception);
+}
+
+TEST(WebserverDebugValidation, DeleteWatchRejectsMalformedJson)
+{
+	httplib::Request req;
+	req.body = "not json";
+	httplib::Response res;
+	EXPECT_THROW(DebugDeleteWatchCommand::Delete(req, res), std::exception);
+}
+
+TEST(WebserverDebugValidation, DeleteWatchRejectsMissingAddress)
+{
+	httplib::Request req;
+	req.body = "{}";
+	httplib::Response res;
+	EXPECT_THROW(DebugDeleteWatchCommand::Delete(req, res), std::invalid_argument);
+}
 
 TEST(WebserverDebugValidation, DeleteBreakpointRejectsBothIdAndIndex)
 {

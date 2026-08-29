@@ -3562,7 +3562,7 @@
           "Debug"
         ],
         "summary": "Add a breakpoint",
-        "description": "type is 'execute', 'interrupt', or 'memory'. execute/memory take segment+offset; interrupt takes int (0x00-0xFF) and optional ah/al (omit for wildcard). Optional: once (bool), ignore_count (int, mutually exclusive with once), condition (BreakpointCondition, mutually exclusive with once). memory breakpoints additionally need a heavy-debugger build - see capabilities.debugger in GET /dosbox/info - and return 501 otherwise even when C_DEBUGGER is on.",
+        "description": "type is 'execute', 'interrupt', or 'memory'. execute/memory take segment+offset; interrupt takes int (0x00-0xFF) and optional ah/al (omit for wildcard). Optional: once (bool), ignore_count (int, mutually exclusive with once), condition (BreakpointCondition, mutually exclusive with once). memory breakpoints additionally need a heavy-debugger build - see capabilities.debugger in GET /dosbox/info - and return 501 otherwise even when C_DEBUGGER is on. memory breakpoints additionally accept an optional 'trigger' ('write', the default, or 'read').",
         "operationId": "debugAddBreakpoint",
         "requestBody": {
           "required": true,
@@ -3607,6 +3607,15 @@
                   },
                   "condition": {
                     "$ref": "#/components/schemas/BreakpointCondition"
+                  },
+                  "trigger": {
+                    "type": "string",
+                    "enum": [
+                      "write",
+                      "read"
+                    ],
+                    "description": "Only used when type is 'memory'. 'write' (default) matches the console's BPM command; 'read' matches BPMR.",
+                    "default": "write"
                   }
                 }
               },
@@ -3705,6 +3714,169 @@
           },
           "404": {
             "description": "No breakpoint at the given id/index.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
+    "/api/v1/debug/watches": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "List watched variables",
+        "description": "value/hasValue are read live from guest memory at request time, not cached - matches the interactive debugger's own variable panel refresh.",
+        "operationId": "debugListWatches",
+        "responses": {
+          "200": {
+            "description": "All currently registered watched variables.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "watches": [
+                    {
+                      "name": "player_hp",
+                      "address": 4276334,
+                      "segment": 4660,
+                      "offset": 4660,
+                      "hasValue": true,
+                      "value": 100
+                    }
+                  ],
+                  "count": 1
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Add a watched variable",
+        "description": "name is capped at 15 characters. segment:offset resolves to a flat address at add time, the same way the interactive IV console command does - matches the console's own IV command, exposed for automation.",
+        "operationId": "debugAddWatch",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "segment",
+                  "offset"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 15
+                  },
+                  "segment": {
+                    "type": "integer"
+                  },
+                  "offset": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "example": {
+                "name": "player_hp",
+                "segment": 4660,
+                "offset": 4660
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created. Echoes back the stored watch, including its live value.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "name": "player_hp",
+                  "address": 4276334,
+                  "segment": 4660,
+                  "offset": 4660,
+                  "hasValue": true,
+                  "value": 100
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Delete watched variables",
+        "description": "Body is optional. Specify 'address' to delete a single watch; omit the body (or send an empty one) to delete all.",
+        "operationId": "debugDeleteWatches",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "example": {
+                "address": 4276334
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted. An empty body deletes all watches (status 'cleared'); a body with 'address' deletes just that one (status 'removed').",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "removed",
+                  "address": 4276334
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "description": "No watch at the given address.",
             "content": {
               "application/json": {
                 "schema": {

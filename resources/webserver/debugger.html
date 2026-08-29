@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dosbox-automation debugger</title>
+<style>
+    :root {
+        --bg: #1e1e1e;
+        --panel: #252526;
+        --panel-alt: #2d2d30;
+        --border: #3c3c3c;
+        --fg: #d4d4d4;
+        --fg-dim: #8a8a8a;
+        --accent: #4ec9b0;
+        --accent-dim: #2f7a6c;
+        --warn: #d19a66;
+        --bad: #e06c75;
+        --good: #98c379;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: var(--sans);
+        font-size: 13px;
+    }
+    header {
+        display: flex;
+        align-items: center;
+        gap: 0.75em;
+        flex-wrap: wrap;
+        padding: 0.6em 1em;
+        background: var(--panel-alt);
+        border-bottom: 1px solid var(--border);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+    }
+    header h1 {
+        font-size: 1em;
+        margin: 0;
+        color: var(--accent);
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+    }
+    input, select, button {
+        font-family: inherit;
+        font-size: 0.95em;
+        background: var(--panel);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.35em 0.5em;
+    }
+    input[type="text"], input[type="password"] { font-family: var(--mono); }
+    button {
+        cursor: pointer;
+        color: var(--fg);
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #token { width: 16em; }
+    #status-pill {
+        padding: 0.25em 0.7em;
+        border-radius: 1em;
+        font-weight: 600;
+        font-size: 0.85em;
+        white-space: nowrap;
+    }
+    #status-pill.running { background: var(--accent-dim); color: #dffaf3; }
+    #status-pill.paused { background: var(--warn); color: #201a0e; }
+    #status-pill.unknown { background: var(--border); color: var(--fg-dim); }
+    #reason { color: var(--fg-dim); font-size: 0.85em; white-space: nowrap; }
+    main {
+        display: grid;
+        grid-template-columns: 15em 1fr 20em;
+        gap: 0.75em;
+        padding: 0.75em;
+        align-items: start;
+    }
+    .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .panel h2 {
+        margin: 0;
+        font-size: 0.8em;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--fg-dim);
+        padding: 0.5em 0.75em;
+        border-bottom: 1px solid var(--border);
+    }
+    .panel-body { padding: 0.6em 0.75em; }
+    .col { display: flex; flex-direction: column; gap: 0.75em; }
+    .reg-grid {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.3em 0.5em;
+        font-family: var(--mono);
+        align-items: center;
+    }
+    .reg-grid label { color: var(--fg-dim); text-align: right; }
+    .reg-grid input { width: 100%; }
+    #disasm {
+        font-family: var(--mono);
+        white-space: pre;
+        line-height: 1.6;
+        max-height: 60vh;
+        overflow-y: auto;
+    }
+    #disasm .row {
+        padding: 0.1em 0.75em;
+        cursor: pointer;
+        display: flex;
+        gap: 0.75em;
+    }
+    #disasm .row:hover { background: var(--panel-alt); }
+    #disasm .row.eip { background: var(--accent-dim); color: #eafff9; }
+    #disasm .addr { color: var(--fg-dim); }
+    #disasm .bytes { color: var(--fg-dim); min-width: 12em; }
+    ul.item-list { list-style: none; margin: 0; padding: 0; font-family: var(--mono); }
+    ul.item-list li {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.5em;
+        padding: 0.3em 0;
+        border-bottom: 1px solid var(--border);
+    }
+    ul.item-list li:last-child { border-bottom: none; }
+    ul.item-list .del {
+        background: none;
+        border: none;
+        color: var(--bad);
+        cursor: pointer;
+        padding: 0 0.3em;
+    }
+    .add-form { display: flex; flex-wrap: wrap; gap: 0.35em; margin-top: 0.5em; }
+    .add-form input, .add-form select { flex: 1 1 5em; min-width: 4.5em; }
+    .empty { color: var(--fg-dim); font-style: italic; padding: 0.3em 0; }
+    #token-bar { display: flex; align-items: center; gap: 0.5em; }
+    #token-status { font-size: 0.85em; color: var(--fg-dim); }
+    #token-status.ok { color: var(--good); }
+    #token-status.err { color: var(--bad); }
+    .hint { color: var(--fg-dim); font-size: 0.85em; margin: 0.3em 0 0; }
+    .mem-out {
+        font-family: var(--mono);
+        white-space: pre;
+        font-size: 0.85em;
+        max-height: 12em;
+        overflow-y: auto;
+        margin-top: 0.5em;
+    }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>dosbox-automation debugger</h1>
+    <div id="token-bar">
+        <input type="password" id="token" placeholder="API token (printed to the log at startup)">
+        <button id="connect">Connect</button>
+        <span id="token-status"></span>
+    </div>
+    <span id="status-pill" class="unknown">unknown</span>
+    <span id="reason"></span>
+    <button id="btn-pause">Pause</button>
+    <button id="btn-continue">Continue</button>
+    <button id="btn-step">Step</button>
+    <button id="btn-step-over">Step over</button>
+    <button id="btn-step-out">Step out</button>
+    <input type="text" id="run-to" placeholder="run to seg:off" size="12">
+    <button id="btn-run-to">Run to</button>
+</header>
+
+<main>
+    <div class="col">
+        <div class="panel">
+            <h2>Registers</h2>
+            <div class="panel-body">
+                <div class="reg-grid" id="registers"></div>
+            </div>
+        </div>
+        <div class="panel">
+            <h2>Backtrace</h2>
+            <div class="panel-body">
+                <ul class="item-list" id="backtrace"></ul>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Disassembly</h2>
+        <div id="disasm"></div>
+    </div>
+
+    <div class="col">
+        <div class="panel">
+            <h2>Breakpoints</h2>
+            <div class="panel-body">
+                <ul class="item-list" id="breakpoints"></ul>
+                <div class="add-form">
+                    <select id="bp-type">
+                        <option value="execute">execute</option>
+                        <option value="memory">memory</option>
+                        <option value="interrupt">interrupt</option>
+                    </select>
+                    <input type="text" id="bp-segment" placeholder="seg" size="4">
+                    <input type="text" id="bp-offset" placeholder="off/int" size="6">
+                    <select id="bp-trigger" style="display:none">
+                        <option value="write">write</option>
+                        <option value="read">read</option>
+                    </select>
+                    <button id="bp-add">Add</button>
+                </div>
+                <p class="hint">execute/memory: seg+off. interrupt: int in the off field.</p>
+            </div>
+        </div>
+        <div class="panel">
+            <h2>Watches</h2>
+            <div class="panel-body">
+                <ul class="item-list" id="watches"></ul>
+                <div class="add-form">
+                    <input type="text" id="watch-name" placeholder="name" size="6">
+                    <input type="text" id="watch-segment" placeholder="seg" size="4">
+                    <input type="text" id="watch-offset" placeholder="off" size="6">
+                    <button id="watch-add">Add</button>
+                </div>
+            </div>
+        </div>
+        <div class="panel">
+            <h2>Memory</h2>
+            <div class="panel-body">
+                <div class="add-form">
+                    <input type="text" id="mem-segment" placeholder="seg" size="4">
+                    <input type="text" id="mem-offset" placeholder="off" size="6">
+                    <input type="text" id="mem-len" placeholder="len" size="4" value="64">
+                    <button id="mem-read">Read</button>
+                </div>
+                <pre class="mem-out" id="mem-out"></pre>
+            </div>
+        </div>
+    </div>
+</main>
+
+<script>
+'use strict';
+
+let token = '';
+let lastStopId = 0;
+let waiting = false;
+
+function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers, {
+        'Authorization': 'Bearer ' + token,
+    });
+    if (opts.body && typeof opts.body !== 'string') {
+        opts.body = JSON.stringify(opts.body);
+        opts.headers['Content-Type'] = 'application/json';
+    }
+    return fetch(path, opts).then(async (res) => {
+        const text = await res.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (e) { /* not json */ }
+        if (!res.ok) {
+            const msg = (data && data.error) ? data.error : ('HTTP ' + res.status);
+            throw new Error(msg);
+        }
+        return data;
+    });
+}
+
+function hex(n, digits) {
+    return '0x' + (n >>> 0).toString(16).padStart(digits || 4, '0');
+}
+
+function parseNum(s) {
+    s = (s || '').trim();
+    if (!s) return NaN;
+    return s.toLowerCase().startsWith('0x') ? parseInt(s, 16) : parseInt(s, 10);
+}
+
+function setStatusPill(debugging, reason) {
+    const pill = document.getElementById('status-pill');
+    pill.className = debugging ? 'paused' : 'running';
+    pill.textContent = debugging ? 'paused' : 'running';
+    document.getElementById('reason').textContent = reason || '';
+}
+
+function renderRegisters(regs) {
+    const grid = document.getElementById('registers');
+    if (!regs) { grid.innerHTML = ''; return; }
+    const order = ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'esp', 'ebp',
+                   'eip', 'flags', 'cs', 'ds', 'es', 'ss', 'fs', 'gs'];
+    grid.innerHTML = '';
+    for (const name of order) {
+        if (!(name in regs)) continue;
+        const label = document.createElement('label');
+        label.textContent = name;
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = hex(regs[name], name.length <= 2 ? 4 : 8);
+        input.dataset.reg = name;
+        input.addEventListener('change', () => writeRegister(name, input.value));
+        grid.appendChild(label);
+        grid.appendChild(input);
+    }
+}
+
+function writeRegister(name, valueStr) {
+    const value = parseNum(valueStr);
+    if (isNaN(value)) return;
+    api('/api/v1/cpu/register', {
+        method: 'PUT',
+        body: { register: name, value },
+    }).then(refreshAll).catch(showError);
+}
+
+function renderBacktrace(frames) {
+    const list = document.getElementById('backtrace');
+    list.innerHTML = '';
+    if (!frames || !frames.length) {
+        list.innerHTML = '<li class="empty">no frames</li>';
+        return;
+    }
+    for (const f of frames) {
+        const li = document.createElement('li');
+        li.textContent = hex(f.segment, 4) + ':' + hex(f.offset, 8) +
+            (f.confidence === 'low' ? ' (low confidence)' : '');
+        list.appendChild(li);
+    }
+}
+
+function renderDisasm(dis, linearEip) {
+    // The disassemble route's per-instruction "offset" is the flat linear
+    // address (segment<<4 + the segment-relative offset the request took),
+    // not segment-relative like the request param or a breakpoint's own
+    // segment+offset - matches only in real mode, same assumption the
+    // engine's own SegOffsetWithinMemory documents. Good enough here since
+    // this UI targets the same real-mode DOS debugging the rest of the
+    // debug API already assumes.
+    const el = document.getElementById('disasm');
+    el.innerHTML = '';
+    if (!dis || !dis.instructions) return;
+    const base = dis.segment << 4;
+    for (const ins of dis.instructions) {
+        const row = document.createElement('div');
+        row.className = 'row' + (ins.offset === linearEip ? ' eip' : '');
+        row.innerHTML =
+            '<span class="addr">' + hex(ins.offset, 8) + '</span>' +
+            '<span class="bytes">' + atob(ins.bytes || '').split('').map(
+                c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ') + '</span>' +
+            '<span>' + ins.text + '</span>';
+        row.addEventListener('click', () => {
+            document.getElementById('run-to').value =
+                hex(dis.segment, 4) + ':' + hex(ins.offset - base, 8);
+        });
+        el.appendChild(row);
+    }
+}
+
+function renderBreakpoints(list) {
+    const el = document.getElementById('breakpoints');
+    el.innerHTML = '';
+    if (!list || !list.length) {
+        el.innerHTML = '<li class="empty">none</li>';
+        return;
+    }
+    for (const bp of list) {
+        const li = document.createElement('li');
+        let desc = bp.type;
+        if (bp.type === 'interrupt') {
+            desc += ' int ' + hex(bp.int, 2);
+        } else {
+            desc += ' ' + hex(bp.segment, 4) + ':' + hex(bp.offset, 8);
+        }
+        if (bp.trigger) desc += ' (' + bp.trigger + ')';
+        if (bp.hit_count) desc += ' hits:' + bp.hit_count;
+        const label = document.createElement('span');
+        label.textContent = desc;
+        const del = document.createElement('button');
+        del.className = 'del';
+        del.textContent = '×';
+        del.addEventListener('click', () => {
+            api('/api/v1/debug/breakpoints', { method: 'DELETE', body: { id: bp.id } })
+                .then(refreshAll).catch(showError);
+        });
+        li.appendChild(label);
+        li.appendChild(del);
+        el.appendChild(li);
+    }
+}
+
+function renderWatches(list) {
+    const el = document.getElementById('watches');
+    el.innerHTML = '';
+    if (!list || !list.length) {
+        el.innerHTML = '<li class="empty">none</li>';
+        return;
+    }
+    for (const w of list) {
+        const li = document.createElement('li');
+        const label = document.createElement('span');
+        label.textContent = w.name + ' @' + hex(w.address, 8) + ' = ' +
+            (w.hasValue ? hex(w.value, 4) : '??');
+        const del = document.createElement('button');
+        del.className = 'del';
+        del.textContent = '×';
+        del.addEventListener('click', () => {
+            api('/api/v1/debug/watches', { method: 'DELETE', body: { address: w.address } })
+                .then(refreshAll).catch(showError);
+        });
+        li.appendChild(label);
+        li.appendChild(del);
+        el.appendChild(li);
+    }
+}
+
+function showError(err) {
+    console.error(err);
+    const status = document.getElementById('token-status');
+    status.className = 'err';
+    status.textContent = err.message || String(err);
+}
+
+async function refreshAll() {
+    if (!token) return;
+    try {
+        const status = await api('/api/v1/debug/status');
+        lastStopId = status.stop.stop_id;
+        setStatusPill(status.debugging, status.stop.reason);
+
+        // debug/status's registers are a snapshot frozen at the last stop
+        // event - a register write in between stops (PUT /cpu/register)
+        // never touches it, so the panel would show a stale value right
+        // after the user's own edit. cpu/state reads the CPU live instead.
+        const cpuState = await api('/api/v1/cpu/state').catch(() => null);
+        const regs = cpuState ? cpuState.registers : status.stop.registers;
+        renderRegisters(regs);
+
+        const cs = regs ? regs.cs : 0;
+        const eip = regs ? regs.eip : 0;
+        const startOffset = Math.max(0, eip - 16);
+
+        const [dis, bt, bps, watches] = await Promise.all([
+            api(`/api/v1/debug/disassemble/${cs}/${startOffset}/24`).catch(() => null),
+            api('/api/v1/debug/backtrace').catch(() => null),
+            api('/api/v1/debug/breakpoints').catch(() => null),
+            api('/api/v1/debug/watches').catch(() => null),
+        ]);
+        if (dis) renderDisasm(dis, status.stop.linear_eip);
+        if (bt) renderBacktrace(bt.frames);
+        if (bps) renderBreakpoints(bps.breakpoints);
+        if (watches) renderWatches(watches.watches);
+
+        document.getElementById('token-status').className = 'ok';
+        document.getElementById('token-status').textContent = 'connected';
+    } catch (err) {
+        showError(err);
+    }
+}
+
+async function longPoll() {
+    if (!token || waiting) return;
+    waiting = true;
+    try {
+        const res = await api(`/api/v1/debug/wait?since_stop_id=${lastStopId}&timeout_ms=10000`);
+        if (res.satisfied) await refreshAll();
+    } catch (err) {
+        // Timeouts and transient errors are expected while idle - just retry.
+    } finally {
+        waiting = false;
+        if (token) setTimeout(longPoll, 200);
+    }
+}
+
+document.getElementById('connect').addEventListener('click', () => {
+    token = document.getElementById('token').value.trim();
+    refreshAll().then(longPoll);
+});
+
+document.getElementById('btn-pause').addEventListener('click', () =>
+    api('/api/v1/debug/pause', { method: 'POST' }).then(refreshAll).catch(showError));
+document.getElementById('btn-continue').addEventListener('click', () =>
+    api('/api/v1/debug/continue', { method: 'POST' }).then(refreshAll).catch(showError));
+document.getElementById('btn-step').addEventListener('click', () =>
+    api('/api/v1/debug/step', { method: 'POST' }).then(refreshAll).catch(showError));
+document.getElementById('btn-step-over').addEventListener('click', () =>
+    api('/api/v1/debug/step_over', { method: 'POST' }).then(refreshAll).catch(showError));
+document.getElementById('btn-step-out').addEventListener('click', () =>
+    api('/api/v1/debug/step_out', { method: 'POST' }).then(refreshAll).catch(showError));
+
+document.getElementById('btn-run-to').addEventListener('click', () => {
+    const val = document.getElementById('run-to').value.trim();
+    const parts = val.split(':');
+    if (parts.length !== 2) { showError(new Error('use seg:off')); return; }
+    const segment = parseNum(parts[0]);
+    const offset = parseNum(parts[1]);
+    if (isNaN(segment) || isNaN(offset)) { showError(new Error('use seg:off')); return; }
+    api('/api/v1/debug/run_to', { method: 'POST', body: { segment, offset } })
+        .then(refreshAll).catch(showError);
+});
+
+document.getElementById('bp-type').addEventListener('change', (e) => {
+    document.getElementById('bp-trigger').style.display =
+        e.target.value === 'memory' ? '' : 'none';
+});
+
+document.getElementById('bp-add').addEventListener('click', () => {
+    const type = document.getElementById('bp-type').value;
+    const segOrInt = parseNum(document.getElementById('bp-segment').value);
+    const off = parseNum(document.getElementById('bp-offset').value);
+    if (isNaN(off)) { showError(new Error('offset/int required')); return; }
+    const body = { type };
+    if (type === 'interrupt') {
+        body.int = off;
+    } else {
+        body.segment = isNaN(segOrInt) ? 0 : segOrInt;
+        body.offset = off;
+        if (type === 'memory') body.trigger = document.getElementById('bp-trigger').value;
+    }
+    api('/api/v1/debug/breakpoints', { method: 'POST', body })
+        .then(refreshAll).catch(showError);
+});
+
+document.getElementById('watch-add').addEventListener('click', () => {
+    const name = document.getElementById('watch-name').value.trim();
+    const segment = parseNum(document.getElementById('watch-segment').value);
+    const offset = parseNum(document.getElementById('watch-offset').value);
+    if (!name || isNaN(segment) || isNaN(offset)) {
+        showError(new Error('name, segment, and offset are required'));
+        return;
+    }
+    api('/api/v1/debug/watches', { method: 'POST', body: { name, segment, offset } })
+        .then(refreshAll).catch(showError);
+});
+
+document.getElementById('mem-read').addEventListener('click', () => {
+    const segment = parseNum(document.getElementById('mem-segment').value);
+    const offset = parseNum(document.getElementById('mem-offset').value);
+    const len = parseNum(document.getElementById('mem-len').value) || 64;
+    if (isNaN(segment) || isNaN(offset)) { showError(new Error('segment and offset required')); return; }
+    api(`/api/v1/memory/${segment}/${offset}/${len}`, {
+        headers: { 'Accept': 'application/json' },
+    }).then((data) => {
+        const bytes = atob(data.memory.data);
+        let out = '';
+        for (let i = 0; i < bytes.length; i += 16) {
+            const chunk = bytes.slice(i, i + 16);
+            const hexPart = Array.from(chunk).map(
+                c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ');
+            const asciiPart = Array.from(chunk).map(
+                c => (c.charCodeAt(0) >= 32 && c.charCodeAt(0) < 127) ? c : '.').join('');
+            out += hex(offset + i, 8) + '  ' + hexPart.padEnd(47) + '  ' + asciiPart + '\n';
+        }
+        document.getElementById('mem-out').textContent = out;
+    }).catch(showError);
+});
+</script>
+</body>
+</html>

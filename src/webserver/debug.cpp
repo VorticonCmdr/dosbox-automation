@@ -170,6 +170,9 @@ json BreakpointToJson(const DebugBreakpointInfo& bp)
 		j["type"]    = "memory";
 		j["segment"] = bp.segment;
 		j["offset"]  = bp.offset;
+		j["trigger"] = bp.memory_trigger == DebugMemoryTrigger::Read
+		                     ? "read"
+		                     : "write";
 		break;
 	case DebugBreakpointType::Execute:
 	default:
@@ -665,7 +668,8 @@ void DebugAddBreakpointCommand::Execute()
 		DEBUG_AddIntBreakpoint(int_num, ah, al, once, ignore_count, condition);
 		break;
 	case DebugBreakpointType::Memory:
-		DEBUG_AddMemBreakpoint(segment, offset, once, ignore_count, condition);
+		DEBUG_AddMemBreakpoint(
+		        segment, offset, once, ignore_count, condition, trigger);
 		break;
 	}
 
@@ -742,8 +746,21 @@ void DebugAddBreakpointCommand::Post(const Request& req, Response& res)
 		        "type must be one of: execute, interrupt, memory");
 	}
 
+	DebugMemoryTrigger trigger = DebugMemoryTrigger::Write;
+	if (type == DebugBreakpointType::Memory && j.contains("trigger")) {
+		const auto trigger_str = j.at("trigger").get<std::string>();
+		if (trigger_str == "write") {
+			trigger = DebugMemoryTrigger::Write;
+		} else if (trigger_str == "read") {
+			trigger = DebugMemoryTrigger::Read;
+		} else {
+			throw std::invalid_argument(
+			        "trigger must be one of: write, read");
+		}
+	}
+
 	DebugAddBreakpointCommand cmd(
-	        type, segment, offset, int_num, ah, al, once, ignore_count, condition);
+	        type, segment, offset, int_num, ah, al, once, ignore_count, condition, trigger);
 	cmd.WaitForCompletion();
 	if (!cmd.error.empty()) {
 		throw std::invalid_argument(cmd.error);
@@ -846,6 +863,123 @@ void DebugDeleteBreakpointCommand::Delete(const Request& req, Response& res)
 	send_json(res, result);
 }
 
+namespace {
+json WatchToJson(const DebugWatchInfo& w)
+{
+	json j;
+	j["name"]     = w.name;
+	j["address"]  = w.address;
+	j["segment"]  = w.has_segment_offset ? json(w.segment) : json(nullptr);
+	j["offset"]   = w.has_segment_offset ? json(w.offset) : json(nullptr);
+	j["hasValue"] = w.has_value;
+	j["value"]    = w.value;
+	return j;
+}
+} // namespace
+
+void DebugAddWatchCommand::Execute()
+{
+	if (!cpu.pmode && !SegOffsetWithinMemory(segment, offset)) {
+		error = "segment:offset is outside emulated memory";
+		return;
+	}
+	DEBUG_AddWatch(name, segment, offset);
+	// Just pushed to the back of the engine's list, so it's whatever is
+	// now last - read it back rather than assuming its address/value
+	// here, matching DebugAddBreakpointCommand::Execute's own reasoning.
+	auto all = DEBUG_ListWatches();
+	if (!all.empty()) {
+		result = all.back();
+	}
+}
+
+void DebugAddWatchCommand::Post(const Request& req, Response& res)
+{
+	auto j = json::parse(req.body);
+	if (!j.contains("name") || !j.at("name").is_string()) {
+		throw std::invalid_argument("name must be a string");
+	}
+	const auto name = j.at("name").get<std::string>();
+	if (name.empty() || name.size() > 15) {
+		throw std::invalid_argument("name must be 1..15 characters");
+	}
+	const uint16_t segment = RequireU16(j, "segment");
+	const uint32_t offset  = RequireU32(j, "offset");
+
+	DebugAddWatchCommand cmd(name, segment, offset);
+	cmd.WaitForCompletion();
+	if (!cmd.error.empty()) {
+		throw std::invalid_argument(cmd.error);
+	}
+
+	json j2      = WatchToJson(cmd.result);
+	j2["status"] = "ok";
+	send_json(res, j2);
+}
+
+void DebugListWatchesCommand::Execute()
+{
+	watches = DEBUG_ListWatches();
+}
+
+void DebugListWatchesCommand::Get(const Request&, Response& res)
+{
+	DebugListWatchesCommand cmd;
+	cmd.WaitForCompletion();
+
+	json list = json::array();
+	for (const auto& w : cmd.watches) {
+		list.push_back(WatchToJson(w));
+	}
+
+	json j;
+	j["watches"] = list;
+	j["count"]   = cmd.watches.size();
+	send_json(res, j);
+}
+
+void DebugDeleteWatchCommand::Execute()
+{
+	if (all_watches) {
+		DEBUG_RemoveAllWatches();
+		deleted = true;
+	} else {
+		deleted = DEBUG_RemoveWatch(address);
+	}
+}
+
+void DebugDeleteWatchCommand::Delete(const Request& req, Response& res)
+{
+	if (req.body.empty()) {
+		DebugDeleteWatchCommand cmd(true, 0);
+		cmd.WaitForCompletion();
+
+		json result;
+		result["status"] = "cleared";
+		send_json(res, result);
+		return;
+	}
+
+	auto j                 = json::parse(req.body);
+	const uint32_t address = RequireU32(j, "address");
+
+	DebugDeleteWatchCommand cmd(false, address);
+	cmd.WaitForCompletion();
+
+	if (!cmd.deleted) {
+		res.status = httplib::StatusCode::NotFound_404;
+		json err;
+		err["error"] = "No watch at address " + std::to_string(address);
+		send_json(res, err);
+		return;
+	}
+
+	json result;
+	result["status"]  = "removed";
+	result["address"] = address;
+	send_json(res, result);
+}
+
 #else // !C_DEBUGGER
 
 namespace {
@@ -922,6 +1056,24 @@ void DebugDeleteBreakpointCommand::Execute() {}
 void DebugDeleteBreakpointCommand::Delete(const Request&, Response& res)
 {
 	NotBuilt("debug_breakpoints", res);
+}
+
+void DebugAddWatchCommand::Execute() {}
+void DebugAddWatchCommand::Post(const Request&, Response& res)
+{
+	NotBuilt("debug_watches", res);
+}
+
+void DebugListWatchesCommand::Execute() {}
+void DebugListWatchesCommand::Get(const Request&, Response& res)
+{
+	NotBuilt("debug_watches", res);
+}
+
+void DebugDeleteWatchCommand::Execute() {}
+void DebugDeleteWatchCommand::Delete(const Request&, Response& res)
+{
+	NotBuilt("debug_watches", res);
 }
 
 #endif // C_DEBUGGER

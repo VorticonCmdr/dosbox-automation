@@ -10,6 +10,7 @@
 #include "hardware/memory.h"
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -71,6 +72,13 @@ Bitu DEBUG_EnableDebugger();
 constexpr uint16_t DEBUG_BPINT_ANY = 0x100;
 
 enum class DebugBreakpointType { Execute, Interrupt, Memory };
+
+// Only meaningful when type == Memory: which access the breakpoint fires
+// on. Write matches the interactive console's BPM command (the long-
+// standing default - a plain watched-value-changed check); Read matches
+// BPMR. BPPM/BPLM (protected-mode and linear-address memory breakpoints)
+// have no REST equivalent yet and aren't reachable through this enum.
+enum class DebugMemoryTrigger { Write, Read };
 
 // Registers a breakpoint condition can compare against. Deliberately a
 // small, self-contained set rather than a reuse/extension of
@@ -155,6 +163,8 @@ struct DebugBreakpointInfo {
 	// each time the condition holds but this is still being ignored.
 	int32_t ignore_count               = 0;
 	DebugBreakpointCondition condition = {};
+	// Only meaningful when type == DebugBreakpointType::Memory.
+	DebugMemoryTrigger memory_trigger = DebugMemoryTrigger::Write;
 };
 
 // Once-only breakpoints delete themselves the moment they match, before a
@@ -169,7 +179,8 @@ void DEBUG_AddIntBreakpoint(uint8_t int_num, uint16_t ah, uint16_t al,
                             const DebugBreakpointCondition& condition = {});
 void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off, bool once = false,
                             int32_t ignore_count                      = 0,
-                            const DebugBreakpointCondition& condition = {});
+                            const DebugBreakpointCondition& condition = {},
+                            DebugMemoryTrigger trigger = DebugMemoryTrigger::Write);
 // Index is the breakpoint's position in DEBUG_ListBreakpoints(), which
 // shifts whenever a breakpoint is added or removed -- it is not a stable
 // identifier across calls that mutate the breakpoint list. Prefer
@@ -178,6 +189,35 @@ bool DEBUG_DeleteBreakpointByIndex(uint16_t index);
 bool DEBUG_DeleteBreakpointById(uint64_t id);
 void DEBUG_DeleteAllBreakpoints(void);
 std::vector<DebugBreakpointInfo> DEBUG_ListBreakpoints(void);
+
+// Watched variables: the interactive console's IV/SV/LV commands, exposed
+// for automation. Address is the only real identity a watch has (matches
+// CDebugVar, which is keyed on the resolved linear address, not name) -
+// there is no id like breakpoints have. value/has_value are read live at
+// list time (a direct memory probe, the same one the interactive variable
+// panel itself performs) rather than trusting any previously cached
+// value, since nothing keeps that cache warm when the panel isn't being
+// drawn.
+struct DebugWatchInfo {
+	std::string name;
+	// Only meaningful when has_segment_offset is true - a watch loaded
+	// from a console-saved variable file only ever has the flat address
+	// (the persisted format never stored segment:offset), never both.
+	uint16_t segment        = 0;
+	uint32_t offset         = 0;
+	bool has_segment_offset = false;
+	uint32_t address        = 0;
+	bool has_value          = false;
+	uint16_t value          = 0;
+};
+
+// name is capped at 15 characters (+ NUL), matching the IV command's
+// fixed 16-byte buffer; longer names are the caller's (webserver layer's)
+// job to reject before reaching here.
+void DEBUG_AddWatch(const std::string& name, uint16_t seg, uint32_t off);
+bool DEBUG_RemoveWatch(uint32_t address);
+void DEBUG_RemoveAllWatches();
+std::vector<DebugWatchInfo> DEBUG_ListWatches();
 
 void LOG_StartUp();
 void LOG_Init();

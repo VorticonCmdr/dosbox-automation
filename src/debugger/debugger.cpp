@@ -309,6 +309,19 @@ public:
 	{
 		safe_strcpy(name, vname);
 	}
+	// Segment:offset is known here (the caller resolved it, rather than
+	// handing over an already-flat address) - kept alongside adr purely
+	// as metadata for callers that want to report it back (the REST
+	// watch API), not consulted by anything that reads the variable's
+	// value.
+	CDebugVar(const char* vname, uint16_t segment, uint32_t offset)
+	        : adr(GetAddress(segment, offset)),
+	          seg(segment),
+	          off(offset),
+	          has_seg_off(true)
+	{
+		safe_strcpy(name, vname);
+	}
 
 	char* GetName(void)
 	{
@@ -317,6 +330,21 @@ public:
 	PhysPt GetAdr(void)
 	{
 		return adr;
+	}
+	uint16_t GetSegment(void)
+	{
+		return seg;
+	}
+	uint32_t GetOffset(void)
+	{
+		return off;
+	}
+	// False for a variable inserted through the address-only constructor
+	// (CDebugVar::LoadVars - the persisted format only ever stored the
+	// flat address, never segment:offset).
+	bool HasSegmentOffset(void)
+	{
+		return has_seg_off;
 	}
 	void SetValue(bool has, uint16_t val)
 	{
@@ -334,12 +362,16 @@ public:
 
 private:
 	const PhysPt adr = 0;
+	uint16_t seg     = 0;
+	uint32_t off     = 0;
+	bool has_seg_off = false;
 	char name[16]    = {};
 	bool hasvalue    = false;
 	uint16_t value   = 0;
 
 public:
 	static void InsertVariable(char* name, PhysPt adr);
+	static void InsertVariable(char* name, uint16_t segment, uint32_t offset);
 	static CDebugVar* FindVar(PhysPt adr);
 	static void DeleteAll();
 	static bool SaveVars(char* name);
@@ -786,6 +818,9 @@ static DebugBreakpointInfo ToDebugBreakpointInfo(CBreakpoint* bp, uint16_t index
 		info.type    = DebugBreakpointType::Memory;
 		info.segment = bp->GetSegment();
 		info.offset  = bp->GetOffset();
+		info.memory_trigger = (bp->GetType() == BKPNT_MEMORY_READ)
+		                            ? DebugMemoryTrigger::Read
+		                            : DebugMemoryTrigger::Write;
 		break;
 	case BKPNT_PHYSICAL:
 	default:
@@ -2242,7 +2277,7 @@ bool ParseCommand(char* str)
 			return false;
 		}
 		DEBUG_ShowMsg("DEBUG: Created debug var %s at %04X:%08X\n", name, seg, ofs);
-		CDebugVar::InsertVariable(name, GetAddress(seg, ofs));
+		CDebugVar::InsertVariable(name, seg, ofs);
 		return true;
 	}
 
@@ -3039,9 +3074,19 @@ void DEBUG_AddIntBreakpoint(uint8_t int_num, uint16_t ah, uint16_t al,
 
 void DEBUG_AddMemBreakpoint(uint16_t seg, uint32_t off, bool once,
                             int32_t ignore_count,
-                            const DebugBreakpointCondition& condition)
+                            const DebugBreakpointCondition& condition,
+                            DebugMemoryTrigger trigger)
 {
-	CBreakpoint::AddMemBreakpoint(seg, off, once, ignore_count, condition);
+	auto* bp = CBreakpoint::AddMemBreakpoint(seg, off, once, ignore_count, condition);
+#if C_HEAVY_DEBUGGER
+	if (trigger == DebugMemoryTrigger::Read) {
+		bp->SetType(BKPNT_MEMORY_READ);
+		bp->FlagMemoryAsUnread();
+	}
+#else
+	(void)bp;
+	(void)trigger;
+#endif
 }
 
 bool DEBUG_DeleteBreakpointByIndex(uint16_t index)
@@ -3426,6 +3471,8 @@ static bool ShouldSkipBreakpointHit()
 	return bp->ConsumeIgnore();
 }
 
+static bool debugger_window_enabled = true;
+
 void DEBUG_Enable(bool pressed)
 {
 	if (!pressed) {
@@ -3454,7 +3501,7 @@ void DEBUG_Enable(bool pressed)
 	// on the UI, only on-screen interaction does. Every Draw*/DBGUI_*
 	// call already no-ops when !DBGUI_IsInitialized().
 	static bool was_ui_started = false;
-	if (!was_ui_started) {
+	if (debugger_window_enabled && !was_ui_started) {
 		DBGUI_StartUp();
 		was_ui_started = DBGUI_IsInitialized();
 		if (!was_ui_started) {
@@ -3984,6 +4031,8 @@ Bitu debugCallback;
 
 void DEBUG_Init()
 {
+	debugger_window_enabled = get_section("debug")->GetBool("debugger_window");
+
 	// Add some keyhandlers
 	MAPPER_AddHandler(DEBUG_Enable, SDL_SCANCODE_PAUSE, MMOD2, "debugger", "Debugger");
 
@@ -4012,8 +4061,17 @@ void DEBUG_AddConfigSection(const ConfigPtr& conf)
 {
 	assert(conf);
 
-	// TODO the [debug] section has no settings, so what's the point?
-	conf->AddSection("debug");
+	using enum Property::Changeable::Value;
+
+	auto section = conf->AddSection("debug");
+
+	auto window = section->AddBool("debugger_window", OnlyAtStart, true);
+	window->SetHelp(
+	        "Show the interactive debugger window (enabled by default). Set to\n"
+	        "false to keep the debugger fully functional over the REST API\n"
+	        "(breakpoints, stepping, memory/register access) without ever\n"
+	        "opening the window - the same headless mode this already falls\n"
+	        "back to when no GPU device is available for it to render with.");
 }
 
 // DEBUGGING VAR STUFF
@@ -4021,6 +4079,11 @@ void DEBUG_AddConfigSection(const ConfigPtr& conf)
 void CDebugVar::InsertVariable(char* name, PhysPt adr)
 {
 	varList.push_back(new CDebugVar(name, adr));
+}
+
+void CDebugVar::InsertVariable(char* name, uint16_t segment, uint32_t offset)
+{
+	varList.push_back(new CDebugVar(name, segment, offset));
 }
 
 void CDebugVar::DeleteAll()
@@ -4049,6 +4112,54 @@ CDebugVar* CDebugVar::FindVar(PhysPt pt)
 		}
 	}
 	return nullptr;
+}
+
+void DEBUG_AddWatch(const std::string& name, uint16_t seg, uint32_t off)
+{
+	char buf[16] = {};
+	safe_strcpy(buf, name.c_str());
+	CDebugVar::InsertVariable(buf, seg, off);
+}
+
+bool DEBUG_RemoveWatch(uint32_t address)
+{
+	for (auto it = varList.begin(); it != varList.end(); ++it) {
+		if ((*it)->GetAdr() == address) {
+			delete *it;
+			varList.erase(it);
+			return true;
+		}
+	}
+	return false;
+}
+
+void DEBUG_RemoveAllWatches()
+{
+	CDebugVar::DeleteAll();
+}
+
+std::vector<DebugWatchInfo> DEBUG_ListWatches()
+{
+	std::vector<DebugWatchInfo> result;
+	for (auto* dv : varList) {
+		DebugWatchInfo info;
+		info.name               = dv->GetName();
+		info.address            = dv->GetAdr();
+		info.has_segment_offset = dv->HasSegmentOffset();
+		info.segment            = dv->GetSegment();
+		info.offset             = dv->GetOffset();
+		// Live probe, matching the interactive variable panel's own
+		// refresh (DBGUI_DrawVariables) - dv's cached value/hasvalue
+		// are only ever updated by that panel, which never runs
+		// headless, so trusting them here would show stale or
+		// always-empty values in that mode.
+		uint16_t value      = 0;
+		const bool no_value = mem_readw_checked(dv->GetAdr(), &value);
+		info.has_value      = !no_value;
+		info.value          = no_value ? 0 : value;
+		result.push_back(info);
+	}
+	return result;
 }
 
 bool CDebugVar::SaveVars(char* name)

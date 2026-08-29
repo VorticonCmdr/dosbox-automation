@@ -14,6 +14,8 @@
 #endif
 
 #include <cstdint>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "http/http.h"
@@ -147,7 +149,8 @@ public:
 	                          uint32_t offset, uint8_t int_num, uint16_t ah,
 	                          uint16_t al, bool once = false,
 	                          int32_t ignore_count = 0,
-	                          const DebugBreakpointCondition& condition = {})
+	                          const DebugBreakpointCondition& condition = {},
+	                          DebugMemoryTrigger trigger = DebugMemoryTrigger::Write)
 	        : type(type),
 	          segment(segment),
 	          offset(offset),
@@ -156,7 +159,8 @@ public:
 	          al(al),
 	          once(once),
 	          ignore_count(ignore_count),
-	          condition(condition)
+	          condition(condition),
+	          trigger(trigger)
 	{}
 
 	void Execute() override;
@@ -184,6 +188,55 @@ private:
 	bool once                          = false;
 	int32_t ignore_count               = 0;
 	DebugBreakpointCondition condition = {};
+	// Only consulted when type == DebugBreakpointType::Memory.
+	DebugMemoryTrigger trigger = DebugMemoryTrigger::Write;
+};
+
+class DebugAddWatchCommand : public Command {
+public:
+	DebugAddWatchCommand(std::string name, uint16_t segment, uint32_t offset)
+	        : name(std::move(name)),
+	          segment(segment),
+	          offset(offset)
+	{}
+
+	void Execute() override;
+	static void Post(const httplib::Request&, httplib::Response& res);
+
+	// Filled by Execute() by reading the newly-inserted watch back from
+	// the engine, same reasoning as DebugAddBreakpointCommand::result.
+	DebugWatchInfo result = {};
+
+private:
+	std::string name;
+	uint16_t segment = 0;
+	uint32_t offset  = 0;
+};
+
+class DebugListWatchesCommand : public Command {
+public:
+	void Execute() override;
+	static void Get(const httplib::Request&, httplib::Response& res);
+
+	std::vector<DebugWatchInfo> watches = {};
+};
+
+class DebugDeleteWatchCommand : public Command {
+public:
+	// address is only consulted when all_watches is false.
+	DebugDeleteWatchCommand(bool all_watches, uint32_t address)
+	        : all_watches(all_watches),
+	          address(address)
+	{}
+
+	void Execute() override;
+	static void Delete(const httplib::Request&, httplib::Response& res);
+
+	bool deleted = false;
+
+private:
+	bool all_watches = false;
+	uint32_t address = 0;
 };
 
 class DebugListBreakpointsCommand : public Command {
@@ -229,6 +282,24 @@ public:
 };
 
 class DebugDeleteBreakpointCommand : public Command {
+public:
+	void Execute() override;
+	static void Delete(const httplib::Request&, httplib::Response& res);
+};
+
+class DebugAddWatchCommand : public Command {
+public:
+	void Execute() override;
+	static void Post(const httplib::Request&, httplib::Response& res);
+};
+
+class DebugListWatchesCommand : public Command {
+public:
+	void Execute() override;
+	static void Get(const httplib::Request&, httplib::Response& res);
+};
+
+class DebugDeleteWatchCommand : public Command {
 public:
 	void Execute() override;
 	static void Delete(const httplib::Request&, httplib::Response& res);
