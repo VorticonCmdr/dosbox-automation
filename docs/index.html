@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dosbox-automation developer reference</title>
+<style>
+    :root {
+        --bg: #1e1e1e;
+        --panel: #252526;
+        --panel-alt: #2d2d30;
+        --border: #3c3c3c;
+        --fg: #d4d4d4;
+        --fg-dim: #8a8a8a;
+        --accent: #4ec9b0;
+        --accent-dim: #2f7a6c;
+        --warn: #d19a66;
+        --bad: #e06c75;
+        --good: #98c379;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-padding-top: 4.5em; }
+    body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: var(--sans);
+        font-size: 15px;
+        line-height: 1.55;
+    }
+    a { color: var(--accent); }
+    code {
+        font-family: var(--mono);
+        background: var(--panel-alt);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.1em 0.4em;
+        font-size: 0.9em;
+    }
+    pre {
+        font-family: var(--mono);
+        background: var(--panel-alt);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.8em 1em;
+        overflow-x: auto;
+        font-size: 0.85em;
+        line-height: 1.5;
+    }
+    pre code { background: none; border: none; padding: 0; }
+
+    header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: var(--panel-alt);
+        border-bottom: 1px solid var(--border);
+    }
+    .header-inner {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0.8em 1.5em;
+        display: flex;
+        align-items: baseline;
+        gap: 1em;
+        flex-wrap: wrap;
+    }
+    header h1 {
+        font-size: 1.05em;
+        margin: 0;
+        color: var(--accent);
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+    }
+    nav { display: flex; gap: 1.1em; flex-wrap: wrap; font-size: 0.9em; }
+    nav a { color: var(--fg-dim); text-decoration: none; }
+    nav a:hover { color: var(--accent); }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 0 1.5em 4em; }
+    .lede {
+        padding: 2em 0 1em;
+        max-width: 46em;
+        color: var(--fg-dim);
+    }
+    .lede strong { color: var(--fg); }
+
+    section { padding-top: 2.2em; }
+    section > h2 {
+        font-size: 1.3em;
+        margin: 0 0 0.2em;
+        color: var(--fg);
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 0.4em;
+    }
+    section > p.section-intro { color: var(--fg-dim); max-width: 42em; margin-top: 0.6em; }
+
+    .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        margin-top: 1em;
+    }
+    .panel-body { padding: 1em 1.2em; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.92em; }
+    th, td { text-align: left; padding: 0.5em 0.7em; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th {
+        color: var(--fg-dim);
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 0.75em;
+        letter-spacing: 0.06em;
+    }
+    tr:last-child td { border-bottom: none; }
+    td.mono, th.mono { font-family: var(--mono); }
+    .table-scroll { overflow-x: auto; }
+
+    .badge {
+        display: inline-block;
+        padding: 0.1em 0.55em;
+        border-radius: 1em;
+        font-size: 0.78em;
+        font-weight: 600;
+        white-space: nowrap;
+        font-family: var(--mono);
+    }
+    .badge-get, .badge-Read { background: var(--accent-dim); color: #dffaf3; }
+    .badge-post, .badge-Write { background: #3d5a80; color: #dbeafe; }
+    .badge-put, .badge-Control { background: var(--warn); color: #201a0e; }
+    .badge-delete, .badge-Debug { background: var(--bad); color: #2a0f10; }
+    .badge-Input { background: #6a4c93; color: #f1e9fb; }
+    .badge-Media { background: #4c7a93; color: #e9f6fb; }
+    .badge-Script { background: #7a934c; color: #f0fbe9; }
+
+    .tag-chip {
+        font-size: 0.78em;
+        color: var(--fg-dim);
+        background: var(--panel-alt);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.1em 0.5em;
+    }
+
+    .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(15em, 1fr));
+        gap: 0.9em;
+        margin-top: 1em;
+    }
+    .feature-card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.9em 1em;
+    }
+    .feature-card h3 {
+        margin: 0 0 0.35em;
+        font-size: 0.95em;
+        color: var(--accent);
+    }
+    .feature-card p { margin: 0; color: var(--fg-dim); font-size: 0.88em; }
+
+    #api-filter {
+        width: 100%;
+        max-width: 24em;
+        font-family: var(--mono);
+        font-size: 0.9em;
+        background: var(--panel-alt);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.5em 0.7em;
+        margin: 1em 0 0.6em;
+    }
+    #api-count { color: var(--fg-dim); font-size: 0.85em; margin-left: 0.8em; }
+    .filter-row { display: flex; align-items: center; flex-wrap: wrap; }
+
+    footer {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 2em 1.5em 3em;
+        color: var(--fg-dim);
+        font-size: 0.85em;
+        border-top: 1px solid var(--border);
+    }
+    footer a { color: var(--fg-dim); }
+    footer a:hover { color: var(--accent); }
+
+    ::selection { background: var(--accent-dim); color: #eafff9; }
+</style>
+</head>
+<body>
+
+<header>
+    <div class="header-inner">
+        <h1>dosbox-automation</h1>
+        <nav>
+            <a href="#quick-start">Quick start</a>
+            <a href="#configuration">Configuration</a>
+            <a href="#features">Features</a>
+            <a href="#rest-api">REST API</a>
+            <a href="#web-uis">Web UIs</a>
+            <a href="#scripting">Lua scripting</a>
+            <a href="https://github.com/VorticonCmdr/dosbox-automation">GitHub &#8599;</a>
+        </nav>
+    </div>
+</header>
+
+<main>
+    <div class="lede">
+        <p>
+            <strong>dosbox-automation</strong> is a DOSBox Staging 0.84 fork with a local HTTP
+            REST API, a headless debugger, and an embedded Lua scripting engine bolted on for
+            automated installs, deterministic testing, and programmatic control. This page is a
+            developer-facing map of what's actually in the binary right now &mdash; every
+            endpoint, every config setting, both bundled web UIs &mdash; not a pitch.
+        </p>
+        <p>
+            This particular repo is <a href="https://github.com/VorticonCmdr">VorticonCmdr</a>'s
+            fork of upstream <a href="https://github.com/dosbox-automation/dosbox-automation">dosbox-automation/dosbox-automation</a>,
+            adding the debugger REST/Lua area and both web UIs documented below; it's what this
+            page describes. Upstream's own <a href="https://www.dosbox-automation.org">manual and
+            downloads</a> don't include any of it. For this fork's code,
+            <a href="https://github.com/VorticonCmdr/dosbox-automation">the repo</a>.
+        </p>
+    </div>
+
+    <section id="quick-start">
+        <h2>Quick start</h2>
+        <p class="section-intro">Four steps from a binary to a live API you can curl.</p>
+        <div class="panel"><div class="panel-body">
+<pre><code># 1. enable the API (off by default)
+dosbox --set webserver_enabled=true
+
+# 2. it prints the URL and writes a bearer token to the config dir
+#    (a short preview goes to the log too)
+
+# 3. every request needs the token, except the doc pages and /hello
+curl -H "Authorization: Bearer &lt;token&gt;" http://localhost:8386/api/v1/status
+
+# 4. or just open a browser: no token needed to *load* these
+#    http://localhost:8386/            landing page
+#    http://localhost:8386/api.html    live Swagger explorer
+#    http://localhost:8386/control.html  operate everything below the debugger
+#    http://localhost:8386/debugger.html full breakpoint/step/watch UI</code></pre>
+        </div></div>
+    </section>
+
+    <section id="configuration">
+        <h2>Configuration</h2>
+        <p class="section-intro">
+            Project-specific settings on top of stock DOSBox Staging config. Every setting also
+            carries a <code>SetHelp()</code> description in the generated config file.
+        </p>
+        <div class="panel"><div class="panel-body">
+            <h3 style="margin-top:0;color:var(--fg-dim);font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;">[webserver]</h3>
+            <div class="table-scroll"><table>
+                <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
+                <tr><td class="mono">webserver_enabled</td><td class="mono">false</td><td>Enable the HTTP REST API.</td></tr>
+                <tr><td class="mono">webserver_bind_address</td><td class="mono">127.0.0.1</td><td>IP to bind to. Binding to <code>0.0.0.0</code>/<code>::</code> also requires <code>webserver_allow_remote</code>.</td></tr>
+                <tr><td class="mono">webserver_port</td><td class="mono">8386</td><td>TCP port.</td></tr>
+                <tr><td class="mono">webserver_allow_remote</td><td class="mono">false</td><td>Allow binding to a non-localhost address, exposing the API to the network.</td></tr>
+                <tr><td class="mono">webserver_token_file</td><td class="mono">true</td><td>Write the full bearer token to a <code>0600</code> file in the config dir (removed on clean shutdown). Set <code>false</code> to rely on the <code>DOSBOX_API_TOKEN</code> environment variable instead.</td></tr>
+                <tr><td class="mono">webserver_token_scopes</td><td class="mono">unrestricted</td><td>Comma-separated scope list restricting what the token can do: <code>read</code>, <code>write</code>, <code>input</code>, <code>script</code>, <code>media</code>, <code>debug</code>, <code>control</code>. Also gates what a running Lua script may do.</td></tr>
+                <tr><td class="mono">webserver_osd</td><td class="mono">true</td><td>Show on-screen indicators while automation is driving the machine.</td></tr>
+                <tr><td class="mono">mount_allowed_bases</td><td class="mono">none</td><td>Semicolon-separated extra base directories <code>MOUNT</code>/<code>drive/mount</code> may expose to the guest. Symlink components rejected.</td></tr>
+                <tr><td class="mono">mount_allowed_image_roots</td><td class="mono">none</td><td>Semicolon-separated directories floppy/CD images may be mounted or swapped from.</td></tr>
+            </table></div>
+            <h3 style="color:var(--fg-dim);font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;">[debug]</h3>
+            <div class="table-scroll"><table>
+                <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
+                <tr><td class="mono">debugger_window</td><td class="mono">true</td><td>Show the interactive debugger window. Set <code>false</code> to keep the debugger fully usable over the REST API (breakpoints, stepping, memory/register access, the web debugger) without ever opening a window &mdash; the same headless fallback used when no GPU device is available.</td></tr>
+            </table></div>
+        </div></div>
+    </section>
+
+    <section id="features">
+        <h2>Features</h2>
+        <p class="section-intro">Everything reachable through the API, grouped by area. Each area's exact routes are in the table below.</p>
+        <div class="feature-grid">
+            <div class="feature-card"><h3>Status &amp; control</h3><p>Emulator/program state, graceful shutdown, a pre-auth handshake.</p></div>
+            <div class="feature-card"><h3>Input</h3><p>Inject keyboard/mouse event sequences or literal text; read/set the mouse cursor; cancel a running replay.</p></div>
+            <div class="feature-card"><h3>Recording &amp; replay</h3><p>Deterministic, frame-accurate keyboard/mouse recording and replay; list, save, delete recordings.</p></div>
+            <div class="feature-card"><h3>Video &amp; capture</h3><p>Grab the current frame, scrape the text-mode screen, record ZMBV video with adjustable compression.</p></div>
+            <div class="feature-card"><h3>Drives &amp; mounting</h3><p>List drives, swap floppy/CD images, mount a host directory, browse mountable directories/images, lock the mount config.</p></div>
+            <div class="feature-card"><h3>Memory</h3><p>Allocate/free, search or pattern-scan a range, snapshot-and-diff to hunt a moving value, freeze addresses, raw read/write.</p></div>
+            <div class="feature-card"><h3>CPU</h3><p>Read all registers/flags, write a single register.</p></div>
+            <div class="feature-card"><h3>DOS internals</h3><p>Walk the MCB chain, inspect live EMS/XMS driver state (handles, page mappings, A20/HMA/UMB).</p></div>
+            <div class="feature-card"><h3>Port I/O</h3><p>Read/write an x86 I/O port.</p></div>
+            <div class="feature-card"><h3>Headless debugger</h3><p>Pause/continue/step/step-over/step-out/run-to, execute/interrupt/memory breakpoints, watched variables, disassembly, call-stack backtraces &mdash; all over the API, with or without the interactive window.</p></div>
+            <div class="feature-card"><h3>Lua scripting</h3><p>Sandboxed scripts run inside the emulator with a <code>dosbox.*</code> API, gated by the same token scopes as the REST API.</p></div>
+            <div class="feature-card"><h3>Batch execution</h3><p>Bundle multiple memory/register/port/freeze operations into one atomic emulation-thread pass.</p></div>
+        </div>
+    </section>
+
+    <section id="rest-api">
+        <h2>REST API</h2>
+        <p class="section-intro">
+            All 78 operations across 68 routes, extracted straight from
+            <code>resources/webserver/openapi.json</code> and the route table in
+            <code>src/webserver/webserver.cpp</code> &mdash; this list can't drift from the
+            binary. The full interactive spec is at <code>/api.html</code> once the server is
+            running.
+        </p>
+        <div class="filter-row">
+            <input type="text" id="api-filter" placeholder="Filter by path, tag, or scope&hellip;">
+            <span id="api-count"></span>
+        </div>
+        <div class="panel"><div class="table-scroll">
+            <table id="api-table">
+                <thead><tr><th>Method</th><th>Path</th><th>Area</th><th>Summary</th><th>Scope</th></tr></thead>
+                <tbody id="api-tbody"></tbody>
+            </table>
+        </div></div>
+    </section>
+
+    <section id="web-uis">
+        <h2>Web UIs</h2>
+        <p class="section-intro">Two hand-built pages ship alongside the generic Swagger explorer at <code>/api.html</code>. Neither needs a token to load &mdash; like the landing page, they're static shells; every API call they make still needs one, pasted into the page itself.</p>
+        <div class="feature-grid">
+            <div class="feature-card">
+                <h3>/control.html</h3>
+                <p>A routine-operations dashboard: drives &amp; mounting (with a directory browser), input/mouse, recording &amp; replay, live screen preview and video capture, memory freezes and raw reads, CPU registers, port I/O, DOS/EMS/XMS internals, Lua script control, and a raw-JSON escape hatch for batch/wait_for.</p>
+            </div>
+            <div class="feature-card">
+                <h3>/debugger.html</h3>
+                <p>Full interactive debugging: live disassembly with EIP highlighting, execute/interrupt/memory breakpoints (read or write triggers), watched variables, call-stack backtrace, and a memory hex-dump &mdash; a browser-based alternative to the native ImGui debugger window.</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="scripting">
+        <h2>Lua scripting</h2>
+        <p class="section-intro">
+            <code>POST /api/v1/script/load</code> runs sandboxed Lua inside the emulator with a
+            <code>dosbox.*</code> API mirroring the REST surface (keyboard/mouse input, memory
+            read/write, screen text/matching, on-screen messages, capture control) &mdash; useful
+            for install automation and in-emulator test logic that shouldn't need a network
+            round-trip per step. Scripts are gated by the same <code>webserver_token_scopes</code>
+            as the REST API. See <code>src/lua/lua_api.cpp</code> and
+            <code>src/lua/lua_bridge_commands.cpp</code> for the full function list, and
+            <code>docs/CONTRIBUTING.md</code> for the sandbox's limits (instruction count, wall
+            clock, memory cap).
+        </p>
+    </section>
+</main>
+
+<footer>
+    <p>
+        GPL-2.0-or-later. A fork of upstream dosbox-automation, itself based on DOSBox Staging.
+        <a href="https://github.com/VorticonCmdr/dosbox-automation">Source</a> &middot;
+        <a href="https://www.dosbox-automation.org">Upstream manual &amp; downloads</a> &middot;
+        <a href="https://github.com/VorticonCmdr/dosbox-automation/blob/main/docs/CONTRIBUTING.md">Contributing</a>
+    </p>
+</footer>
+
+<script src="endpoints-data.js"></script>
+<script>
+'use strict';
+
+function renderEndpoints(rows) {
+    const tbody = document.getElementById('api-tbody');
+    tbody.innerHTML = '';
+    for (const [method, path, tag, summary, scope] of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+            '<td><span class="badge badge-' + method.toLowerCase() + '">' + method + '</span></td>' +
+            '<td class="mono">' + path + '</td>' +
+            '<td><span class="tag-chip">' + tag + '</span></td>' +
+            '<td>' + summary + '</td>' +
+            '<td><span class="badge badge-' + scope + '">' + scope + '</span></td>';
+        tbody.appendChild(tr);
+    }
+    document.getElementById('api-count').textContent = rows.length + ' of ' + ENDPOINTS.length;
+}
+
+renderEndpoints(ENDPOINTS);
+
+document.getElementById('api-filter').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    if (!q) { renderEndpoints(ENDPOINTS); return; }
+    renderEndpoints(ENDPOINTS.filter(([method, path, tag, summary, scope]) =>
+        (method + ' ' + path + ' ' + tag + ' ' + summary + ' ' + scope).toLowerCase().includes(q)));
+});
+</script>
+</body>
+</html>
