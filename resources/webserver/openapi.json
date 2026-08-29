@@ -2967,6 +2967,59 @@
         }
       }
     },
+    "/api/v1/mount/directories": {
+      "get": {
+        "tags": [
+          "Drive"
+        ],
+        "summary": "Browse directories under the configured mount bases",
+        "operationId": "mountDirectories",
+        "description": "Directory browser backing mount_allowed_bases: with no path parameter, lists the configured bases themselves; with one, lists the immediate subdirectories of that path (which must resolve to a directory under one of the bases). Lets an agent or the web control panel navigate to a mount target without already knowing the exact host path. Returned paths are independently re-validated against the same policy drive/mount enforces, so a path returned here will not then be refused.",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "description": "Directory to list. Omit to list the configured allowed_bases themselves.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The listed directory (or the top-level bases if no path was given).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MountDirectoryListing"
+                },
+                "example": {
+                  "path": "/home/user/games",
+                  "parent": "/home/user",
+                  "entries": [
+                    {
+                      "name": "doom",
+                      "path": "/home/user/games/doom"
+                    }
+                  ],
+                  "truncated": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "path does not resolve to an existing directory, or is not a directory."
+          },
+          "403": {
+            "description": "path resolves outside every allowed mount base."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/api/v1/input/replay/status": {
       "get": {
         "tags": [
@@ -5044,6 +5097,17 @@
           }
         }
       },
+      "MountDirectoryEntry": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      },
       "MountImages": {
         "type": "object",
         "properties": {
@@ -5067,6 +5131,31 @@
                 }
               }
             }
+          }
+        }
+      },
+      "MountDirectoryListing": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "nullable": true,
+            "description": "Canonical path of the listed directory, or null for the top-level bases view."
+          },
+          "parent": {
+            "type": "string",
+            "nullable": true,
+            "description": "Path one level up, still within some allowed base. Empty string means \"go back to the top-level bases view\"; null means there is no parent (already at the top-level view)."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MountDirectoryEntry"
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True if this directory held more subdirectories than the max_directory_entries cap (see dosbox/info's capabilities.drive.limits)."
           }
         }
       },

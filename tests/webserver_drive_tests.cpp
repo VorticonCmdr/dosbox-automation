@@ -215,6 +215,204 @@ TEST_F(ScanImageRootTest, DefaultEntriesScannedBoundDoesNotFalselyTruncateAnOrdi
 	EXPECT_FALSE(result.truncated);
 }
 
+// -- ScanDirectory --
+
+class ScanDirectoryTest : public testing::Test {
+protected:
+	fs::path tmp_dir = {};
+
+	static fs::path MakeTempDir()
+	{
+		std::random_device rd = {};
+		auto dist = std::uniform_int_distribution<uint64_t>();
+		for (int attempt = 0; attempt < 16; ++attempt) {
+			const auto name      = "scan_directory_" +
+			                       std::to_string(dist(rd));
+			const auto candidate = fs::temp_directory_path() / name;
+			std::error_code ec   = {};
+			if (fs::create_directory(candidate, ec) && !ec) {
+				fs::permissions(candidate, fs::perms::owner_all, ec);
+				return candidate;
+			}
+		}
+		return {};
+	}
+
+	void SetUp() override
+	{
+		// Canonicalized up front for the same reason as
+		// ScanImageRootTest: a raw temp_directory_path() can itself
+		// contain a symlink component (e.g. macOS's /tmp ->
+		// /private/tmp), which would trip nothing here directly, but
+		// keeps returned entry paths' parent matching tmp_dir exactly
+		// in assertions below.
+		auto raw = MakeTempDir();
+		ASSERT_FALSE(raw.empty());
+		std::error_code ec;
+		tmp_dir = fs::canonical(raw, ec);
+		ASSERT_FALSE(ec);
+	}
+
+	void TearDown() override
+	{
+		if (!tmp_dir.empty() && fs::exists(tmp_dir)) {
+			fs::remove_all(tmp_dir);
+		}
+	}
+
+	void MakeSubdir(const std::string& name)
+	{
+		std::error_code ec;
+		fs::create_directory(tmp_dir / name, ec);
+		ASSERT_FALSE(ec);
+	}
+
+	void WriteFile(const std::string& name)
+	{
+		std::ofstream(tmp_dir / name) << "x";
+	}
+};
+
+TEST_F(ScanDirectoryTest, EmptyDirectoryReturnsNoEntries)
+{
+	const auto result = ScanDirectory(tmp_dir, 100);
+	EXPECT_TRUE(result.entries.empty());
+	EXPECT_FALSE(result.truncated);
+}
+
+TEST_F(ScanDirectoryTest, NonexistentDirectoryReturnsNoEntriesNotAnError)
+{
+	const auto result = ScanDirectory(tmp_dir / "does_not_exist", 100);
+	EXPECT_TRUE(result.entries.empty());
+	EXPECT_FALSE(result.truncated);
+}
+
+TEST_F(ScanDirectoryTest, ListsSubdirectoriesWithNameAndPath)
+{
+	MakeSubdir("doom");
+	MakeSubdir("quake");
+
+	const auto result = ScanDirectory(tmp_dir, 100);
+
+	ASSERT_EQ(result.entries.size(), 2u);
+	EXPECT_FALSE(result.truncated);
+
+	auto names = std::vector<std::string>();
+	for (const auto& e : result.entries) {
+		names.push_back(e.name);
+		EXPECT_EQ(fs::path(e.path).parent_path(), tmp_dir);
+		EXPECT_EQ(fs::path(e.path).filename(), e.name);
+	}
+	std::sort(names.begin(), names.end());
+	EXPECT_EQ(names, (std::vector<std::string>{"doom", "quake"}));
+}
+
+TEST_F(ScanDirectoryTest, ExcludesRegularFiles)
+{
+	MakeSubdir("subdir");
+	WriteFile("readme.txt");
+
+	const auto result = ScanDirectory(tmp_dir, 100);
+
+	ASSERT_EQ(result.entries.size(), 1u);
+	EXPECT_EQ(result.entries[0].name, "subdir");
+}
+
+TEST_F(ScanDirectoryTest, SkipsSymlinksEvenWhenTheyResolveToADirectory)
+{
+	MakeSubdir("real");
+	std::error_code ec;
+	fs::create_directory_symlink(tmp_dir / "real", tmp_dir / "link", ec);
+	if (ec) {
+		GTEST_SKIP() << "symlink creation not permitted in this environment";
+	}
+
+	const auto result = ScanDirectory(tmp_dir, 100);
+
+	ASSERT_EQ(result.entries.size(), 1u);
+	EXPECT_EQ(result.entries[0].name, "real");
+}
+
+TEST_F(ScanDirectoryTest, ExactlyAtCapIsNotReportedTruncated)
+{
+	MakeSubdir("a");
+	MakeSubdir("b");
+
+	const auto result = ScanDirectory(tmp_dir, 2);
+
+	EXPECT_EQ(result.entries.size(), 2u);
+	EXPECT_FALSE(result.truncated);
+}
+
+TEST_F(ScanDirectoryTest, OverCapStopsAtTheCapAndReportsTruncated)
+{
+	MakeSubdir("a");
+	MakeSubdir("b");
+	MakeSubdir("c");
+
+	const auto result = ScanDirectory(tmp_dir, 2);
+
+	EXPECT_EQ(result.entries.size(), 2u);
+	EXPECT_TRUE(result.truncated);
+}
+
+TEST_F(ScanDirectoryTest, BoundsRawEntriesWalkedNotJustAcceptedSubdirectories)
+{
+	// Files never qualify as entries (not a directory) - without a
+	// separate entries-walked bound, none of them would ever touch the
+	// cap, so a directory full of files would be scanned without limit.
+	for (int i = 0; i < 5; ++i) {
+		WriteFile("file_" + std::to_string(i) + ".txt");
+	}
+
+	const auto result = ScanDirectory(tmp_dir, 100, /*max_entries_scanned=*/3);
+
+	EXPECT_TRUE(result.entries.empty());
+	EXPECT_TRUE(result.truncated);
+}
+
+// -- MountHandlers::GetDirectories: HTTP-level request handling --
+//
+// MountPolicy::AllowedBases()/AllowedImageRoots() assert() that
+// InitPolicyConfig() has already run - a one-way, process-wide init this
+// test binary never performs (the same reason no test here calls
+// GetPolicy or GetImages directly either). That rules out unit-testing
+// the no-path listing branch and the whitelist check, both of which call
+// AllowedBases(); only the branches that respond before reaching it are
+// covered here, mirroring the split DriveMountPost above already
+// documents. The excluded branches are live-verified instead.
+
+TEST(MountHandlersGetDirectories, RejectsPathThatDoesNotResolve)
+{
+	httplib::Request req;
+	req.params.emplace("path", "/does/not/exist/anywhere");
+	httplib::Response res;
+	MountHandlers::GetDirectories(req, res);
+
+	EXPECT_EQ(res.status, 400);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("error_code").get<std::string>(), "does_not_resolve");
+}
+
+TEST(MountHandlersGetDirectories, RejectsPathThatIsARegularFileNotADirectory)
+{
+	std::error_code ec;
+	const auto tmp_file = fs::temp_directory_path() /
+	                      "mount_directories_not_a_dir_test.txt";
+	std::ofstream(tmp_file) << "x";
+
+	httplib::Request req;
+	req.params.emplace("path", tmp_file.string());
+	httplib::Response res;
+	MountHandlers::GetDirectories(req, res);
+
+	fs::remove(tmp_file, ec);
+
+	EXPECT_EQ(res.status, 400);
+	const auto j = nlohmann::json::parse(res.body);
+	EXPECT_EQ(j.at("error_code").get<std::string>(), "not_a_directory");
+}
+
 // -- DriveMountCommand::Post: HTTP-level request handling --
 //
 // Only the branches that respond before DriveMountCommand is constructed

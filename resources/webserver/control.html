@@ -162,6 +162,68 @@
     textarea.json-in { width: 100%; min-height: 4.5em; resize: vertical; }
     .status-ok { color: var(--good); }
     .status-bad { color: var(--bad); }
+    table.drive-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: var(--mono);
+        font-size: 0.9em;
+    }
+    table.drive-table th, table.drive-table td {
+        text-align: left;
+        padding: 0.25em 0.5em;
+        border-bottom: 1px solid var(--border);
+    }
+    table.drive-table th {
+        color: var(--fg-dim);
+        font-weight: 500;
+        text-transform: uppercase;
+        font-size: 0.8em;
+        letter-spacing: 0.05em;
+    }
+    table.drive-table td.letter { font-weight: 600; }
+    .badge {
+        padding: 0.1em 0.6em;
+        border-radius: 1em;
+        font-size: 0.8em;
+        white-space: nowrap;
+    }
+    .badge.mounted { background: var(--accent-dim); color: #dffaf3; }
+    .badge.empty { background: var(--panel-alt); color: var(--fg-dim); }
+    .badge.locked { background: var(--warn); color: #201a0e; }
+    .dir-browser {
+        margin-top: 0.5em;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--panel-alt);
+    }
+    .dir-browser-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.5em;
+        padding: 0.35em 0.5em;
+        border-bottom: 1px solid var(--border);
+    }
+    .dir-browser-path {
+        font-family: var(--mono);
+        font-size: 0.85em;
+        color: var(--fg-dim);
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+    ul.dir-entries {
+        max-height: 10em;
+        overflow-y: auto;
+        padding: 0.2em 0.5em;
+    }
+    ul.dir-entries li {
+        cursor: pointer;
+        justify-content: flex-start;
+        gap: 0.4em;
+    }
+    ul.dir-entries li:hover { color: var(--accent); }
+    ul.dir-entries li.dir-entries-empty { cursor: default; }
+    ul.dir-entries li.dir-entries-empty:hover { color: var(--fg-dim); }
+    ul.dir-entries li .chevron { color: var(--fg-dim); }
 </style>
 </head>
 <body>
@@ -244,22 +306,44 @@
         </div>
     </div>
 
-    <div class="panel">
-        <h2>Drives &amp; mounting</h2>
+    <div class="panel full">
+        <h2>
+            Drives &amp; mounting
+            <span id="mount-lock-status"></span>
+        </h2>
         <div class="panel-body">
-            <ul class="item-list" id="drives"></ul>
+            <table class="drive-table" id="drives"></table>
+
+            <p class="hint full" style="margin-top:0.75em;">Mount a host directory</p>
             <div class="add-form">
-                <input type="text" id="mount-drive" placeholder="drive" size="2">
-                <input type="text" id="mount-path" placeholder="host path" style="flex:2;">
-                <label style="flex:0 0 auto;"><input type="checkbox" id="mount-ro"> ro</label>
-                <button id="mount-add">Mount dir</button>
+                <select id="mount-drive"></select>
+                <input type="text" id="mount-path" placeholder="host path" style="flex:3;">
+                <input type="text" id="mount-label" placeholder="label (optional)" style="flex:1;">
+                <label style="flex:0 0 auto;"><input type="checkbox" id="mount-ro"> read-only</label>
+                <button id="mount-add">Mount</button>
             </div>
+
+            <div class="dir-browser">
+                <div class="dir-browser-bar">
+                    <button id="dir-up" title="Up one level" disabled>&#8593;</button>
+                    <span class="dir-browser-path" id="dir-current">connect to browse</span>
+                    <button id="dir-use" style="margin-left:auto;" disabled>Use this folder</button>
+                </div>
+                <ul class="item-list dir-entries" id="dir-entries"></ul>
+            </div>
+
+            <p class="hint full" style="margin-top:0.75em;">Swap a floppy/CD image</p>
             <div class="add-form">
-                <input type="text" id="swap-drive" placeholder="drive" size="2">
-                <input type="text" id="swap-image" placeholder="image path" style="flex:2;">
-                <button id="swap-do">Swap image</button>
+                <select id="swap-drive"></select>
+                <select id="swap-image" style="flex:3;"></select>
+                <button id="swap-refresh" title="Rescan image roots">&#8635;</button>
+                <button id="swap-do">Swap</button>
             </div>
-            <p class="hint" id="mount-policy"></p>
+
+            <div class="row-gap" style="margin-top:0.75em;">
+                <p class="hint" id="mount-policy" style="margin:0;"></p>
+                <button id="mount-lock-btn" class="danger" style="margin-left:auto;">Lock mounting</button>
+            </div>
         </div>
     </div>
 
@@ -549,41 +633,157 @@ document.getElementById('replay-cancel').addEventListener('click', () =>
 
 // -- Drives & mounting --
 
-async function refreshDrives() {
-    const d = await api('/api/v1/drive').catch(() => null);
+let mountLocked = false;
+
+function initDriveSelects() {
+    for (const id of ['mount-drive', 'swap-drive']) {
+        const sel = document.getElementById(id);
+        sel.innerHTML = '';
+        for (let c = 65; c <= 90; ++c) {
+            const opt = document.createElement('option');
+            opt.value = String.fromCharCode(c);
+            opt.textContent = String.fromCharCode(c);
+            sel.appendChild(opt);
+        }
+    }
+}
+
+function renderDriveTable(drives) {
     const el = document.getElementById('drives');
+    el.innerHTML = '<tr><th>Letter</th><th>Status</th><th>Path</th></tr>';
+    for (const drv of (drives || [])) {
+        const tr = document.createElement('tr');
+        const badge = drv.mounted
+            ? '<span class="badge mounted">' + drv.type + (drv.read_only ? ' · ro' : '') + '</span>'
+            : '<span class="badge empty">empty</span>';
+        tr.innerHTML =
+            '<td class="letter">' + drv.letter + ':</td>' +
+            '<td>' + badge + '</td>' +
+            '<td>' + (drv.mounted ? (drv.info || '') : '') + '</td>';
+        el.appendChild(tr);
+    }
+}
+
+// Directory browser for the mount-path field. Backed by
+// /api/v1/mount/directories: with no `path`, the server returns the
+// configured allowed_bases as the top-level entries; with one, the
+// immediate subdirectories of that path. `browsePath` mirrors that same
+// convention client-side - null means "show the top-level bases".
+let browsePath = null;
+
+async function loadDirBrowser(path) {
+    const qs = path ? ('?path=' + encodeURIComponent(path)) : '';
+    const data = await api('/api/v1/mount/directories' + qs).catch((err) => {
+        showError(err);
+        return null;
+    });
+    if (!data) return;
+
+    browsePath = data.path;
+    document.getElementById('dir-current').textContent = data.path || 'Mount bases';
+    document.getElementById('dir-up').disabled = (data.parent === null);
+    document.getElementById('dir-up').dataset.parent = data.parent ?? '';
+    // "Use this folder" only makes sense once inside an actual
+    // directory - the top-level view lists bases to descend into, not
+    // a mountable path itself.
+    document.getElementById('dir-use').disabled = (data.path === null);
+
+    const el = document.getElementById('dir-entries');
     el.innerHTML = '';
-    if (d && d.drives) {
-        for (const drv of d.drives) {
+    if (!data.entries.length) {
+        el.innerHTML = '<li class="empty dir-entries-empty">no subdirectories</li>';
+    } else {
+        for (const entry of data.entries) {
             const li = document.createElement('li');
-            li.textContent = drv.letter + ': ' +
-                (drv.mounted ? (drv.type + ' ' + (drv.info || '') + (drv.read_only ? ' (ro)' : '')) : 'empty');
+            li.innerHTML = '<span>' + entry.name + '</span><span class="chevron">›</span>';
+            li.addEventListener('click', () => loadDirBrowser(entry.path));
+            el.appendChild(li);
+        }
+        if (data.truncated) {
+            const li = document.createElement('li');
+            li.className = 'empty dir-entries-empty';
+            li.textContent = '… truncated, showing the first ' + data.entries.length;
             el.appendChild(li);
         }
     }
+}
+
+document.getElementById('dir-up').addEventListener('click', () => {
+    const parent = document.getElementById('dir-up').dataset.parent;
+    loadDirBrowser(parent || null);
+});
+document.getElementById('dir-use').addEventListener('click', () => {
+    if (browsePath) document.getElementById('mount-path').value = browsePath;
+});
+
+async function refreshSwapImages() {
+    const sel = document.getElementById('swap-image');
+    const current = sel.value;
+    const data = await api('/api/v1/mount/images').catch(() => null);
+    sel.innerHTML = '';
+    if (!data || !data.roots || !data.roots.some(r => r.images.length)) {
+        const opt = document.createElement('option');
+        opt.textContent = 'no images found under any allowed root';
+        opt.disabled = true;
+        sel.appendChild(opt);
+        return;
+    }
+    for (const root of data.roots) {
+        if (!root.images.length) continue;
+        const group = document.createElement('optgroup');
+        group.label = root.root + (root.truncated ? ' (truncated)' : '');
+        for (const img of root.images) {
+            const opt = document.createElement('option');
+            opt.value = img.path;
+            opt.textContent = img.path.slice(root.root.length).replace(/^\/+/, '') +
+                ' (' + (img.size_bytes / 1024 / 1024).toFixed(1) + ' MB)';
+            group.appendChild(opt);
+        }
+        sel.appendChild(group);
+    }
+    if (current && sel.querySelector(`option[value="${CSS.escape(current)}"]`)) {
+        sel.value = current;
+    }
+}
+
+async function refreshDrives() {
+    const d = await api('/api/v1/drive').catch(() => null);
+    renderDriveTable(d ? d.drives : null);
+
     const policy = await api('/api/v1/mount/policy').catch(() => null);
     if (policy) {
+        mountLocked = policy.locked;
+        const lockPill = document.getElementById('mount-lock-status');
+        lockPill.innerHTML = policy.locked ? '<span class="badge locked">locked</span>' : '';
         document.getElementById('mount-policy').textContent =
-            (policy.locked ? 'mount locked. ' : '') +
-            'allowed bases: ' + (policy.allowed_bases.join(', ') || 'none') +
-            '; image roots: ' + (policy.allowed_image_roots.join(', ') || 'none');
+            'image roots: ' + (policy.allowed_image_roots.join(', ') || 'none');
+        for (const btn of [document.getElementById('mount-add'), document.getElementById('swap-do')]) {
+            btn.disabled = policy.locked;
+            btn.title = policy.locked ? 'mounting is locked for this session' : '';
+        }
     }
 }
 
 document.getElementById('mount-add').addEventListener('click', () => {
-    const drive = document.getElementById('mount-drive').value.trim();
+    const drive = document.getElementById('mount-drive').value;
     const path = document.getElementById('mount-path').value.trim();
+    const label = document.getElementById('mount-label').value.trim();
     const readonly = document.getElementById('mount-ro').checked;
-    if (!drive || !path) { showError(new Error('drive and path required')); return; }
-    api('/api/v1/drive/mount', { method: 'POST', body: { drive, path, readonly } })
+    if (!path) { showError(new Error('host path required')); return; }
+    api('/api/v1/drive/mount', { method: 'POST', body: { drive, path, readonly, label } })
         .then(refreshDrives).catch(showError);
 });
+document.getElementById('swap-refresh').addEventListener('click', () => refreshSwapImages().catch(showError));
 document.getElementById('swap-do').addEventListener('click', () => {
-    const drive = document.getElementById('swap-drive').value.trim();
-    const image = document.getElementById('swap-image').value.trim();
-    if (!drive || !image) { showError(new Error('drive and image required')); return; }
+    const drive = document.getElementById('swap-drive').value;
+    const image = document.getElementById('swap-image').value;
+    if (!image) { showError(new Error('pick an image first (or hit refresh)')); return; }
     api('/api/v1/drive/swap', { method: 'POST', body: { drive, image } })
         .then(refreshDrives).catch(showError);
+});
+document.getElementById('mount-lock-btn')?.addEventListener('click', () => {
+    if (!confirm('Lock mounting for the rest of this session? This cannot be undone.')) return;
+    api('/api/v1/mount/lock', { method: 'POST' }).then(refreshDrives).catch(showError);
 });
 
 // -- Memory --
@@ -780,7 +980,10 @@ async function refreshAll() {
 document.getElementById('connect').addEventListener('click', () => {
     token = document.getElementById('token').value.trim();
     initRegSelect();
+    initDriveSelects();
     refreshAll();
+    refreshSwapImages().catch(showError);
+    loadDirBrowser(null);
 });
 
 setInterval(() => { if (token) refreshAll(); }, 3000);

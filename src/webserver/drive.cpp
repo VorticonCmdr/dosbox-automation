@@ -618,4 +618,166 @@ void MountHandlers::GetImages(const Request&, Response& res)
 	send_json(res, j);
 }
 
+DirListing ScanDirectory(const std::filesystem::path& path, size_t cap,
+                         size_t max_entries_scanned)
+{
+	DirListing result;
+
+	std::error_code ec;
+	auto it = std::filesystem::directory_iterator(path, ec);
+	if (ec) {
+		return result;
+	}
+
+	if (max_entries_scanned == 0) {
+		max_entries_scanned = cap * DefaultMaxScannedEntriesMultiplier;
+	}
+
+	// A directory entry's own leaf name can never be ".", "..", or
+	// contain a path separator (the OS hands directory_iterator plain
+	// filenames), so path/name staying under path needs no re-
+	// canonicalization the way ScanImageRoot's cross-root scan does -
+	// the only thing left to rule out per entry is a symlink.
+	const auto consider = [&](const std::filesystem::directory_entry& entry) {
+		std::error_code symlink_ec;
+		if (entry.is_symlink(symlink_ec) || symlink_ec) {
+			return;
+		}
+
+		std::error_code dir_ec;
+		if (!entry.is_directory(dir_ec) || dir_ec) {
+			return;
+		}
+
+		// Checked only once an entry is a confirmed subdirectory, not
+		// before - otherwise a directory with exactly `cap` real
+		// subdirectories and nothing else would be reported truncated
+		// when nothing was actually left out.
+		if (result.entries.size() >= cap) {
+			result.truncated = true;
+			return;
+		}
+
+		DirEntryInfo info;
+		info.name = entry.path().filename().string();
+		info.path = entry.path().string();
+		result.entries.push_back(std::move(info));
+	};
+
+	// Manual walk with the error_code-returning increment(), not a
+	// range-based for - same reasoning as ScanImageRoot: a directory
+	// that goes unreadable mid-scan degrades to "here's what was found
+	// before that happened" rather than an uncaught exception.
+	// entries_scanned bounds raw entries examined regardless of
+	// whether they qualify, so a directory full of files (which never
+	// pass is_directory) can't be walked without limit.
+	const auto end         = std::filesystem::directory_iterator();
+	size_t entries_scanned = 0;
+	while (it != end) {
+		if (entries_scanned >= max_entries_scanned) {
+			result.truncated = true;
+			break;
+		}
+		++entries_scanned;
+
+		consider(*it);
+
+		std::error_code inc_ec;
+		it.increment(inc_ec);
+		if (inc_ec) {
+			result.truncated = true;
+			break;
+		}
+	}
+
+	return result;
+}
+
+void MountHandlers::GetDirectories(const Request& req, Response& res)
+{
+	if (!req.has_param("path") || req.get_param_value("path").empty()) {
+		// No path: the top-level view is the configured allowed_bases
+		// themselves, not an arbitrary filesystem root - there is
+		// nothing to canonicalize or validate here, they are already
+		// trusted, read-only-after-startup config.
+		json entries = json::array();
+		for (const auto& base : MountPolicy::AllowedBases()) {
+			json e;
+			auto name = base.filename().string();
+			e["name"] = name.empty() ? base.string() : name;
+			e["path"] = base.string();
+			entries.push_back(e);
+		}
+
+		json j;
+		j["path"]      = nullptr;
+		j["parent"]    = nullptr;
+		j["entries"]   = entries;
+		j["truncated"] = false;
+		send_json(res, j);
+		return;
+	}
+
+	const auto canonical = MountPolicy::CanonicalizeExisting(
+	        req.get_param_value("path"));
+	if (!canonical) {
+		res.status = httplib::StatusCode::BadRequest_400;
+		json err;
+		err["error"] = "path does not resolve to an existing directory";
+		err["error_code"] = "does_not_resolve";
+		err["retryable"]  = false;
+		send_json(res, err);
+		return;
+	}
+
+	std::error_code dir_ec;
+	if (!std::filesystem::is_directory(*canonical, dir_ec) || dir_ec) {
+		res.status = httplib::StatusCode::BadRequest_400;
+		json err;
+		err["error"]      = "path is not a directory";
+		err["error_code"] = "not_a_directory";
+		err["retryable"]  = false;
+		send_json(res, err);
+		return;
+	}
+
+	if (!MountPolicy::IsUnderAnyRoot(*canonical, MountPolicy::AllowedBases())) {
+		res.status = httplib::StatusCode::Forbidden_403;
+		json err;
+		err["error"]      = "path is outside every allowed mount base";
+		err["error_code"] = "outside_whitelist";
+		err["retryable"]  = false;
+		send_json(res, err);
+		return;
+	}
+
+	// "" (as opposed to null) tells the caller there's a level above
+	// this one, but it's the synthetic top-level roots view rather
+	// than a real filesystem path - reached once `parent_path()` walks
+	// out of every allowed base (including when `canonical` already
+	// *is* one of them).
+	std::string parent;
+	const auto parent_path = canonical->parent_path();
+	if (MountPolicy::IsUnderAnyRoot(parent_path, MountPolicy::AllowedBases())) {
+		parent = parent_path.string();
+	}
+
+	const auto listing = ScanDirectory(*canonical, MaxDirEntriesPerListing);
+
+	json entries = json::array();
+	for (const auto& entry : listing.entries) {
+		json e;
+		e["name"] = entry.name;
+		e["path"] = entry.path;
+		entries.push_back(e);
+	}
+
+	json j;
+	j["path"]      = canonical->string();
+	j["parent"]    = parent;
+	j["entries"]   = entries;
+	j["truncated"] = listing.truncated;
+	send_json(res, j);
+}
+
 } // namespace Webserver

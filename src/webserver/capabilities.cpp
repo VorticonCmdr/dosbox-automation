@@ -191,7 +191,8 @@ json BuildCapabilitiesBlock()
 	        AlwaysOn("always available, regardless of the debugger capability",
 	                 backtrace_limits));
 	json drive_limits;
-	drive_limits["max_images_per_root"] = MaxImagesPerRoot;
+	drive_limits["max_images_per_root"]   = MaxImagesPerRoot;
+	drive_limits["max_directory_entries"] = MaxDirEntriesPerListing;
 	j["drive"]   = ToJson(AlwaysOn("always available", drive_limits));
 	j["capture"] = ToJson(AlwaysOn("always available"));
 	j["wait"]    = ToJson(AlwaysOn("always available", wait_limits));

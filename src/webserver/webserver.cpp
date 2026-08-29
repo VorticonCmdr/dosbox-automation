@@ -327,6 +327,9 @@ static const std::vector<ApiRoute>& get_api_route_table()
 	        {   HttpMethod::Get,            "/api/v1/mount/lock",               MountHandlers::GetLock,    Read},
 	        {   HttpMethod::Get,          "/api/v1/mount/policy",             MountHandlers::GetPolicy,    Read},
 	        {   HttpMethod::Get,          "/api/v1/mount/images",             MountHandlers::GetImages,    Read},
+	        {   HttpMethod::Get,
+	         "/api/v1/mount/directories",        MountHandlers::GetDirectories,
+	         Read	                                                                                      },
 
 	        {  HttpMethod::Post,
 	         "/api/v1/input/record/start",         RecordingHandlers::PostStart,

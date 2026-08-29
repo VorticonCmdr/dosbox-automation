@@ -130,6 +130,37 @@ struct ImageRootScan {
 ImageRootScan ScanImageRoot(const std::filesystem::path& root, size_t cap,
                             size_t max_entries_scanned = 0);
 
+// Non-recursive cap for GET /mount/directories - a backstop against a
+// directory with an unreasonable number of subdirectories, mirroring
+// MaxImagesPerRoot's role for /mount/images. Surfaced to callers via
+// capabilities.cpp's drive.limits.max_directory_entries.
+constexpr size_t MaxDirEntriesPerListing = 500;
+
+struct DirEntryInfo {
+	std::string name = {};
+	std::string path = {};
+};
+
+struct DirListing {
+	std::vector<DirEntryInfo> entries = {};
+	bool truncated                    = false;
+};
+
+// Lists the immediate, non-symlink subdirectories of `path` - the
+// caller (MountHandlers::GetDirectories) has already confirmed `path`
+// itself lies under one of the configured allowed_bases, so nothing
+// here needs to re-derive that; a directory entry yielded by iterating
+// `path` is inherently a physical child of it once symlinks are
+// excluded. Mirrors ScanImageRoot's walk otherwise: the same
+// error_code-based iteration (an unreadable directory mid-scan
+// degrades to "here's what was found" rather than an uncaught
+// exception) and the same two-tier cap (entries actually returned vs.
+// raw entries examined, so a directory full of files - which never
+// qualify - can't be walked without limit). Exposed (including the
+// second parameter) for testing.
+DirListing ScanDirectory(const std::filesystem::path& path, size_t cap,
+                         size_t max_entries_scanned = 0);
+
 // GET/POST /mount/lock, GET /mount/policy, GET /mount/images. None of
 // these touch emulation-thread state - MountPolicy's own config is
 // read-only after startup and Lock()/IsLocked() are a plain atomic -
@@ -141,6 +172,11 @@ struct MountHandlers {
 	static void PostLock(const httplib::Request& req, httplib::Response& res);
 	static void GetPolicy(const httplib::Request& req, httplib::Response& res);
 	static void GetImages(const httplib::Request& req, httplib::Response& res);
+
+	// GET /api/v1/mount/directories - directory browser backing the web
+	// control panel's mount-path picker. Same real-filesystem-I/O
+	// posture as GetImages: web thread only, never a Bridge Command.
+	static void GetDirectories(const httplib::Request& req, httplib::Response& res);
 };
 
 } // namespace Webserver

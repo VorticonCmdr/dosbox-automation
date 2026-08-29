@@ -70,7 +70,7 @@ file.
 - **Input** — inject keyboard/mouse event sequences or literal text; read/set the mouse cursor; cancel a running replay.
 - **Recording & replay** — record keyboard and mouse input with deterministic, frame-accurate replay; list, save, and delete recordings.
 - **Video & capture** — grab the current frame (image or metadata), scrape the text-mode screen, and record ZMBV video with adjustable compression.
-- **Drives & mounting** — list drives, swap floppy/CD images (multi-disk installs), mount a host directory as a drive letter, lock the mount configuration, and enumerate images under an allow-listed root.
+- **Drives & mounting** — list drives, swap floppy/CD images (multi-disk installs), mount a host directory as a drive letter, lock the mount configuration, and browse or enumerate images/directories under an allow-listed root.
 - **Memory** — allocate/free guest memory, search or pattern-scan a range, snapshot-and-diff to hunt down a moving value, freeze addresses to a fixed value, and raw read/write at any address.
 - **CPU** — read all registers/flags, write a single register.
 - **DOS internals** — walk the DOS MCB chain (PSP ownership, free memory), and inspect live EMS/XMS driver state (handles, page mappings, A20/HMA/UMB).
