@@ -184,6 +184,7 @@ bool IsPublicDocPath(const std::string& method, const std::string& path)
 	        "/swagger-ui.css",
 	        "/swagger-ui-bundle.js",
 	        "/debugger.html",
+	        "/control.html",
 	};
 	return public_paths.count(path) > 0;
 }

@@ -110,7 +110,8 @@ TEST(WebserverDocPath, AllowsDocAssetsForGet)
 	                      "/openapi.json",
 	                      "/swagger-ui.css",
 	                      "/swagger-ui-bundle.js",
-	                      "/debugger.html"}) {
+	                      "/debugger.html",
+	                      "/control.html"}) {
 		EXPECT_TRUE(IsPublicDocPath("GET", p)) << p;
 		EXPECT_TRUE(IsPublicDocPath("HEAD", p)) << p;
 	}
@@ -194,7 +195,8 @@ TEST(WebserverApiPath, NeverOverlapsWithDocPathAllowlist)
 	                      "/openapi.json",
 	                      "/swagger-ui.css",
 	                      "/swagger-ui-bundle.js",
-	                      "/debugger.html"}) {
+	                      "/debugger.html",
+	                      "/control.html"}) {
 		EXPECT_FALSE(IsPublicApiPath("GET", p)) << p;
 	}
 }

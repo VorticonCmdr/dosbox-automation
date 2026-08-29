@@ -33,9 +33,9 @@ Based on DOSBox Staging 0.84. Your existing DOSBox configurations will continue 
    pages below.
 
 4. **Try it.** Open `http://localhost:8386` in a browser for the landing page, `/api.html` for a
-   live Swagger explorer of every endpoint, or `/debugger.html` for the [web
-   debugger](#web-debugger) — no token needed just to load these pages, only for the API calls
-   they make.
+   live Swagger explorer of every endpoint, `/control.html` for the [web control
+   panel](#web-control-panel), or `/debugger.html` for the [web debugger](#web-debugger) — no
+   token needed just to load these pages, only for the API calls they make.
 
 ## Configuration
 
@@ -77,6 +77,7 @@ file.
 - **Port I/O** — read/write an x86 I/O port.
 - **Headless debugger** — pause/continue/step/step-over/step-out/run-to, execute/interrupt/memory breakpoints (with conditions and ignore counts), watched variables, disassembly, and call-stack backtraces — all reachable purely over the API, with or without the interactive window (see `debugger_window` above).
 - **Web debugger** — a browser-based alternative to the interactive window at `/debugger.html`: registers, live disassembly, breakpoints (including read/write memory watchpoints), watched variables, backtrace, and a memory hex-dump, driven entirely by the debug REST API.
+- **Web control panel** — a dashboard at `/control.html` for everything else: live screen preview and video capture, input/typing and mouse control, recording and replay, drive mounting and image swaps, memory freezes and raw reads, CPU registers and port I/O, DOS/EMS/XMS internals, Lua script control, and a raw-JSON escape hatch for batch and wait_for.
 - **Lua scripting** — sandboxed scripts run inside the emulator with a `dosbox.*` API (keyboard/mouse input, memory read/write, screen text/matching, on-screen messages, capture control), gated by the same token scopes as the REST API. Useful for install automation and in-emulator test logic that doesn't want a network round-trip per step.
 - **Batch execution** — bundle multiple memory/register/port/freeze operations into one atomic emulation-thread pass.
 - **Lifecycle control** — designed for launchers and CI: deterministic recording/replay, frame capture for visual verification, and graceful shutdown.
@@ -84,6 +85,15 @@ file.
 Every route also carries a token scope (`read`, `write`, `input`, `media`, `debug`, `script`,
 `control`), enforced against `webserver_token_scopes`. The full endpoint list is documented at
 `/api.html` (Swagger UI) once the server is running, or in `resources/webserver/openapi.json`.
+
+### Web control panel
+
+`/control.html` needs no token to load, same as `/debugger.html` and `/api.html` — paste the
+bearer token into the page itself once it's open. It's a routine-operations dashboard, not a
+Swagger replacement: mount drives, type into DOS programs, watch the live screen, freeze a memory
+value, load a Lua script — all from panels instead of hand-built requests. Anything more
+specialized (pattern scans, memory snapshot/diff, one-off calls to any other route) is still one
+click away via the linked `/api.html`.
 
 ### Web debugger
 

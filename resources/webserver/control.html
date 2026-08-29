@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dosbox-automation control</title>
+<style>
+    :root {
+        --bg: #1e1e1e;
+        --panel: #252526;
+        --panel-alt: #2d2d30;
+        --border: #3c3c3c;
+        --fg: #d4d4d4;
+        --fg-dim: #8a8a8a;
+        --accent: #4ec9b0;
+        --accent-dim: #2f7a6c;
+        --warn: #d19a66;
+        --bad: #e06c75;
+        --good: #98c379;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: var(--sans);
+        font-size: 13px;
+    }
+    header {
+        display: flex;
+        align-items: center;
+        gap: 0.75em;
+        flex-wrap: wrap;
+        padding: 0.6em 1em;
+        background: var(--panel-alt);
+        border-bottom: 1px solid var(--border);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+    }
+    header h1 {
+        font-size: 1em;
+        margin: 0;
+        color: var(--accent);
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+    }
+    input, select, button, textarea {
+        font-family: inherit;
+        font-size: 0.95em;
+        background: var(--panel);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.35em 0.5em;
+    }
+    input[type="text"], input[type="password"], textarea { font-family: var(--mono); }
+    button {
+        cursor: pointer;
+        color: var(--fg);
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+    #token { width: 16em; }
+    #status-pill {
+        padding: 0.25em 0.7em;
+        border-radius: 1em;
+        font-weight: 600;
+        font-size: 0.85em;
+        white-space: nowrap;
+    }
+    #status-pill.running { background: var(--accent-dim); color: #dffaf3; }
+    #status-pill.shell { background: var(--warn); color: #201a0e; }
+    #status-pill.unknown { background: var(--border); color: var(--fg-dim); }
+    #program-name { color: var(--fg-dim); font-size: 0.85em; white-space: nowrap; }
+    main {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(20em, 1fr));
+        gap: 0.75em;
+        padding: 0.75em;
+        align-items: start;
+    }
+    .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .panel h2 {
+        margin: 0;
+        font-size: 0.8em;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--fg-dim);
+        padding: 0.5em 0.75em;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .panel h2 label {
+        text-transform: none;
+        letter-spacing: normal;
+        font-size: 1em;
+        display: flex;
+        align-items: center;
+        gap: 0.35em;
+        cursor: pointer;
+    }
+    .panel-body { padding: 0.6em 0.75em; }
+    ul.item-list { list-style: none; margin: 0; padding: 0; font-family: var(--mono); }
+    ul.item-list li {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.5em;
+        padding: 0.3em 0;
+        border-bottom: 1px solid var(--border);
+    }
+    ul.item-list li:last-child { border-bottom: none; }
+    ul.item-list .del {
+        background: none;
+        border: none;
+        color: var(--bad);
+        cursor: pointer;
+        padding: 0 0.3em;
+        flex: 0 0 auto;
+    }
+    .add-form { display: flex; flex-wrap: wrap; gap: 0.35em; margin-top: 0.5em; }
+    .add-form input, .add-form select { flex: 1 1 5em; min-width: 4.5em; }
+    .empty { color: var(--fg-dim); font-style: italic; padding: 0.3em 0; }
+    #token-bar { display: flex; align-items: center; gap: 0.5em; }
+    #token-status { font-size: 0.85em; color: var(--fg-dim); }
+    #token-status.ok { color: var(--good); }
+    #token-status.err { color: var(--bad); }
+    .hint { color: var(--fg-dim); font-size: 0.85em; margin: 0.3em 0 0; }
+    .out {
+        font-family: var(--mono);
+        white-space: pre;
+        font-size: 0.85em;
+        max-height: 14em;
+        overflow-y: auto;
+        margin-top: 0.5em;
+        background: var(--panel-alt);
+        border-radius: 3px;
+        padding: 0.4em;
+    }
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.2em 0.6em; font-family: var(--mono); }
+    .kv label { color: var(--fg-dim); text-align: right; }
+    .row-gap { display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center; }
+    .full { grid-column: 1 / -1; }
+    #screen-img {
+        width: 100%;
+        image-rendering: pixelated;
+        background: #000;
+        border-radius: 3px;
+        display: block;
+    }
+    textarea.json-in { width: 100%; min-height: 4.5em; resize: vertical; }
+    .status-ok { color: var(--good); }
+    .status-bad { color: var(--bad); }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>dosbox-automation control</h1>
+    <div id="token-bar">
+        <input type="password" id="token" placeholder="API token (printed to the log at startup)">
+        <button id="connect">Connect</button>
+        <span id="token-status"></span>
+    </div>
+    <span id="status-pill" class="unknown">unknown</span>
+    <span id="program-name"></span>
+    <button id="btn-shutdown" class="danger">Shutdown</button>
+    <a href="./debugger.html" style="color:var(--accent); margin-left:auto;">Debugger &#8594;</a>
+</header>
+
+<main>
+    <div class="panel full">
+        <h2>
+            Screen
+            <label><input type="checkbox" id="live-toggle"> Live preview</label>
+        </h2>
+        <div class="panel-body">
+            <img id="screen-img" alt="live frame">
+            <div class="kv" id="frame-info" style="margin-top:0.5em;"></div>
+            <details style="margin-top:0.5em;">
+                <summary style="cursor:pointer;color:var(--fg-dim);">Text-mode screen</summary>
+                <pre class="out" id="screen-text"></pre>
+            </details>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Video capture</h2>
+        <div class="panel-body">
+            <div class="kv" id="capture-status"></div>
+            <div class="row-gap" style="margin-top:0.5em;">
+                <select id="capture-mode">
+                    <option value="raw">raw</option>
+                    <option value="rendered">rendered</option>
+                </select>
+                <button id="capture-start">Start</button>
+                <button id="capture-stop">Stop</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Input</h2>
+        <div class="panel-body">
+            <div class="add-form">
+                <input type="text" id="type-text" placeholder="text to type" style="flex:3;">
+                <button id="type-send">Type</button>
+            </div>
+            <p class="hint">Sent via /api/v1/input/type, paced by cps.</p>
+            <div class="add-form">
+                <span class="hint" style="flex:0 0 auto;">Mouse:</span>
+                <span id="mouse-pos" style="font-family:var(--mono);">?</span>
+                <input type="text" id="mouse-x" placeholder="x" size="4">
+                <input type="text" id="mouse-y" placeholder="y" size="4">
+                <button id="mouse-set">Set</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Recording &amp; replay</h2>
+        <div class="panel-body">
+            <div class="kv" id="record-status"></div>
+            <div class="row-gap" style="margin-top:0.5em;">
+                <button id="record-start">Start</button>
+                <button id="record-pause">Pause/resume</button>
+                <input type="text" id="record-name" placeholder="save as name" size="10">
+                <button id="record-stop">Stop</button>
+            </div>
+            <div class="kv" id="replay-status" style="margin-top:0.5em;"></div>
+            <button id="replay-cancel">Cancel replay</button>
+            <ul class="item-list" id="recordings" style="margin-top:0.5em;"></ul>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Drives &amp; mounting</h2>
+        <div class="panel-body">
+            <ul class="item-list" id="drives"></ul>
+            <div class="add-form">
+                <input type="text" id="mount-drive" placeholder="drive" size="2">
+                <input type="text" id="mount-path" placeholder="host path" style="flex:2;">
+                <label style="flex:0 0 auto;"><input type="checkbox" id="mount-ro"> ro</label>
+                <button id="mount-add">Mount dir</button>
+            </div>
+            <div class="add-form">
+                <input type="text" id="swap-drive" placeholder="drive" size="2">
+                <input type="text" id="swap-image" placeholder="image path" style="flex:2;">
+                <button id="swap-do">Swap image</button>
+            </div>
+            <p class="hint" id="mount-policy"></p>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Memory</h2>
+        <div class="panel-body">
+            <ul class="item-list" id="freezes"></ul>
+            <div class="add-form">
+                <input type="text" id="freeze-addr" placeholder="addr" size="6">
+                <input type="text" id="freeze-value" placeholder="value" size="6">
+                <select id="freeze-width">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                </select>
+                <button id="freeze-add">Freeze</button>
+            </div>
+            <div class="add-form">
+                <input type="text" id="mem-addr" placeholder="addr" size="6">
+                <input type="text" id="mem-len" placeholder="len" size="4" value="64">
+                <button id="mem-read">Read</button>
+            </div>
+            <pre class="out" id="mem-out"></pre>
+            <p class="hint">Pattern scan / snapshot-diff: use <a href="./api.html" style="color:var(--accent);">/api.html</a>.</p>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>CPU &amp; ports</h2>
+        <div class="panel-body">
+            <div class="kv" id="registers"></div>
+            <div class="add-form">
+                <select id="reg-name"></select>
+                <input type="text" id="reg-value" placeholder="value">
+                <button id="reg-write">Write</button>
+            </div>
+            <div class="add-form" style="margin-top:0.5em;">
+                <input type="text" id="port-num" placeholder="port" size="6">
+                <select id="port-width"><option value="1">byte</option><option value="2">word</option></select>
+                <input type="text" id="port-value" placeholder="write value (blank = read)">
+                <button id="port-go">Go</button>
+            </div>
+            <div class="out" id="port-out"></div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>DOS internals</h2>
+        <div class="panel-body">
+            <div class="kv" id="dos-status"></div>
+            <button id="dos-refresh">Refresh EMS/XMS/MCB</button>
+            <div class="out" id="dos-out"></div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Scripts</h2>
+        <div class="panel-body">
+            <textarea class="json-in" id="script-src" placeholder="-- Lua script source"></textarea>
+            <div class="row-gap" style="margin-top:0.5em;">
+                <input type="text" id="script-name" placeholder="name" size="10">
+                <button id="script-load">Load</button>
+                <button id="script-start">Start</button>
+                <button id="script-stop">Stop</button>
+            </div>
+            <div class="kv" id="script-status" style="margin-top:0.5em;"></div>
+            <div class="out" id="script-out"></div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Batch &amp; wait</h2>
+        <div class="panel-body">
+            <p class="hint">Raw JSON escape hatch for /api/v1/batch and /api/v1/wait.</p>
+            <textarea class="json-in" id="batch-in" placeholder='{"ops": []}'></textarea>
+            <button id="batch-go">POST batch</button>
+            <textarea class="json-in" id="wait-in" style="margin-top:0.5em;" placeholder='{"for": "frames", "count": 60}'></textarea>
+            <button id="wait-go">POST wait</button>
+            <div class="out" id="batch-wait-out"></div>
+        </div>
+    </div>
+</main>
+
+<script>
+'use strict';
+
+let token = '';
+let livePreview = false;
+let liveTimer = null;
+
+function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers, {
+        'Authorization': 'Bearer ' + token,
+    });
+    if (opts.body && typeof opts.body !== 'string') {
+        opts.body = JSON.stringify(opts.body);
+        opts.headers['Content-Type'] = 'application/json';
+    }
+    return fetch(path, opts).then(async (res) => {
+        const text = await res.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (e) { /* not json */ }
+        if (!res.ok) {
+            const msg = (data && data.error) ? data.error : ('HTTP ' + res.status);
+            throw new Error(msg);
+        }
+        return data;
+    });
+}
+
+function hex(n, digits) {
+    return '0x' + (n >>> 0).toString(16).padStart(digits || 4, '0');
+}
+
+function parseNum(s) {
+    s = (s || '').trim();
+    if (!s) return NaN;
+    return s.toLowerCase().startsWith('0x') ? parseInt(s, 16) : parseInt(s, 10);
+}
+
+function kv(el, pairs) {
+    el.innerHTML = '';
+    for (const [k, v] of pairs) {
+        const label = document.createElement('label');
+        label.textContent = k;
+        const span = document.createElement('span');
+        span.textContent = v;
+        el.appendChild(label);
+        el.appendChild(span);
+    }
+}
+
+function showError(err) {
+    console.error(err);
+    const status = document.getElementById('token-status');
+    status.className = 'err';
+    status.textContent = err.message || String(err);
+}
+
+function showOk() {
+    const status = document.getElementById('token-status');
+    status.className = 'ok';
+    status.textContent = 'connected';
+}
+
+// -- Session --
+
+async function refreshSession() {
+    const status = await api('/api/v1/status');
+    const pill = document.getElementById('status-pill');
+    pill.className = status.is_shell ? 'shell' : 'running';
+    pill.textContent = status.is_shell ? 'shell' : (status.is_booted ? 'running' : 'not booted');
+    document.getElementById('program-name').textContent = status.canonical_name || status.program || '';
+}
+
+document.getElementById('btn-shutdown').addEventListener('click', () => {
+    if (!confirm('Shut down the emulator? This cannot be undone.')) return;
+    api('/api/v1/control/shutdown', { method: 'POST' }).catch(showError);
+});
+
+// -- Screen --
+
+function refreshScreenImg() {
+    document.getElementById('screen-img').src =
+        '/api/v1/video/frame?format=jpeg&_=' + Date.now();
+}
+
+async function refreshFrameInfo() {
+    const info = await api('/api/v1/video/frame/info').catch(() => null);
+    if (!info) return;
+    kv(document.getElementById('frame-info'), [
+        ['size', info.width + 'x' + info.height],
+        ['mode', (info.video_mode && info.video_mode.graphics_standard) || (info.is_paletted ? 'paletted' : 'rgb')],
+    ]);
+}
+
+async function refreshScreenText() {
+    const t = await api('/api/v1/video/text').catch(() => null);
+    document.getElementById('screen-text').textContent = t ? (t.text || '') : '';
+}
+
+document.getElementById('live-toggle').addEventListener('change', (e) => {
+    livePreview = e.target.checked;
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    if (livePreview) {
+        refreshScreenImg();
+        liveTimer = setInterval(refreshScreenImg, 200);
+    }
+});
+
+// -- Video capture --
+
+async function refreshCapture() {
+    const s = await api('/api/v1/capture/video/status').catch(() => null);
+    if (!s) return;
+    kv(document.getElementById('capture-status'), [
+        ['capturing', s.capturing ? 'yes' : 'no'],
+        ['mode', s.mode],
+        ['frames', s.frames],
+        ['bytes', s.bytes_written],
+    ]);
+}
+
+document.getElementById('capture-start').addEventListener('click', () =>
+    api('/api/v1/capture/video/start', {
+        method: 'POST',
+        body: { mode: document.getElementById('capture-mode').value },
+    }).then(refreshCapture).catch(showError));
+document.getElementById('capture-stop').addEventListener('click', () =>
+    api('/api/v1/capture/video/stop', { method: 'POST' }).then(refreshCapture).catch(showError));
+
+// -- Input --
+
+document.getElementById('type-send').addEventListener('click', () => {
+    const text = document.getElementById('type-text').value;
+    if (!text) return;
+    api('/api/v1/input/type', { method: 'POST', body: { text } }).catch(showError);
+});
+
+async function refreshMouse() {
+    const m = await api('/api/v1/input/mouse').catch(() => null);
+    if (!m) return;
+    document.getElementById('mouse-pos').textContent = m.x + ',' + m.y;
+}
+
+document.getElementById('mouse-set').addEventListener('click', () => {
+    const x = parseNum(document.getElementById('mouse-x').value);
+    const y = parseNum(document.getElementById('mouse-y').value);
+    if (isNaN(x) || isNaN(y)) { showError(new Error('x and y required')); return; }
+    api('/api/v1/input/mouse', { method: 'POST', body: { x, y } })
+        .then(refreshMouse).catch(showError);
+});
+
+// -- Recording & replay --
+
+async function refreshRecording() {
+    const s = await api('/api/v1/input/record/status').catch(() => null);
+    if (s) {
+        kv(document.getElementById('record-status'), [
+            ['recording', s.recording ? (s.paused ? 'paused' : 'yes') : 'no'],
+            ['events', s.event_count],
+            ['duration_ms', s.duration_ms],
+        ]);
+    }
+    const r = await api('/api/v1/input/replay/status').catch(() => null);
+    if (r) {
+        kv(document.getElementById('replay-status'), [
+            ['replaying', r.active ? 'yes' : 'no'],
+            ['progress', r.dispatched + '/' + r.total],
+        ]);
+    }
+    const list = await api('/api/v1/input/recordings').catch(() => null);
+    const el = document.getElementById('recordings');
+    el.innerHTML = '';
+    if (!list || !list.recordings || !list.recordings.length) {
+        el.innerHTML = '<li class="empty">no saved recordings</li>';
+    } else {
+        for (const rec of list.recordings) {
+            const li = document.createElement('li');
+            const label = document.createElement('span');
+            label.textContent = rec.name + ' (' + rec.event_count + ' events, ' + rec.duration_ms + 'ms)';
+            const del = document.createElement('button');
+            del.className = 'del';
+            del.textContent = '×';
+            del.addEventListener('click', () =>
+                api('/api/v1/input/recordings/' + encodeURIComponent(rec.name), { method: 'DELETE' })
+                    .then(refreshRecording).catch(showError));
+            li.appendChild(label);
+            li.appendChild(del);
+            el.appendChild(li);
+        }
+    }
+}
+
+document.getElementById('record-start').addEventListener('click', () =>
+    api('/api/v1/input/record/start', { method: 'POST' }).then(refreshRecording).catch(showError));
+document.getElementById('record-pause').addEventListener('click', () =>
+    api('/api/v1/input/record/pause', { method: 'POST' }).then(refreshRecording).catch(showError));
+document.getElementById('record-stop').addEventListener('click', () => {
+    const name = document.getElementById('record-name').value.trim();
+    const qs = name ? ('?name=' + encodeURIComponent(name)) : '';
+    api('/api/v1/input/record/stop' + qs, { method: 'POST' }).then(refreshRecording).catch(showError);
+});
+document.getElementById('replay-cancel').addEventListener('click', () =>
+    api('/api/v1/input/replay', { method: 'DELETE' }).then(refreshRecording).catch(showError));
+
+// -- Drives & mounting --
+
+async function refreshDrives() {
+    const d = await api('/api/v1/drive').catch(() => null);
+    const el = document.getElementById('drives');
+    el.innerHTML = '';
+    if (d && d.drives) {
+        for (const drv of d.drives) {
+            const li = document.createElement('li');
+            li.textContent = drv.letter + ': ' +
+                (drv.mounted ? (drv.type + ' ' + (drv.info || '') + (drv.read_only ? ' (ro)' : '')) : 'empty');
+            el.appendChild(li);
+        }
+    }
+    const policy = await api('/api/v1/mount/policy').catch(() => null);
+    if (policy) {
+        document.getElementById('mount-policy').textContent =
+            (policy.locked ? 'mount locked. ' : '') +
+            'allowed bases: ' + (policy.allowed_bases.join(', ') || 'none') +
+            '; image roots: ' + (policy.allowed_image_roots.join(', ') || 'none');
+    }
+}
+
+document.getElementById('mount-add').addEventListener('click', () => {
+    const drive = document.getElementById('mount-drive').value.trim();
+    const path = document.getElementById('mount-path').value.trim();
+    const readonly = document.getElementById('mount-ro').checked;
+    if (!drive || !path) { showError(new Error('drive and path required')); return; }
+    api('/api/v1/drive/mount', { method: 'POST', body: { drive, path, readonly } })
+        .then(refreshDrives).catch(showError);
+});
+document.getElementById('swap-do').addEventListener('click', () => {
+    const drive = document.getElementById('swap-drive').value.trim();
+    const image = document.getElementById('swap-image').value.trim();
+    if (!drive || !image) { showError(new Error('drive and image required')); return; }
+    api('/api/v1/drive/swap', { method: 'POST', body: { drive, image } })
+        .then(refreshDrives).catch(showError);
+});
+
+// -- Memory --
+
+async function refreshFreezes() {
+    const f = await api('/api/v1/memory/freeze').catch(() => null);
+    const el = document.getElementById('freezes');
+    el.innerHTML = '';
+    if (!f || !f.freezes || !f.freezes.length) {
+        el.innerHTML = '<li class="empty">none</li>';
+        return;
+    }
+    for (const fr of f.freezes) {
+        const li = document.createElement('li');
+        const label = document.createElement('span');
+        label.textContent = hex(fr.address, 8) + ' = ' + hex(fr.value, fr.width * 2) + ' (w' + fr.width + ')';
+        const del = document.createElement('button');
+        del.className = 'del';
+        del.textContent = '×';
+        del.addEventListener('click', () =>
+            api('/api/v1/memory/freeze', { method: 'DELETE', body: { address: fr.address } })
+                .then(refreshFreezes).catch(showError));
+        li.appendChild(label);
+        li.appendChild(del);
+        el.appendChild(li);
+    }
+}
+
+document.getElementById('freeze-add').addEventListener('click', () => {
+    const address = parseNum(document.getElementById('freeze-addr').value);
+    const value = parseNum(document.getElementById('freeze-value').value);
+    const width = parseNum(document.getElementById('freeze-width').value);
+    if (isNaN(address) || isNaN(value)) { showError(new Error('addr and value required')); return; }
+    api('/api/v1/memory/freeze', { method: 'POST', body: { address, value, width } })
+        .then(refreshFreezes).catch(showError);
+});
+
+document.getElementById('mem-read').addEventListener('click', () => {
+    const addr = parseNum(document.getElementById('mem-addr').value);
+    const len = parseNum(document.getElementById('mem-len').value) || 64;
+    if (isNaN(addr)) { showError(new Error('addr required')); return; }
+    api(`/api/v1/memory/${addr}/${len}`, { headers: { 'Accept': 'application/json' } })
+        .then((data) => {
+            const bytes = atob(data.memory.data);
+            let out = '';
+            for (let i = 0; i < bytes.length; i += 16) {
+                const chunk = bytes.slice(i, i + 16);
+                const hexPart = Array.from(chunk).map(
+                    c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ');
+                const asciiPart = Array.from(chunk).map(
+                    c => (c.charCodeAt(0) >= 32 && c.charCodeAt(0) < 127) ? c : '.').join('');
+                out += hex(addr + i, 8) + '  ' + hexPart.padEnd(47) + '  ' + asciiPart + '\n';
+            }
+            document.getElementById('mem-out').textContent = out;
+        }).catch(showError);
+});
+
+// -- CPU & ports --
+
+const regOrder = ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'esp', 'ebp',
+                  'cs', 'ds', 'es', 'ss', 'fs', 'gs'];
+
+function initRegSelect() {
+    const sel = document.getElementById('reg-name');
+    sel.innerHTML = '';
+    for (const name of regOrder) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+    }
+}
+
+async function refreshCpu() {
+    const s = await api('/api/v1/cpu/state').catch(() => null);
+    if (!s) return;
+    const regs = s.registers;
+    kv(document.getElementById('registers'), regOrder
+        .filter(n => n in regs)
+        .map(n => [n, hex(regs[n], n.length <= 2 ? 4 : 8)]));
+}
+
+document.getElementById('reg-write').addEventListener('click', () => {
+    const register = document.getElementById('reg-name').value;
+    const value = parseNum(document.getElementById('reg-value').value);
+    if (isNaN(value)) { showError(new Error('value required')); return; }
+    api('/api/v1/cpu/register', { method: 'PUT', body: { register, value } })
+        .then(refreshCpu).catch(showError);
+});
+
+document.getElementById('port-go').addEventListener('click', () => {
+    const port = parseNum(document.getElementById('port-num').value);
+    const width = parseNum(document.getElementById('port-width').value);
+    const valueStr = document.getElementById('port-value').value.trim();
+    if (isNaN(port)) { showError(new Error('port required')); return; }
+    const out = document.getElementById('port-out');
+    if (valueStr === '') {
+        api(`/api/v1/io/port?port=${port}&width=${width}`)
+            .then(d => { out.textContent = hex(d.value, width * 2); })
+            .catch(showError);
+    } else {
+        const value = parseNum(valueStr);
+        api('/api/v1/io/port', { method: 'PUT', body: { port, width, value } })
+            .then(d => { out.textContent = 'wrote ' + hex(d.value, width * 2); })
+            .catch(showError);
+    }
+});
+
+// -- DOS internals --
+
+async function refreshDos() {
+    const [ems, xms] = await Promise.all([
+        api('/api/v1/dos/ems').catch(() => null),
+        api('/api/v1/dos/xms').catch(() => null),
+    ]);
+    kv(document.getElementById('dos-status'), [
+        ['EMS', ems ? (ems.enabled ? ems.freePages + '/' + ems.totalPages + ' pages free' : 'disabled') : '?'],
+        ['XMS', xms ? (xms.enabled ? xms.largestFreeKb + 'KB largest free' : 'disabled') : '?'],
+    ]);
+}
+
+document.getElementById('dos-refresh').addEventListener('click', () => {
+    refreshDos();
+    api('/api/v1/dos/internals').then((d) => {
+        const lines = (d.memoryMap || []).map(b =>
+            hex(b.segment, 4) + '  ' + String.fromCharCode(b.type) + '  psp:' + hex(b.pspSegment, 4) +
+            '  ' + b.sizeBytes + 'B  ' + (b.filename || ''));
+        document.getElementById('dos-out').textContent = lines.join('\n') +
+            (d.memoryMapTruncated ? '\n... truncated ...' : '');
+    }).catch(showError);
+});
+
+// -- Scripts --
+
+async function refreshScript() {
+    const s = await api('/api/v1/script/status').catch(() => null);
+    if (!s) return;
+    kv(document.getElementById('script-status'), [
+        ['state', s.state],
+        ['frame', s.frame],
+        ['name', s.name || ''],
+    ]);
+    document.getElementById('script-out').textContent = s.error || '';
+}
+
+document.getElementById('script-load').addEventListener('click', () => {
+    const src = document.getElementById('script-src').value;
+    const name = document.getElementById('script-name').value.trim();
+    const qs = name ? ('?name=' + encodeURIComponent(name)) : '';
+    api('/api/v1/script/load' + qs, { method: 'POST', body: src, headers: { 'Content-Type': 'text/plain' } })
+        .then(refreshScript).catch(showError);
+});
+document.getElementById('script-start').addEventListener('click', () =>
+    api('/api/v1/script/start', { method: 'POST' }).then(refreshScript).catch(showError));
+document.getElementById('script-stop').addEventListener('click', () =>
+    api('/api/v1/script/stop', { method: 'POST' }).then(refreshScript).catch(showError));
+
+// -- Batch & wait --
+
+document.getElementById('batch-go').addEventListener('click', () => {
+    let body;
+    try { body = JSON.parse(document.getElementById('batch-in').value || '{}'); }
+    catch (e) { showError(new Error('invalid JSON')); return; }
+    api('/api/v1/batch', { method: 'POST', body })
+        .then(d => { document.getElementById('batch-wait-out').textContent = JSON.stringify(d, null, 2); })
+        .catch(showError);
+});
+document.getElementById('wait-go').addEventListener('click', () => {
+    let body;
+    try { body = JSON.parse(document.getElementById('wait-in').value || '{}'); }
+    catch (e) { showError(new Error('invalid JSON')); return; }
+    api('/api/v1/wait', { method: 'POST', body })
+        .then(d => { document.getElementById('batch-wait-out').textContent = JSON.stringify(d, null, 2); })
+        .catch(showError);
+});
+
+// -- Refresh loop --
+
+async function refreshAll() {
+    if (!token) return;
+    try {
+        await refreshSession();
+        await Promise.all([
+            refreshFrameInfo(), refreshScreenText(), refreshCapture(),
+            refreshMouse(), refreshRecording(), refreshDrives(),
+            refreshFreezes(), refreshCpu(), refreshDos(), refreshScript(),
+        ]);
+        showOk();
+    } catch (err) {
+        showError(err);
+    }
+}
+
+document.getElementById('connect').addEventListener('click', () => {
+    token = document.getElementById('token').value.trim();
+    initRegSelect();
+    refreshAll();
+});
+
+setInterval(() => { if (token) refreshAll(); }, 3000);
+</script>
+</body>
+</html>
