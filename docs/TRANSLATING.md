@@ -104,7 +104,7 @@ always contains an empty English string (`msgid`); the translated string
 msgid ""
 msgstr ""
 "Project-Id-Version: dosbox-automation\n"
-"Report-Msgid-Bugs-To: https://github.com/dosbox-automation/dosbox-automation/issues\n"
+"Report-Msgid-Bugs-To: https://github.com/VorticonCmdr/dosbox-automation/issues\n"
 ...
 ```
 

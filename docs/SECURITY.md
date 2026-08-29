@@ -1,25 +1,29 @@
 # Security policy
 
+This repo is [VorticonCmdr](https://github.com/VorticonCmdr)'s fork of
+[dosbox-automation/dosbox-automation](https://github.com/dosbox-automation/dosbox-automation)
+(upstream). This policy covers this fork's own code (including the debugger
+REST/Lua area and both web UIs, which upstream doesn't have). For upstream
+dosbox-automation itself, report to upstream's own repo, not here.
+
 ## Supported versions
 
-The [`main` branch](https://github.com/dosbox-automation/dosbox-automation/tree/main)
-and the [latest release](https://github.com/dosbox-automation/dosbox-automation/releases)
-are supported with security updates.
+The [`main` branch](https://github.com/VorticonCmdr/dosbox-automation/tree/main)
+of this fork is supported with security updates. There is no tagged release
+yet.
 
 ## Reporting a vulnerability
 
-For issues that should not be public before a fix exists, mail
-<dosbox-automation-project@trinity2k.net>. You will get a human reply.
-
-For everything else, raise a
-[bug report](https://github.com/dosbox-automation/dosbox-automation/issues/new?template=bug_report.yml&title=Security%20issue:%20).
-We believe in open technical discourse about security; findings, analysis,
-and patches are welcome in public.
+Raise a
+[bug report](https://github.com/VorticonCmdr/dosbox-automation/issues/new?template=bug_report.yml&title=Security%20issue:%20)
+on this repo. We believe in open technical discourse about security; findings,
+analysis, and patches are welcome in public.
 
 ## Security model in short
 
-For further details, see the full description in the manual:
-<https://dosbox-automation.org/0.84-da3/automation/security/>.
+The mechanism below is inherited from upstream unchanged; upstream's own
+[security documentation](https://dosbox-automation.org/0.84-da3/automation/security/)
+describes it in more detail (that page does not cover this fork's additions).
 
 The REST API gives full control over the emulated machine, which makes the
 webserver an attack surface by design. The short version:

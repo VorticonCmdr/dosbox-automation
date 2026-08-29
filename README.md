@@ -6,9 +6,19 @@ A DOSBox variant for Linux and Windows with a local HTTP REST API for automated 
 
 Based on DOSBox Staging 0.84. Your existing DOSBox configurations will continue to work.
 
+This is [VorticonCmdr](https://github.com/VorticonCmdr)'s fork of
+[dosbox-automation/dosbox-automation](https://github.com/dosbox-automation/dosbox-automation)
+(upstream). It adds the headless debugger REST/Lua area, the web debugger
+(`/debugger.html`), and the web control panel (`/control.html`) on top of
+upstream's automation API; it does not carry upstream's mixer control
+support. Upstream's [release builds](https://github.com/dosbox-automation/dosbox-automation/releases)
+and [manual](https://www.dosbox-automation.org/) don't include any of this
+fork's additions.
+
 ## Quick start
 
-1. **Get a binary.** Either grab a [release build](https://github.com/dosbox-automation/dosbox-automation/releases), or [build from source](#build-from-source).
+1. **Build it.** This fork isn't published as a binary release yet —
+   [build from source](#build-from-source).
 
 2. **Enable the API.** It's off by default. Add to your config file (or pass on the command line):
 
@@ -103,15 +113,19 @@ every actual debug/memory/CPU call it makes still requires it, same as any other
 
 ## Security
 
-If you open a web server, you open an attack surface. dosbox-automation ships with bearer token authentication, host header validation, mount path restrictions, and localhost-only binding. See the [security documentation](https://www.dosbox-automation.org/0.84-da1/automation/security/) for details.
+If you open a web server, you open an attack surface. dosbox-automation ships with bearer token authentication, host header validation, mount path restrictions, and localhost-only binding. See [SECURITY.md](docs/SECURITY.md) for this fork's model and how to report an issue, or upstream's [security documentation](https://www.dosbox-automation.org/0.84-da1/automation/security/) for the base mechanism this fork inherits.
 
-## Project website
+## Upstream project website
 
-https://www.dosbox-automation.org/
+https://www.dosbox-automation.org/ is upstream's site (manual, downloads). It
+does not cover anything this fork adds.
 
 ## Downloads
 
-Release builds are available on [GitHub](https://github.com/dosbox-automation/dosbox-automation/releases).
+No binary releases are published for this fork yet — see
+[Build from source](#build-from-source). Upstream's [release
+builds](https://github.com/dosbox-automation/dosbox-automation/releases) are
+plain dosbox-automation, without the debugger API or either web UI.
 
 ## Build from source
 

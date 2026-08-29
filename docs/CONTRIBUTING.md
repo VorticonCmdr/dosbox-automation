@@ -1,5 +1,12 @@
 # Contributing to dosbox-automation
 
+This repo ([VorticonCmdr/dosbox-automation](https://github.com/VorticonCmdr/dosbox-automation))
+is a fork of upstream
+[dosbox-automation/dosbox-automation](https://github.com/dosbox-automation/dosbox-automation),
+adding the headless debugger REST/Lua area and both web UIs. The process
+below is this fork's own; issues, feature requests, and code changes for
+upstream's own codebase belong on upstream's repo instead.
+
 Thank you for your interest in contributing to dosbox-automation! There are many
 ways to participate, and we appreciate all of them.
 
@@ -79,8 +86,8 @@ a comment. This will help us decide where to focus development effort.
 Report bugs via our [bugtracker][issues]. Issues and requests sent via comments
 on social media or private messages will very likely be lost.
 
-[enhancement_label]: https://github.com/dosbox-automation/dosbox-automation/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement
-[issues]: https://github.com/dosbox-automation/dosbox-automation/issues
+[enhancement_label]: https://github.com/VorticonCmdr/dosbox-automation/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement
+[issues]: https://github.com/VorticonCmdr/dosbox-automation/issues
 
 
 ## Do something with dosbox-automation
@@ -93,7 +100,7 @@ on social media or private messages will very likely be lost.
   for everyone, who wants to play DOS games or uses it for automated usage, integration into launchers or
   other usage as an integration runtime for your own applications.
   
-  The current list of open issues is available [here](https://github.com/dosbox-automation/dosbox-automation/issues?q=is%3Aissue+is%3Aopen+label%3Abug).
+  The current list of open issues is available [here](https://github.com/VorticonCmdr/dosbox-automation/issues?q=is%3Aissue+is%3Aopen+label%3Abug).
 
 
 Code contributions, which improve dosbox-automation are welcome, but please read the section [Submitting code changes](#submitting-code-changes) first.
@@ -414,8 +421,9 @@ For an example of a commit that followed all of these rules, see commit
 ## Documentation
 
 The user manual and the website at [dosbox-automation.org](https://dosbox-automation.org)
-live in a separate project, not in this repository. This repository only
-carries developer-facing documentation as plain Markdown under `docs/`.
+are upstream's, live in a separate project, and don't cover anything this
+fork adds. This repository only carries developer-facing documentation as
+plain Markdown under `docs/`.
 
 If a code change alters user-visible behavior, a config setting, an API
 route, or a Lua function, say so in your PR description so the manual can
@@ -444,11 +452,12 @@ whether one did.
 
 The project name is "dosbox-automation", written exactly in that convention.
 
-Version numbering follows the upstream base version with a "-da" release
-suffix. Example: if the upstream base is 0.83 and the release number is 3,
-the version is `0.83-da3`.
+This repo is a fork of upstream dosbox-automation/dosbox-automation, which
+uses its own "-da" release suffix. This fork uses "-vc" instead, so its
+version strings are never mistaken for an upstream release. Example: if the
+base version is 0.84 and the release number is 1, the version is `0.84-vc1`.
 
-Full product name example: `dosbox-automation 0.83-da3`.
+Full product name example: `dosbox-automation 0.84-vc1`.
 
 
 ## Tools

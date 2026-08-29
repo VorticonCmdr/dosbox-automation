@@ -10,6 +10,12 @@ input recording/replay, frame capture, and programmatic emulator control. It als
 embeds a Lua scripting engine for install automation and testing. See README.md
 for the feature list.
 
+This repo is VorticonCmdr's fork of upstream
+[dosbox-automation/dosbox-automation](https://github.com/dosbox-automation/dosbox-automation),
+adding the headless debugger REST/Lua area and both web UIs
+(`/debugger.html`, `/control.html`). Don't assume upstream's docs, issue
+tracker, or release builds apply to this fork's own additions.
+
 Project rules live in `.claude/rules/` (code style, docs style, versioning,
 commits) and are mirrored in `docs/CONTRIBUTING.md`, which is also what external
 contributors and their LLM tooling read. Keep both in sync if either changes.
@@ -140,8 +146,9 @@ Scope section).
 
 ## Documentation
 
-The user manual and website live in a separate repository
-(dosbox-automation.org). This repo only carries developer docs under `docs/`.
+The user manual and website live in upstream's separate repository
+(dosbox-automation.org) and don't cover this fork's own additions. This repo
+only carries developer docs under `docs/`.
 If a change alters user-visible behavior, a config setting, an API route, or a
 Lua function, flag it in the PR description so the manual gets updated —
 config/API/Lua tables in this file (if added later) and the manual's setting
@@ -153,5 +160,8 @@ See `.claude/rules/commits.md` and `.claude/rules/versioning-guide.md`:
 commits are unprefixed, terse, natural language, one logical change each
 (formatting/doc changes that accompany a fix stay in the same commit); no
 Co-Authored-By trailers; commits require explicit human approval before being
-made. Version format is `<upstream-base>-da<release-number>`, e.g.
-`0.84-da3`; full product name is `dosbox-automation 0.84-da3`.
+made. Version format is `<upstream-base>-vc<release-number>`, e.g.
+`0.84-vc1`; full product name is `dosbox-automation 0.84-vc1`. The `vc`
+suffix (this fork's own scheme) is deliberately distinct from upstream's own
+`da<release-number>` numbering, so a version string can't be mistaken for
+an upstream release.

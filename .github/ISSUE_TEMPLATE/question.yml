@@ -19,7 +19,7 @@ body:
     attributes:
       label: Are you using the latest dosbox-automation version?
       description: |
-        Look up the latest release version on the [releases page](https://github.com/dosbox-automation/dosbox-automation/releases).
+        Look up the latest release version on the [releases page](https://github.com/VorticonCmdr/dosbox-automation/releases).
         To check your version, run `dosbox --version` or execute the `VER` command inside dosbox-automation. If the version is reported as `git` (meaning you compiled it yourself), put the result of `git describe` in the version field below.
       options:
         - label: I have checked and I'm using the latest release.
@@ -90,7 +90,7 @@ body:
     id: terms
     attributes:
       label: Code of conduct and contributing guidelines
-      description: By submitting this issue, you agree to follow our [contributing guidelines](https://github.com/dosbox-automation/dosbox-automation/blob/master/docs/CONTRIBUTING.md) and [code of conduct](https://github.com/dosbox-automation/dosbox-automation/blob/master/CODE_OF_CONDUCT.md).
+      description: By submitting this issue, you agree to follow our [contributing guidelines](https://github.com/VorticonCmdr/dosbox-automation/blob/main/docs/CONTRIBUTING.md) and [code of conduct](https://github.com/VorticonCmdr/dosbox-automation/blob/main/docs/CODE_OF_CONDUCT.md).
       options:
         - label: Yes, I agree.
           required: true
