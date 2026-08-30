@@ -54,6 +54,12 @@ Project-specific settings this fork adds on top of stock DOSBox Staging configur
 video, mouse, etc.). Every setting also has a `SetHelp()` description in the generated config
 file.
 
+The config file is created on first run (or with `dosbox -wc`) in the platform's standard config
+location — `~/.config/dosbox-automation/dosbox-automation.conf` on Linux,
+`~/Library/Preferences/dosbox-automation/dosbox-automation.conf` on macOS, and
+`%LOCALAPPDATA%\dosbox-automation\dosbox-automation.conf` on Windows. `dosbox --printconf` prints
+the exact path for your machine without creating it.
+
 ### `[webserver]`
 
 | Setting | Default | Description |
