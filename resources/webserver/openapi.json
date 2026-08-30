@@ -3,7 +3,7 @@
   "info": {
     "title": "dosbox-automation control API",
     "version": "0.84-vc1",
-    "description": "REST API for programmatic control of dosbox-automation. Automate installations, drive games, capture frames, and record or replay input.\n\nThe API is intended for local automation. By default the server binds to 127.0.0.1 and is not designed to be exposed to untrusted networks. Every endpoint under /api/v1 requires a bearer token; the documentation assets (this page, the landing page, openapi.json) are served without a token so the docs are browsable. Use the Authorize button to paste your token before running a request.\n\nAll endpoints read or write internal state atomically between emulated CPU steps. They never run during native DOS functions or interrupts, so the internal data structures are always consistent.",
+    "description": "REST API for programmatic control of dosbox-automation. Automate installations, drive games, capture frames, and record or replay input.\n\nThe API is intended for local automation. By default the server binds to 127.0.0.1 and is not designed to be exposed to untrusted networks. Every endpoint under /api/v1 requires a bearer token by default; the documentation assets (this page, the landing page, openapi.json) are served without a token so the docs are browsable. Use the Authorize button to paste your token before running a request. Authentication can be disabled entirely for local development (webserver_require_auth=false, loopback binds only) - see the security scheme description.\n\nAll endpoints read or write internal state atomically between emulated CPU steps. They never run during native DOS functions or interrupts, so the internal data structures are always consistent.",
     "license": {
       "name": "GPL-2.0-or-later"
     }
@@ -4131,7 +4131,7 @@
           "Status"
         ],
         "summary": "Pre-auth protocol handshake",
-        "description": "The only route that answers without a bearer token (see the security scheme description). Lets a bridge check version and protocol compatibility before it has - or can even obtain - a token. Returns exactly these three fields: no pid, uptime, features, or anything else that would need per-instance state.",
+        "description": "The only route that always answers without a bearer token, regardless of webserver_require_auth (see the security scheme description). Lets a bridge check version and protocol compatibility before it has - or can even obtain - a token. Returns exactly these three fields: no pid, uptime, features, or anything else that would need per-instance state.",
         "operationId": "hello",
         "security": [],
         "responses": {
@@ -4176,7 +4176,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "The API token, written to the token file at startup by default (see webserver_token_file), or supplied via DOSBOX_API_TOKEN. The log only ever gets a short preview. Send it as `Authorization: Bearer <token>`."
+        "description": "The API token, written to the token file at startup by default (see webserver_token_file), or supplied via DOSBOX_API_TOKEN. The log only ever gets a short preview. Send it as `Authorization: Bearer <token>`. The server can be configured to skip this check entirely (webserver_require_auth=false, loopback binds only) - if so, every route behaves like /api/v1/hello and this header is ignored."
       }
     },
     "parameters": {

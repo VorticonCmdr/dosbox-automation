@@ -57,6 +57,7 @@ CATEGORIES = {
     "mount": ["test_mount_policy.py"],
     "traversal": ["test_traversal_contract.py"],
     "token": ["test_token_provisioning.py"],
+    "auth": ["test_webserver_require_auth.py"],
     "openapi": ["test_openapi_docs.py"],
     "screen": ["test_screen_text_route.py", "test_screen_text_machines.py"],
     "graphics": ["test_graphics_modes.py"],

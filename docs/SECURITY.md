@@ -24,15 +24,21 @@ analysis, and patches are welcome in public.
 Most of the mechanism below is inherited from upstream unchanged; upstream's
 own [security documentation](https://dosbox-automation.org/0.84-da3/automation/security/)
 describes it in more detail (that page does not cover this fork's own
-addition: a stricter `webserver_allow_remote` check than upstream's - it now
-rejects any non-loopback bind address, not just the two wildcard forms).
+additions: the auth opt-out below, and a stricter `webserver_allow_remote`
+check than upstream's - it now rejects any non-loopback bind address, not
+just the two wildcard forms).
 
 The REST API gives full control over the emulated machine, which makes the
 webserver an attack surface by design. The short version:
 
-- Every API request needs a bearer token (64-char random hex, fresh per
-  start, never fully logged, constant-time comparison). No default
-  credential, no way to disable authentication.
+- Every API request needs a bearer token by default (64-char random hex,
+  fresh per start, never fully logged, constant-time comparison). No default
+  credential. Authentication can be turned off entirely
+  (`webserver_require_auth = false`) for local development - this is this
+  fork's own addition, not something upstream has. The server refuses to
+  start with it off unless bound to a loopback address
+  (`127.0.0.1`/`::1`/`localhost`) with `webserver_allow_remote = false`, and
+  the token file is not served over HTTP while auth is off.
 - The webserver binds to localhost only by default; any `webserver_bind_address`
   other than `127.0.0.1`, `::1`, or `localhost` needs `webserver_allow_remote=true`
   (stricter than upstream, which only special-cases `0.0.0.0`/`::`). Host

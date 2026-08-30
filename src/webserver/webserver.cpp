@@ -732,7 +732,8 @@ static std::string extract_bearer_token(const std::string& auth_header)
 
 static void setup_security(const std::string& addr, int port,
                            const std::string& api_token,
-                           const std::optional<std::set<TokenScope>>& granted_scopes)
+                           const std::optional<std::set<TokenScope>>& granted_scopes,
+                           bool require_auth)
 {
 	std::set<std::string> allowed_hosts;
 
@@ -762,8 +763,9 @@ static void setup_security(const std::string& addr, int port,
 
 	server.set_pre_routing_handler([allowed_hosts = std::move(allowed_hosts),
 	                                api_token,
-	                                granted_scopes](const httplib::Request& req,
-	                                                httplib::Response& res) {
+	                                granted_scopes,
+	                                require_auth](const httplib::Request& req,
+	                                              httplib::Response& res) {
 		const auto host = strip_port(req.get_header_value("Host"));
 
 		if (allowed_hosts.find(host) == allowed_hosts.end()) {
@@ -778,22 +780,25 @@ static void setup_security(const std::string& addr, int port,
 
 		// Documentation assets and the GET /api/v1/hello handshake are
 		// browsable/callable without a token (Host check still
-		// applies). Every other /api/v1 endpoint is not.
+		// applies). Every other /api/v1 endpoint is not, unless
+		// webserver_require_auth turned the token check off entirely.
 		if (IsPublicDocPath(req.method, req.path) ||
 		    IsPublicApiPath(req.method, req.path)) {
 			return httplib::Server::HandlerResponse::Unhandled;
 		}
 
-		const auto token = extract_bearer_token(
-		        req.get_header_value("Authorization"));
+		if (require_auth) {
+			const auto token = extract_bearer_token(
+			        req.get_header_value("Authorization"));
 
-		if (!ConstantTimeEquals(token, api_token)) {
-			LOG_WARNING("WEBSERVER: Rejected request with invalid token");
-			send_error(res,
-			           httplib::StatusCode::Unauthorized_401,
-			           "Unauthorized",
-			           "unauthorized");
-			return httplib::Server::HandlerResponse::Handled;
+			if (!ConstantTimeEquals(token, api_token)) {
+				LOG_WARNING("WEBSERVER: Rejected request with invalid token");
+				send_error(res,
+				           httplib::StatusCode::Unauthorized_401,
+				           "Unauthorized",
+				           "unauthorized");
+				return httplib::Server::HandlerResponse::Handled;
+			}
 		}
 
 		// webserver_token_scopes (4.7): unset (nullopt) means no
@@ -840,7 +845,7 @@ static void setup_security(const std::string& addr, int port,
 
 static void run(const std::string addr, const int port,
                 const std::string resource_home, const bool use_token_file,
-                const std::string token_scopes_setting)
+                const std::string token_scopes_setting, const bool require_auth)
 {
 	const auto config_home = (get_config_dir() / DefaultWebserverDir).string();
 	const auto granted_scopes = ParseTokenScopes(token_scopes_setting);
@@ -888,11 +893,17 @@ static void run(const std::string addr, const int port,
 	                .count();
 	const auto start_steady = std::chrono::steady_clock::now();
 
-	server.set_mount_point("/", config_home);
+	// The config directory (and therefore the token file) is only safe
+	// to serve statically when the token check it's protected by is
+	// still in effect - see IsPublicDocPath's comment on why that
+	// exact-match allowlist deliberately never covers this path.
+	if (require_auth) {
+		server.set_mount_point("/", config_home);
+	}
 	server.set_mount_point("/", resource_home);
 
 	setup_api_handlers();
-	setup_security(addr, port, api_token, granted_scopes);
+	setup_security(addr, port, api_token, granted_scopes, require_auth);
 
 	server.set_exception_handler(error_handler);
 
@@ -957,7 +968,8 @@ static void init_config_settings(SectionProp& section)
 	        "An API token is generated at startup and written to a token file\n"
 	        "by default (see webserver_token_file); only a short preview is\n"
 	        "printed to the log output. All API requests require\n"
-	        "Authorization: Bearer <token>.");
+	        "Authorization: Bearer <token> unless webserver_require_auth is\n"
+	        "set to false.");
 
 	auto bind_ip = section.AddString("webserver_bind_address",
 	                                 OnlyAtStart,
@@ -976,6 +988,17 @@ static void init_config_settings(SectionProp& section)
 	        "Allow binding to non-localhost addresses (0.0.0.0 or ::). This exposes\n"
 	        "the full API to the network. Do not enable unless you understand the\n"
 	        "security implications.");
+
+	auto require_auth = section.AddBool("webserver_require_auth", OnlyAtStart, true);
+	require_auth->SetHelp(
+	        "Require a bearer token on every API request (enabled by default).\n"
+	        "Set to false to disable authentication entirely, for local\n"
+	        "development only: the server refuses to start with this off unless\n"
+	        "bound to a loopback address (127.0.0.1, ::1, or localhost) with\n"
+	        "webserver_allow_remote=false. The token is still generated and\n"
+	        "written to the token file as usual, so existing tools keep working\n"
+	        "unmodified - the server just stops checking it, and the token file\n"
+	        "is no longer served over HTTP while this is off.");
 
 	auto token_file = section.AddBool("webserver_token_file", OnlyAtStart, true);
 	token_file->SetHelp(
@@ -1067,6 +1090,24 @@ void WEBSERVER_Init()
 			        addr.c_str());
 		}
 
+		const auto require_auth = section->GetBool("webserver_require_auth");
+
+		if (!require_auth &&
+		    (!Webserver::IsLoopbackBindAddress(addr) || allow_remote)) {
+			LOG_WARNING(
+			        "WEBSERVER: Refusing to disable authentication "
+			        "(webserver_require_auth=false) unless bound to a "
+			        "loopback address with webserver_allow_remote=false");
+			return;
+		}
+
+		if (!require_auth) {
+			LOG_WARNING(
+			        "WEBSERVER: Authentication is DISABLED "
+			        "(webserver_require_auth=false) - every request is "
+			        "trusted");
+		}
+
 		is_webserver_enabled = true;
 
 		OSD::OsdManager::Instance().SetEnabled(
@@ -1088,7 +1129,8 @@ void WEBSERVER_Init()
 		                   port,
 		                   resource_home,
 		                   use_token_file,
-		                   token_scopes);
+		                   token_scopes,
+		                   require_auth);
 
 		thread.detach();
 	}

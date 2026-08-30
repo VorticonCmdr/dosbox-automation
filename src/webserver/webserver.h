@@ -123,8 +123,9 @@ bool IsPublicApiPath(const std::string& method, const std::string& path);
 // True when addr is one of the fixed loopback forms this server
 // recognizes as "definitely local" - exact match only, same discipline
 // as IsPublicDocPath/IsPublicApiPath above, so a LAN address or a
-// hostname that merely happens to resolve locally never counts. Gates
-// webserver_allow_remote: binding anywhere else needs it.
+// hostname that merely happens to resolve locally never counts. Used to
+// gate webserver_allow_remote (binding anywhere else needs it) and
+// webserver_require_auth (disabling the token check needs it too).
 bool IsLoopbackBindAddress(const std::string& addr);
 
 // Every (method, path) the server actually registers under /api/v1,

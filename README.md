@@ -62,6 +62,7 @@ file.
 | `webserver_bind_address` | `127.0.0.1` | IP to bind to. Binding to anything other than `127.0.0.1`, `::1`, or `localhost` also requires `webserver_allow_remote`. |
 | `webserver_port` | `8386` | TCP port. |
 | `webserver_allow_remote` | `false` | Allow binding to a non-localhost address, exposing the API to the network. |
+| `webserver_require_auth` | `true` | Require a bearer token on every request. Set `false` to disable authentication for local development only — refuses to start unless bound to a loopback address with `webserver_allow_remote=false`. |
 | `webserver_token_file` | `true` | Write the full bearer token to a `0600` file in the config dir (removed on clean shutdown). Set `false` to rely on the `DOSBOX_API_TOKEN` environment variable instead. |
 | `webserver_token_scopes` | *(unrestricted)* | Comma-separated scope list to restrict what the token can do: `read`, `write`, `input`, `script`, `media`, `debug`, `control`. Also gates what a running Lua script may do. |
 | `webserver_osd` | `true` | Show on-screen indicators while automation is driving the machine (script running, recording, replay, injected input). |
@@ -113,7 +114,7 @@ every actual debug/memory/CPU call it makes still requires it, same as any other
 
 ## Security
 
-If you open a web server, you open an attack surface. dosbox-automation ships with bearer token authentication, host header validation, mount path restrictions, and localhost-only binding. See [SECURITY.md](docs/SECURITY.md) for this fork's model and how to report an issue, or upstream's [security documentation](https://www.dosbox-automation.org/0.84-da1/automation/security/) for the base mechanism this fork inherits.
+If you open a web server, you open an attack surface. dosbox-automation ships with bearer token authentication, host header validation, mount path restrictions, and localhost-only binding — authentication itself can be turned off for local development (`webserver_require_auth`, loopback binds only). See [SECURITY.md](docs/SECURITY.md) for this fork's model and how to report an issue, or upstream's [security documentation](https://www.dosbox-automation.org/0.84-da1/automation/security/) for the base mechanism this fork inherits.
 
 ## Upstream project website
 

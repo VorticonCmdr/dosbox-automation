@@ -255,6 +255,7 @@
 let token = '';
 let lastStopId = 0;
 let waiting = false;
+let connectAttempted = false;
 
 function api(path, opts) {
     opts = opts || {};
@@ -431,7 +432,7 @@ function showError(err) {
 }
 
 async function refreshAll() {
-    if (!token) return;
+    if (!connectAttempted) return;
     try {
         const status = await api('/api/v1/debug/status');
         lastStopId = status.stop.stop_id;
@@ -468,7 +469,7 @@ async function refreshAll() {
 }
 
 async function longPoll() {
-    if (!token || waiting) return;
+    if (!connectAttempted || waiting) return;
     waiting = true;
     try {
         const res = await api(`/api/v1/debug/wait?since_stop_id=${lastStopId}&timeout_ms=10000`);
@@ -477,12 +478,13 @@ async function longPoll() {
         // Timeouts and transient errors are expected while idle - just retry.
     } finally {
         waiting = false;
-        if (token) setTimeout(longPoll, 200);
+        if (connectAttempted) setTimeout(longPoll, 200);
     }
 }
 
 document.getElementById('connect').addEventListener('click', () => {
     token = document.getElementById('token').value.trim();
+    connectAttempted = true;
     refreshAll().then(longPoll);
 });
 

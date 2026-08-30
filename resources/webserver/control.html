@@ -431,6 +431,7 @@
 'use strict';
 
 let token = '';
+let connectAttempted = false;
 let livePreview = false;
 let liveTimer = null;
 
@@ -963,7 +964,7 @@ document.getElementById('wait-go').addEventListener('click', () => {
 // -- Refresh loop --
 
 async function refreshAll() {
-    if (!token) return;
+    if (!connectAttempted) return;
     try {
         await refreshSession();
         await Promise.all([
@@ -979,6 +980,7 @@ async function refreshAll() {
 
 document.getElementById('connect').addEventListener('click', () => {
     token = document.getElementById('token').value.trim();
+    connectAttempted = true;
     initRegSelect();
     initDriveSelects();
     refreshAll();
@@ -986,7 +988,7 @@ document.getElementById('connect').addEventListener('click', () => {
     loadDirBrowser(null);
 });
 
-setInterval(() => { if (token) refreshAll(); }, 3000);
+setInterval(() => { if (connectAttempted) refreshAll(); }, 3000);
 </script>
 </body>
 </html>
