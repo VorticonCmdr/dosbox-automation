@@ -15,6 +15,7 @@
 using Webserver::ConstantTimeEquals;
 using Webserver::ControlHandlers;
 using Webserver::EngineName;
+using Webserver::IsLoopbackBindAddress;
 using Webserver::IsPublicApiPath;
 using Webserver::IsPublicDocPath;
 using Webserver::McpProtocol;
@@ -222,6 +223,42 @@ TEST(WebserverHello, ReportsExactlyNameVersionAndProtocol)
 	// Exactly these three fields - no pid, uptime, or anything else that
 	// would need per-instance state or a Bridge crossing.
 	EXPECT_EQ(j.size(), 3u);
+}
+
+// -- Loopback bind-address allowlist (webserver_allow_remote /
+// webserver_require_auth gating) --
+
+TEST(WebserverBindAddress, AllowsRecognizedLoopbackForms)
+{
+	EXPECT_TRUE(IsLoopbackBindAddress("127.0.0.1"));
+	EXPECT_TRUE(IsLoopbackBindAddress("::1"));
+	EXPECT_TRUE(IsLoopbackBindAddress("localhost"));
+}
+
+TEST(WebserverBindAddress, RejectsWildcardAddresses)
+{
+	EXPECT_FALSE(IsLoopbackBindAddress("0.0.0.0"));
+	EXPECT_FALSE(IsLoopbackBindAddress("::"));
+}
+
+TEST(WebserverBindAddress, RejectsNonLoopbackAddresses)
+{
+	// A LAN address or an off-box hostname must never be treated as
+	// loopback just because it isn't one of the two wildcard forms.
+	EXPECT_FALSE(IsLoopbackBindAddress("192.168.1.50"));
+	EXPECT_FALSE(IsLoopbackBindAddress("10.0.0.5"));
+	EXPECT_FALSE(IsLoopbackBindAddress("example.com"));
+	EXPECT_FALSE(IsLoopbackBindAddress(""));
+}
+
+TEST(WebserverBindAddress, RejectsTrickyVariants)
+{
+	// Exact match only, same discipline as IsPublicDocPath/IsPublicApiPath.
+	EXPECT_FALSE(IsLoopbackBindAddress("LOCALHOST"));
+	EXPECT_FALSE(IsLoopbackBindAddress("127.0.0.1 "));
+	EXPECT_FALSE(IsLoopbackBindAddress(" 127.0.0.1"));
+	EXPECT_FALSE(IsLoopbackBindAddress("127.0.0.2"));
+	EXPECT_FALSE(IsLoopbackBindAddress("[::1]"));
 }
 
 } // namespace

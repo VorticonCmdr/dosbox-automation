@@ -197,6 +197,11 @@ bool IsPublicApiPath(const std::string& method, const std::string& path)
 	return path == "/api/v1/hello";
 }
 
+bool IsLoopbackBindAddress(const std::string& addr)
+{
+	return addr == "127.0.0.1" || addr == "::1" || addr == "localhost";
+}
+
 static httplib::Server server;
 
 enum class HttpMethod { Get, Post, Put, Delete };
@@ -747,6 +752,13 @@ static void setup_security(const std::string& addr, int port,
 		add("localhost");
 		add("[::1]");
 	}
+	// Binding to "localhost" itself resolves to either loopback family
+	// depending on the platform/getaddrinfo order; accept a Host header
+	// naming the other family too, same generosity as the two cases above.
+	if (addr == "localhost") {
+		add("127.0.0.1");
+		add("[::1]");
+	}
 
 	server.set_pre_routing_handler([allowed_hosts = std::move(allowed_hosts),
 	                                api_token,
@@ -952,7 +964,8 @@ static void init_config_settings(SectionProp& section)
 	                                 "127.0.0.1");
 	bind_ip->SetHelp(
 	        "Bind to the given IP address. By default only local connections are\n"
-	        "allowed. Binding to 0.0.0.0 or :: requires webserver_allow_remote=true.");
+	        "allowed. Binding to anything other than 127.0.0.1, ::1, or localhost\n"
+	        "requires webserver_allow_remote=true.");
 
 	auto bind_port = section.AddInt("webserver_port", OnlyAtStart, 8386);
 	bind_port->SetMinMax(1, 0xFFFF);
@@ -1029,11 +1042,6 @@ static void init_config_settings(SectionProp& section)
 
 static bool is_webserver_enabled = false;
 
-static bool is_remote_address(const std::string& addr)
-{
-	return addr == "0.0.0.0" || addr == "::";
-}
-
 void WEBSERVER_Init()
 {
 	MountPolicy::InitPolicyConfig(get_primary_config_path());
@@ -1042,9 +1050,9 @@ void WEBSERVER_Init()
 
 	if (section->GetBool("webserver_enabled")) {
 		const auto addr = section->GetString("webserver_bind_address");
+		const auto allow_remote = section->GetBool("webserver_allow_remote");
 
-		if (is_remote_address(addr) &&
-		    !section->GetBool("webserver_allow_remote")) {
+		if (!Webserver::IsLoopbackBindAddress(addr) && !allow_remote) {
 			LOG_WARNING(
 			        "WEBSERVER: Refusing to bind to %s without "
 			        "webserver_allow_remote=true",
@@ -1052,7 +1060,7 @@ void WEBSERVER_Init()
 			return;
 		}
 
-		if (is_remote_address(addr)) {
+		if (!Webserver::IsLoopbackBindAddress(addr)) {
 			LOG_WARNING(
 			        "WEBSERVER: Binding to %s — API is exposed "
 			        "to the network",

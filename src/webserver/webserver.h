@@ -120,6 +120,13 @@ bool IsPublicDocPath(const std::string& method, const std::string& path);
 // pre-routing handler still runs before either predicate is consulted.
 bool IsPublicApiPath(const std::string& method, const std::string& path);
 
+// True when addr is one of the fixed loopback forms this server
+// recognizes as "definitely local" - exact match only, same discipline
+// as IsPublicDocPath/IsPublicApiPath above, so a LAN address or a
+// hostname that merely happens to resolve locally never counts. Gates
+// webserver_allow_remote: binding anywhere else needs it.
+bool IsLoopbackBindAddress(const std::string& addr);
+
 // Every (method, path) the server actually registers under /api/v1,
 // including GET /api/v1/dosbox/info. Exposed for testing: a test walks
 // this against resources/webserver/openapi.json so the spec can't drift

@@ -59,7 +59,7 @@ file.
 | Setting | Default | Description |
 |---|---|---|
 | `webserver_enabled` | `false` | Enable the HTTP REST API. |
-| `webserver_bind_address` | `127.0.0.1` | IP to bind to. Binding to `0.0.0.0`/`::` also requires `webserver_allow_remote`. |
+| `webserver_bind_address` | `127.0.0.1` | IP to bind to. Binding to anything other than `127.0.0.1`, `::1`, or `localhost` also requires `webserver_allow_remote`. |
 | `webserver_port` | `8386` | TCP port. |
 | `webserver_allow_remote` | `false` | Allow binding to a non-localhost address, exposing the API to the network. |
 | `webserver_token_file` | `true` | Write the full bearer token to a `0600` file in the config dir (removed on clean shutdown). Set `false` to rely on the `DOSBOX_API_TOKEN` environment variable instead. |
