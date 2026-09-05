@@ -753,6 +753,16 @@ CBreakpoint* CBreakpoint::AddMemBreakpoint(uint16_t seg, uint32_t off,
 	bp->SetIgnoreCount(ignore_count);
 	bp->SetCondition(condition);
 	bp->SetType(BKPNT_MEMORY);
+	// Seed the watched byte with whatever is there now. CheckBreakpoint
+	// fires on "the byte differs from the last value seen", so a watchpoint
+	// left at the constructor's 0 reports a spurious hit the first time it
+	// is checked on any address whose byte is already non-zero. An address
+	// that cannot be read stays at 0 and is handled by CheckBreakpoint's
+	// own read check rather than guessed at here.
+	uint8_t current_value = 0;
+	if (!mem_readb_checked(GetAddress(seg, off), &current_value)) {
+		bp->SetValue(current_value);
+	}
 	BPoints.push_front(bp);
 	return bp;
 }
@@ -881,8 +891,12 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 	}
 
 	// Search matching breakpoint
+	// idx advances with the iterator rather than at the end of the body:
+	// the memory branch below skips breakpoints it cannot evaluate, and a
+	// body-tail increment would silently desync idx from the list position
+	// every reported breakpoint index is built from.
 	uint16_t idx = 0;
-	for (auto i = BPoints.begin(); i != BPoints.end(); ++i) {
+	for (auto i = BPoints.begin(); i != BPoints.end(); ++i, ++idx) {
 		auto bp = (*i);
 
 		if ((bp->GetType() == BKPNT_PHYSICAL) && bp->IsActive() &&
@@ -921,16 +935,16 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 				if (bp->GetType() == BKPNT_MEMORY_PROT) {
 					// Check if pmode is active
 					if (!cpu.pmode) {
-						return false;
+						continue;
 					}
 					// Check if descriptor is valid
 					Descriptor desc;
 					if (!cpu.gdt.GetDescriptor(bp->GetSegment(),
 					                           desc)) {
-						return false;
+						continue;
 					}
 					if (desc.GetLimit() == 0) {
-						return false;
+						continue;
 					}
 				}
 
@@ -943,7 +957,7 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 				}
 				uint8_t value = 0;
 				if (mem_readb_checked(address, &value)) {
-					return false;
+					continue;
 				}
 				if (bp->GetValue() != value) {
 					// Yup, memory value changed
@@ -961,6 +975,15 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 						pending_breakpoint_hit = ToDebugStopBreakpoint(
 						        ToDebugBreakpointInfo(bp, idx));
 					}
+					// Snapshot above, delete below, the same ordering the physical
+					// branch documents: a once-only stop record must not be built
+					// from freed memory. No Activate(false) to match that branch
+					// either - a memory breakpoint plants nothing in guest memory,
+					// so there is nothing to undo.
+					if (bp->GetOnce()) {
+						BPoints.erase(i);
+						delete bp;
+					}
 					return true;
 				}
 			} else if (bp->GetType() == BKPNT_MEMORY_READ) {
@@ -975,12 +998,20 @@ bool CBreakpoint::CheckBreakpoint(Bitu seg, Bitu off)
 						pending_breakpoint_hit = ToDebugStopBreakpoint(
 						        ToDebugBreakpointInfo(bp, idx));
 					}
+					// Snapshot above, delete below, the same ordering the physical
+					// branch documents: a once-only stop record must not be built
+					// from freed memory. No Activate(false) to match that branch
+					// either - a memory breakpoint plants nothing in guest memory,
+					// so there is nothing to undo.
+					if (bp->GetOnce()) {
+						BPoints.erase(i);
+						delete bp;
+					}
 					return true;
 				}
 			}
 		}
 #endif
-		++idx;
 	}
 	return false;
 }
