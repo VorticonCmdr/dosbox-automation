@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5 assessed; 5.4 and 5.5 done.**
 
 ---
 
@@ -1231,6 +1231,431 @@ Added `Webserver::SetGrantedTokenScopes`/`ScopeAllowed` (`webserver.h`/`.cpp`): 
 **Live-verified against a real running `dosbox` instance**, isolated `HOME`, dummy SDL drivers, `webserver_token_scopes=script,read,input`: loaded and started a `dosbox.mem_read_byte(0,0)`-only script - `script/status` reports `state: "completed"` with the read value in `output`. Loaded and started a `dosbox.mem_write(0,0,"x")` script - `script/status` reports `state: "error"`, `error: "[string \"unnamed\"]:1: mem_write: token lacks the 'write' scope"`. The identical `mem_write` script against a second instance with no `webserver_token_scopes` set completes normally - the default is unaffected end to end, engine-wide, not just at the REST layer. Setting help text and `PROTOCOL.md` updated to match: both now say a running script is held to the same grant as its REST equivalents, not that scoping "cannot" cover it.
 
 Not run through the Workflow tool, but reviewed by the advisor before both the initial ship and this follow-up - and it earned its keep each time, unlike several earlier items in this doc where it was a formality. Before the first ship it caught the `HEAD`-request regression (fixed, with a live before/after and a regression test) and the Lua gap itself, though the first response to that finding was to document rather than close it; asked again after reading that response, it pushed back on "sized like its own item" and the gap got closed for real in this same pass. It also asked for the batch-op-kinds check and the exact test-count read-off that appear above, rather than trusting a first-pass writeup. The remaining risk considered by hand: a route or Lua function classified into the wrong scope would be a silent security gap, not a crash - mitigated by hand-checking each of the 66 routes' and 15 Lua functions' actual effect against its assigned scope while writing both classifications (documented above), by the live A/B tests proving the check fires exactly where and only where intended on both surfaces, and by the structural fix on the REST side (scope lives on the same table entry as the handler) removing the entire class of "table drifted from the routes" risk the plan itself flagged as the danger to guard against.
+
+---
+
+## Tier 5: reverse engineering workflow
+
+Tiers 1 through 4 are about the emulator's own surface. This tier is about the workflow that
+surface exists to serve: driving Ghidra and a live DOSBox together to answer "who writes this
+address" and "is this function safe to read by hand". It comes out of a real RE session on a
+16-bit DOS binary where a wrong negative conclusion was inherited across three passes, and out
+of assessing two proposed fixes against the actual tool implementations rather than against how
+they are described.
+
+Three owners here, not two. `Engine` and `Bridge` mean what they mean everywhere else in this
+document. `Ghidra MCP` is `bethington/ghidra-mcp`, which we do not own: those items are an issue,
+a PR and somebody else's merge, so they are priced accordingly and none of them block anything.
+
+The finding that reframes the rest: `get_xrefs_to` is not unreliable. It parses the string it is
+given, asks the ReferenceManager about exactly that byte, and answers correctly every time. What
+it cannot do is distinguish "no references exist" from "you asked about the wrong byte", because
+a wrong-but-mapped address returns a clean, confident zero with no signal of any kind. Two root
+causes follow, and they need different fixes:
+
+- **(a) Wrong address.** Cheap to prevent, impossible to detect afterwards. Fixed by 5.1.
+- **(b) Coverage.** Ghidra's references exist only where the analyzer created them, and the
+  auto-analyzer under-recognizes far-call-heavy real-mode code. Reached by byte-pattern search,
+  and at real risk by `create_function`.
+
+Order: 5.1, then 5.3's bookmark pass, then 5.2. All three are free and ship today. 5.6 is the
+only engine correctness item and stands on its own merit whether or not any of this workflow
+gets built.
+
+One provenance warning that applies to every number below. The assessment measured against the
+Ghidra program that happened to be open, `OXYD1.EXE` (876 functions, `x86:LE:16:Protected Mode`,
+455KB), which is **not** the binary that produced the incident: that session reported 234
+functions on a small or compact model DOS binary. So every figure in 5A through 5D - the block
+counts in 5.1, the `2E FF A7` dispatcher encoding and the 81 hazard sites in 5.3, the block
+naming in 5.8, the operand hit ratio in 5.10 - is illustrative of the tool's behavior, not
+evidence about the motivating binary. Re-derive any of them against the target in front of you
+before relying on it. Inheriting `2E FF A7` as a fact about a different binary is precisely the
+failure 5.2 exists to prevent.
+
+### 5A. Practice
+
+#### 5.1 A zero is not evidence
+**Practice. Effort: S, free. Status: not started.**
+
+An earlier pass recorded "no writers found" for a data address, and two later passes cited it as
+settled fact instead of re-deriving it. The query had been built against the code segment for an
+address Ghidra stores under the data segment. Nothing in the result said so. A wrong address that
+lands in mapped memory is indistinguishable from a right address with no references, and no
+containment guard separates them, because "zero references at `12b0:00c7`" is a true answer about
+a real byte nobody references.
+
+The rule: before accepting any "no references found", name the block you meant and record the
+exact string you passed. The cheap way to satisfy it already exists and was simply not used.
+`get_xrefs_from` at a known referencing instruction returns the canonical target spelling in one
+call. `list_data_items_by_xrefs` prints the address and the reference count together. Ghidra's
+own `DAT_<seg>_<off>` naming already encodes the segment.
+
+**Ship first, alone:** the rule and the `get_xrefs_from` recipe. No tools, no builds, no merges.
+
+**Be honest about the cost:** it is discipline, and discipline decays. What keeps it honest is
+5.2's stamp field, which either has a block name in it or does not. Do not build the
+candidate-spelling fan-out version: offset `0x00c7` is inside 56 of the assessed program's 88
+blocks and `0x0007` is inside 81 of them, so that is 56 to 81 queries ending in several plausible
+answers and nothing to pick between them.
+
+#### 5.2 Stamp the negative, scoped to coverage
+**Practice. Effort: S, free. Status: not started.**
+
+The harm in the motivating incident was not that a tool returned a wrong answer once. It was that
+a negative conclusion was inherited by later passes as settled fact and never re-checked. That is
+an epistemics failure, not a binary-specific one, and it applies to any tool that can return a
+confident empty result.
+
+Record, inline with the claim: the tool used, the exact address string passed, the block it
+resolved into, which techniques ran, and a date. Record the program's function count and analysis
+state as context for a human deciding whether to re-verify, explicitly not as a machine trigger,
+since `create_function` moves those counts by construction. Word the claim as what was checked,
+never as what does not exist: "no writers found by direct xref at 876 functions, resolved into
+Data37" rather than "nothing writes this".
+
+**Ship first, alone:** yes. It is the only mitigation entirely under our control regardless of
+what merges upstream.
+
+**Be honest about the cost:** two real failure modes. A stamp written and never read is the
+original failure with extra steps. And a well-stamped negative reads as more authoritative while
+being exactly as wrong when the cause was coverage rather than address; the wording rule above is
+what keeps that survivable. A machine-checkable version is under-investigated rather than
+blocked, see 5.12.
+
+#### 5.3 Pre-flight a region before hand analysis
+**Practice. Effort: S, free. Status: not started.**
+
+Reading a garbled decompile as though it were correct costs more than the sweep that would have
+caught it. The proposal this item replaces scanned `batch_decompile` output for three decompiler
+warning strings, flagged anything over 20K characters, matched an `FF 2x` jump-table signature,
+and tagged the hits with `add_function_tag`. All four failed when checked against the tools.
+
+The warning literals did not fire on any sampled dispatch function, and `halt_baddata` is an
+emitted call in the code body rather than a comment, so a comment scan misses it structurally.
+The size threshold is falsified: a 1,100-line decompile came back clean and marker-free, so size
+selects for expensive-to-read, not for garbled. The `FF 2x` form does not occur in the assessed
+binary at all - all 27 indirect jumps are `2E FF A7 <disp16>`, and matching a bare `FF A7` reports
+an address one byte past the instruction start, which would point `create_function` into the
+middle of an instruction. And the carrier does not fit the target: 53 of 81 hazard sites resolve
+to no function, so they cannot be tagged at any price, while `list_function_tags` returns 0 and
+nothing in the upstream repo's README, CLAUDE.md, AGENTS.md or ROADMAP.md names a tag. "The
+existing convention" is a vocabulary that would have to be invented first.
+
+What works, in order. `list_bookmarks(category="Bad Instruction")` returns the hazard sites the
+auto-analyzer already wrote, each at an exact address with a diagnostic comment, for one
+read-only call and no vocabulary. Then `find_code_gaps` for the coverage half. Then a
+byte-sweep-versus-listing diff, deriving the dispatcher encoding from `search_instructions`
+against the binary in front of you rather than carrying a constant between projects. Treat any
+`batch_decompile` value beginning `Error:` as a hit, and compare requested refs against returned
+keys on every call, because that endpoint silently drops everything past 20 (see 5.9). Carry
+markers on `set_bookmark`, which takes any parseable address with no function requirement.
+
+**Ship first, alone:** the `list_bookmarks` pass. One read-only call, writes nothing, and it
+scopes the expensive decompile pass that follows.
+
+**Be honest about the cost:** the byte signature has to be re-derived per target, so this is
+recurring manual work rather than a constant that ships once. `delete_bookmark` has no type
+filter, so a cleanup pass over our own markers at an address also destroys the analyzer's `Error`
+and "Bad Instruction" rows there, which are only regenerable by re-running analysis - any cleanup
+must pass its own category. And `set_bookmark`'s write path was read, not exercised: there is not
+one NOTE-type bookmark on the assessed program, so nothing demonstrates the write lands and reads
+back.
+
+### 5B. Bridge
+
+#### 5.4 Write the address audit into the bridge docs
+**Bridge. Effort: S, documentation only. Status: done.**
+
+Root cause (a) is not a missing capability. Every primitive needed to resolve an address before
+querying it already exists and behaves correctly: `debug_map_to_live` and `find_ghidra_address`
+carry a per-range `live_segment` plus a delta, filter on segment before containment, and error
+rather than guess when a range has no live segment this session or when a translated offset
+leaves 0x0000-0xFFFF. 2.16 built that deliberately. It was then not used at the one moment it
+would have paid for itself.
+
+Put 5.1's rule and the `get_xrefs_from` recipe in the bridge's own docs next to those tools,
+where an agent reading `debug_map_to_live` will see it.
+
+**Ship first, alone:** the rule plus the recipe. No new tools.
+
+**Be honest about the cost:** `live_segment` is deliberately session-scoped and not persisted,
+exactly as 2.16 decided, so ranges have to be re-anchored every session before any translation is
+trusted. Skipping the re-anchor gives a confidently wrong translation, which is the same failure
+with more steps.
+
+**Shipped.** A paragraph at the end of `ghidra.py`'s module header, where the existing prose
+already explains the range model and why `live_segment` is not persisted: an empty xref result is
+not evidence until you can name the address you meant, check `debug_map_status` for a range
+re-anchored this session, and take the spelling from the referencing side (`get_xrefs_from`,
+`list_data_items_by_xrefs`) rather than by construction. Plus one sentence on
+`debug_map_to_ghidra`'s own description, since that tool is what produces the address an agent
+then queries, and a tool description is read at runtime by every agent while a module comment is
+read by whoever opens the file.
+
+#### 5.5 Restate the memory-breakpoint ceilings in the tool description
+**Bridge. Effort: S, documentation only. Status: done.**
+
+2.3 fixed the honesty problem at the availability layer: the tool description says a build
+without the heavy debugger returns 501, and `debug_watch_add` is described as a watch-panel
+variable rather than a stopping watchpoint. The mechanism has three further ceilings and none of
+them are written down. `BKPNT_MEMORY` is a value poll, not a write trap, so a store of the same
+value is invisible. The reported CS:EIP is the instruction after the store. And it covers exactly
+one byte, with no width parameter on the REST surface, so a `mov word ptr [var], ax` that changes
+only the high byte does not fire a watchpoint armed at `var`. Covering a word needs two
+breakpoints; a dword needs four.
+
+The same description should say what the facility is actually for. As a confirm/refute instrument
+against a candidate list from static analysis it costs roughly N+4 calls and earns its keep. As a
+discovery mechanism it does not: it needs the heavy build, and it is bounded by all three
+ceilings above.
+
+**Ship first, alone:** the one-byte width limit. It is the ceiling most likely to produce a
+silent wrong answer on a DOS variable, and the only one a caller cannot infer from the other two.
+
+**Be honest about the cost:** the confirm/refute procedure works today on a stock build without
+any of this, using `wait_for` to bracket when a byte changes, one execute breakpoint per
+candidate, and one `batch_execute` at each hit. On a non-heavy build execute breakpoints plant
+`0xCC` in guest memory, which a self-checking binary can see.
+
+**Shipped**, all three ceilings plus one the item did not list. `debug_breakpoint_add`'s memory
+bullet now states the one-byte width and its word-sized consequence, the value-poll-not-store-trap
+behavior, and the one-instruction-late stop location. It also discloses that `once` is ignored on
+memory breakpoints, which is 5.6's third defect: the same bullet already claimed as a general fact
+that "a once-only breakpoint self-deletes on its first match", which is false for this type, and
+editing that bullet while leaving a known-false sentence in it would have been the exact failure
+this tier is about. That sentence comes back out when 5.6 lands.
+
+### 5C. Engine
+
+#### 5.6 Memory-breakpoint defects: three, not two
+**Engine. Effort: S for the code, M to verify. Status: not started.**
+
+2.3 documented two and deliberately deferred both, correctly, since this build ships without
+`C_HEAVY_DEBUGGER`. Re-reading the path for this tier confirmed both against current code and
+found a third.
+
+The two known ones: `AddMemBreakpoint` never seeds the current byte, so a watchpoint on any
+non-zero byte fires once immediately (self-healing, since the mismatch branch re-seeds). And the
+memory branch of `CheckBreakpoint` returns where it means to continue, so one unreadable watch
+address silently skips every breakpoint after it in the list; three of that bug's four sites are
+unreachable over REST because `DEBUG_AddMemBreakpoint` only ever sets `BKPNT_MEMORY` or
+`BKPNT_MEMORY_READ`, but the unmapped-read site is live.
+
+The new one, and the only one that lies to the caller: `once` is honored in the physical and
+interrupt branches and never consulted in the memory branch, while it is plumbed all the way
+through the REST handler and reported back in `debug_breakpoint_list`. So
+`POST /api/v1/debug/breakpoints` with `{"type":"memory","once":true}` creates a watchpoint that
+reports itself as one-shot and then fires forever.
+
+**Ship first, alone:** the `once` fix. It is a contract violation visible over REST, independent
+of whether anyone ever builds heavy.
+
+**Be honest about the cost:** all three are source reads. No heavy binary has been run in this
+work and no `BKPNT_MEMORY` breakpoint has ever been observed to fire in this fork. The code
+changes are S and unit-testable on their own. Confirming any of them actually fires needs a heavy
+build, which is 5.7, so 5.6 and 5.7 land as one branch rather than in the order their numbers
+suggest: fix first, preset second, and the live confirmation is what closes both. Shipping the
+`once` fix alone with a unit test and no execution is defensible, but say so in the commit rather
+than implying the path was exercised.
+
+#### 5.7 Heavy presets, and the binary-name trap
+**Engine. Effort: S. Maintainer's call. Status: not started.**
+
+`OPT_HEAVY_DEBUGGER` defaults off and no preset in `CMakePresets.json` sets it, so every
+documented route to a watchpoint currently ends at a hand-configured build. Two cache variables
+and a distinct `binaryDir` add `debug-linux-heavy` and `debug-macos-heavy`. Carry the rename with
+them: an `OPT_DEBUGGER` build names its output `dosbox_with_debugger`, while the integration
+harness defaults `DOSBOX_BIN` to `build/debug-linux/dosbox` in six separate files under
+`tests/integration/`.
+
+**Ship first, alone:** nothing, and not in number order. A preset that hands somebody a heavy
+binary should not also hand them three known defects in the exact path they enabled it for, but
+5.6 cannot be confirmed to fire without this preset either. Land them together, 5.6's fixes
+first in the branch.
+
+**Be honest about the cost:** a heavy build puts a non-inlinable call on every instruction in the
+interpreted cores and a memory-read hook with no empty-list early-out on every guest read, and it
+compiles out the `0xCC` fast path, so it also makes the already-working execute breakpoints
+slower. That is a performance decision for everyone who picks the preset, which is why it is the
+maintainer's call and not a mechanical addition.
+
+### 5D. Ghidra MCP (upstream, not ours)
+
+Filed as issues and PRs against `bethington/ghidra-mcp`. None of these block anything above. All
+of them are defects any consumer of that bridge hits, on any architecture.
+
+#### 5.8 Xref results say where the query landed
+**Ghidra MCP. Effort: S. Status: not started.**
+
+`getXrefsTo` parses the caller's string, queries `getReferencesTo` at exactly that address with no
+containment check and no resolution feedback, and on empty echoes the raw input back.
+`getXrefsFrom` does the same. `getBulkXrefs` absorbs a null address at its `if (addr != null)`
+guard rather than at the catch block and emits `[]` for it, so a garbage string and a real address
+with 83 writers come back in the same shape. Three of the four xref entry points render failure as
+success-with-zero, and no agent-side procedure can recover information the tool discarded.
+
+Report the containing memory block in the empty-result message, or say explicitly that the address
+is in no block. Bundle the `@McpTool` description rewrite into the same PR: the current text warns
+only about multiple address spaces, which cannot apply to a single-space program, and the more
+useful warning that does exist sits in an `@Param` that never reaches the MCP schema.
+
+**Ship first, alone:** the block echo plus the description rewrite, as one PR. Two adjacent
+methods in one file, and the containment idiom is already house style in four other services
+there.
+
+**Be honest about the cost:** this does not reach root cause (a) in general, and the disclosure is
+thinner than it sounds. On the assessed program the block names happen to encode Code versus Data,
+so the echo discloses something; a wrong-selector query landing in another data block echoes a
+plausible name and gives no signal at all. It converts a silent wrong negative into a
+self-disclosing one on some inputs. 5.1 is what actually covers the case, which is why practice
+ships first and this ranks below it.
+
+#### 5.9 Silent-clean paths and dead parameters
+**Ghidra MCP. Effort: S. Status: not started.**
+
+`batch_decompile` caps at 20 functions and drops refs 21 and up with no error, no note and no
+count (verified: 25 refs in, 20 keys out), and reports per-function failures as map values
+beginning `Error:` rather than as errors. Both paths produce output containing none of the markers
+a text scan looks for, so a truncated or failed region reads as clean - the same shape as this
+document's own opening complaint about capabilities that return 200 and do nothing. Separately,
+`search_byte_patterns` declares a `mask` parameter its method body never reads (masking comes only
+from `?` in the pattern), and `disassemble_bytes` binds `restrict_to_execute_memory` to
+`DisassembleCommand`'s `followFlow` argument with a null restricted set, so its documented contract
+is inverted and its default turns unbounded flow-following on rather than restricting anything.
+`batch_decompile` is also absent from `ENDPOINT_TIMEOUTS` so it gets the 30s default while the
+server can legitimately spend far longer, the Python dispatcher retries a timeout three times, and
+the plugin's HTTP pool is three threads, so one large pre-flight batch can occupy every worker with
+abandoned decompile passes and starve unrelated calls.
+
+**Ship first, alone:** the `restrict_to_execute_memory` rebind or rename. It is a
+mutation-widening parameter whose documentation says the opposite of what it does.
+
+**Be honest about the cost:** none of this makes the three proposed warning literals fire. The
+value is that a scan stops reading silence as cleanliness, not that it starts finding jump tables.
+Until it lands, cap client-side batches at 8 to 10 refs and never retry a `batch_decompile`
+timeout by hand.
+
+#### 5.10 Operand-value search, and an instruction-containing lookup
+**Ghidra MCP. Effort: M. Status: not started.**
+
+`search_instructions` matches operands by case-insensitive substring with no word boundary and no
+value semantics: `0x19e` returned 49 hits of which 5 were real, the rest being `0x19e0` through
+`0x19ee` plus immediates that are not memory references at all. An exact numeric operand match
+with a read/write direction filter would collapse that into one high-precision call. Separately,
+nothing exposes `getInstructionContaining`, so a byte-pattern hit landing mid-instruction cannot
+be resolved without another round trip.
+
+**Ship first, alone:** the operand-value search. It is the one that removes a guess.
+
+**Be honest about the cost:** the substring noise is a 16-bit artifact. On a flat 32 or 64-bit
+target the displacement is eight hex digits and prefix collisions are rare, so this buys much less
+elsewhere. And `getInstructionContaining` returns null for exactly the interesting hits, the ones
+that are not instructions yet, so it solves the easy case.
+
+#### 5.11 Bounded, reversible create_function
+**Ghidra MCP. Effort: L. Status: not started.**
+
+This is the only instrument for root cause (b), and today it can corrupt the artifact it is
+verifying. `CreateFunctionCmd` derives the body from flow, the pre-step is
+`DisassembleCommand(addrSet, null, true)`, which is unbounded flow-following with no restricted
+set, there is no end or length parameter, and `setBody` appears nowhere in the plugin, so
+over-extension past a case boundary cannot be prevented. The write wrapper commits whenever the
+lambda returns without throwing, while `create_function` signals failure by setting an error and
+returning null, so a failure after a successful disassembly commits the disassembly and returns an
+error. `delete_function` calls only `removeFunction` and leaves the instructions and their
+references behind. There is no undo endpoint anywhere in the surface, the program is open in a
+live GUI, and the change persists on save.
+
+One correction to the retry recipe regardless of whether this ships: `run_analysis` does not block
+in GUI mode. `reAnalyzeAll` marks and `startAnalysis` schedules a background command, so the tool
+returns with a `new_functions` count of about zero and an immediate re-query races the analysis it
+just started, reproducing the false negative the sweep exists to catch. Poll `analysis_status`
+until `analyzing` is false. Where a reference is already proven by other means, prefer
+`add_memory_reference`, which touches no bytes and is undone by `remove_reference`.
+
+**Ship first, alone:** nothing here ships alone usefully. If one piece lands, make it the
+commit-on-error path, which is a correctness bug independent of the rest.
+
+**Be honest about the cost:** L, not M, because revert has to mean something on a program shared
+with a live GUI session and after a background reanalysis has already run. Until it exists, this
+technique needs a saved snapshot beforehand and a human approving each call, never an agent
+running it inside a sweep. `add_memory_reference` surviving re-analysis is asserted by a docstring
+in a repo that carries at least one demonstrably false docstring, and whether it produces a
+reference `get_xrefs_to` returns when issued from an address holding no instruction is untested,
+which is the exact scenario it is recommended for.
+
+#### 5.12 A stable analysis fingerprint
+**Ghidra MCP. Effort: S, gated on a local test first. Status: not started.**
+
+For 5.2's machine-checkable half you need an observable that moves when the analysis database
+changes and does not move during ordinary repair work. The exposed counts fail the second half by
+construction, since `create_function` increments `function_count`. But `get_function_hash` and
+`get_bulk_function_hashes` already exist and return a normalized opcode hash, documented as
+opcodes only, register-stable, addresses stripped, which would be stable under an unrelated
+`create_function` elsewhere in the program. Nobody has tested them.
+
+**Ship first, alone:** the local test, not the upstream issue. Read a hash, note it, do unrelated
+work, read it again. A test replaces a feature request here.
+
+**Be honest about the cost:** if the hash does not serve, the fallback is asking upstream to
+expose `program.getModificationNumber()` on `get_current_program_info` and `analysis_status`, a
+small Java change with no local substitute in a repo we do not own. Until one of those lands, 5.2
+stays a human-readable convention, which is still most of its value.
+
+### 5E. Assessed and rejected
+
+**Adopting the five-tier sweep as a standing procedure.** Its cost is paid on every query and its
+benefit is concentrated in the coverage case. After 5.1 and the reporting fix in 5.8, the
+byte-pattern and repair techniques are an escalation path, not a checklist.
+
+**An address-normalization tier, as literally proposed.** There is nothing to normalize. Under the
+assessed program's model Ghidra uses one `ram` space with `selector<<16|offset`, so each selector
+is a disjoint 64K window and two spellings are two different addresses. In real mode the opposite
+holds and arrives at the same place: `SegmentedAddress` stores the flat offset and inherits
+`GenericAddress.equals`, so respelling the same linear address is a no-op. The documented failure
+was a different byte, not a different name for the right byte. 5.1's audit is the correct step,
+and the lesson is larger than segmentation: the same wrong-base failure appears on flat binaries
+as file-offset-versus-VA, an unrebased image, or the wrong module.
+
+**A jump-table tier in the xref path.** All three plausible implementations fail. `find_dead_code`
+is a literal `"Not yet implemented"` stub. `get_function_jump_targets` consumes the same
+ReferenceManager the technique is meant to repair. `analyze_control_flow` is a per-function
+complexity metric that needs a bounded function to already exist. What survives is
+`find_code_gaps` for coverage and a `read_memory` table inspection for the table itself, both
+folded into 5.3.
+
+**`get_bulk_xrefs` in any sweep.** It returns `[]` for an address it could not parse,
+manufacturing the exact false negative the sweep exists to catch. Use `get_xrefs_to`, whose parse
+error at least distinguishes a malformed string. Neither distinguishes a well-formed string with
+the wrong base.
+
+**Byte-pattern search as a licence for "no writers".** It is structurally blind to
+register-indirect writers: a pointer loaded into BX, a far pointer via LES, a `STOSW` through
+ES:DI. That population is not under-found, it is unmeasurable, so the technique can support "no
+direct-displacement writers" and never "no writers".
+
+### 5F. What could not be verified
+
+**No heavy binary was run.** The evidence for the watchpoint path is configure-and-link plus a
+file on disk. `BKPNT_MEMORY` has never been observed to fire in this fork. Execute breakpoints are
+live-verified; the memory path is not.
+
+**The assessed Ghidra program is not the binary that motivated any of this.** It is `OXYD1.EXE`
+(876 functions, `x86:LE:16:Protected Mode`, 455KB), confirmed by `list_open_programs` after the
+assessment ran; the session that produced these proposals reported 234 functions on a small or
+compact model DOS binary. Every tool-behavior finding still holds, since those are properties of
+the bridge and not of the target. Every number does not transfer. This is why 5.3's
+warning-literal finding is inconclusive rather than refuting: the literals were checked against a
+program the premise was never formed against.
+
+**`set_bookmark` was never round-tripped and `add_memory_reference` was never issued**, both by the
+read-only guardrail the assessment ran under. Persistence is confirmed for tags and bookmarks by
+code reading only. Whether a human sees either marker in the Ghidra UI, which is the premise of
+the whole marker idea, is asserted nowhere in that repo.
+
+**The decompiler's warning vocabulary was never pinned to a version.** It is larger than three
+entries and version-dependent, so the literals have to be established by observation against the
+build in use rather than carried between projects.
 
 ---
 
