@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5: 5.1-5.6 done, 5.7 and 5.8-5.13 open.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5: 5.1-5.6 and 5.13 done, 5.7 and 5.8-5.12 open.**
 
 ---
 
@@ -1441,7 +1441,8 @@ behavior, and the one-instruction-late stop location. It also discloses that `on
 memory breakpoints, which is 5.6's third defect: the same bullet already claimed as a general fact
 that "a once-only breakpoint self-deletes on its first match", which is false for this type, and
 editing that bullet while leaving a known-false sentence in it would have been the exact failure
-this tier is about. That sentence comes back out when 5.6 lands.
+this tier is about. Retracted in 5.13's commit now that 5.6 has landed and `once` is honored on
+memory breakpoints.
 
 ### 5C. Engine
 
@@ -1533,7 +1534,7 @@ slower. That is a performance decision for everyone who picks the preset, which 
 maintainer's call and not a mechanical addition.
 
 #### 5.13 A breakpoint added to a free-running emulator never arms
-**Bridge, and possibly Engine. Effort: S. Status: not started.**
+**Bridge, and possibly Engine. Effort: S. Status: done, description half.**
 
 Found while live-verifying 5.6, and it invalidated the first two attempts at that test.
 `CBreakpoint::ActivateBreakpoints()` runs only when execution resumes through `DEBUG_Run()`, on
@@ -1557,6 +1558,25 @@ caller able to arm nothing and be told "ok". The engine alternative - arming on 
 execution is already running - is a behavior change to a path shared with the interactive
 BP/BPINT commands, which deliberately match this semantics, so it needs a decision rather than
 a patch. Doing nothing is defensible; documenting nothing is not.
+
+**Correction to this item as first written: the trap is not specific to memory breakpoints.**
+It was found on one, so it got written up as one. A first re-test appeared to show execute
+breakpoints arming normally, which would have made this a memory-only quirk. That reading was a
+confound: the preceding case had let a memory watchpoint fire, and a hit pauses the emulator, so
+the `debug_continue` in the execute case was a real resume rather than the no-op it was meant to
+be. Re-run on two fresh instances that had never been paused, both kinds behave identically -
+`active: false`, `hit_count: 0`, no fire. That follows from the mechanism: the constructor sets
+`active(false)` for every breakpoint, no Add* function arms one, and `ActivateBreakpoints()`
+arms the whole list at resume. So this affects execute breakpoints too, which are the ones in
+common use and the ones this plan already calls live-verified. Also confirmed: a later
+pause/continue cycle does arm a breakpoint added earlier, and it then fires.
+
+**Shipped, the description half only.** `debug_breakpoint_add` now leads with the precondition
+rather than the old "takes effect on the next debug_continue", which was true and still read as
+a promise instead of a requirement; it names both kinds observed unarmed and says every kind
+shares the activation path. `debug_breakpoint_list` now says what `active` means, since that is
+the field a caller would use to notice. The engine half is deliberately not done: it is the
+behavior decision described above, not a patch.
 
 ### 5D. Ghidra MCP (upstream, not ours)
 
