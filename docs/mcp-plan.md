@@ -10,7 +10,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5 assessed; 5.4 and 5.5 done.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5: 5.1-5.6 done, 5.7 and 5.8-5.13 open.**
 
 ---
 
@@ -1275,7 +1275,7 @@ failure 5.2 exists to prevent.
 ### 5A. Practice
 
 #### 5.1 A zero is not evidence
-**Practice. Effort: S, free. Status: not started.**
+**Practice. Effort: S, free. Status: done.**
 
 An earlier pass recorded "no writers found" for a data address, and two later passes cited it as
 settled fact instead of re-deriving it. The query had been built against the code segment for an
@@ -1299,7 +1299,7 @@ blocks and `0x0007` is inside 81 of them, so that is 56 to 81 queries ending in 
 answers and nothing to pick between them.
 
 #### 5.2 Stamp the negative, scoped to coverage
-**Practice. Effort: S, free. Status: not started.**
+**Practice. Effort: S, free. Status: done.**
 
 The harm in the motivating incident was not that a tool returned a wrong answer once. It was that
 a negative conclusion was inherited by later passes as settled fact and never re-checked. That is
@@ -1323,7 +1323,7 @@ what keeps that survivable. A machine-checkable version is under-investigated ra
 blocked, see 5.12.
 
 #### 5.3 Pre-flight a region before hand analysis
-**Practice. Effort: S, free. Status: not started.**
+**Practice. Effort: S, free. Status: done.**
 
 Reading a garbled decompile as though it were correct costs more than the sweep that would have
 caught it. The proposal this item replaces scanned `batch_decompile` output for three decompiler
@@ -1360,6 +1360,24 @@ and "Bad Instruction" rows there, which are only regenerable by re-running analy
 must pass its own category. And `set_bookmark`'s write path was read, not exercised: there is not
 one NOTE-type bookmark on the assessed program, so nothing demonstrates the write lands and reads
 back.
+
+**Shipped**, all three together, as one global skill (`ghidra-evidence`) rather than three
+documents. The carrier was the whole question: RE sessions run in the game project directories,
+not in this repo, so a doc here or a repo-scoped skill would never load where the failure
+actually happens. A user-level skill does, and its description triggers on Ghidra, xrefs,
+decompiler output, disassembly gaps and any about-to-be-recorded negative finding. It carries
+5.1's rule and the `get_xrefs_from` recipe, 5.2's stamp fields and wording rule, and 5.3's
+ordered pre-flight (bookmarks, then coverage, then the byte-versus-listing diff), plus the
+repair and escalation caveats. Deliberately no program-specific constants: every figure in it is
+labelled as measured on one program, and the `2E FF A7` encoding is given as an example of what
+not to carry between targets.
+
+The bookmark pass was run for real before being written down: one `list_bookmarks` call returned
+81 sites, each an exact address with a diagnostic comment, in six distinct families ("conflicting
+instruction", "Unable to resolve constructor", "Maximum run of repeated byte instructions
+exceeded", "Not enough bytes available for instruction", "flow into non-existing memory",
+"conflicting data"). None of those strings is one of the three literals the original proposal
+scanned for, which is the concrete reason the bookmark route beats the decompile-scan route.
 
 ### 5B. Bridge
 
@@ -1428,7 +1446,7 @@ this tier is about. That sentence comes back out when 5.6 lands.
 ### 5C. Engine
 
 #### 5.6 Memory-breakpoint defects: three, not two
-**Engine. Effort: S for the code, M to verify. Status: not started.**
+**Engine. Effort: S for the code, M to verify. Status: done, live-verified.**
 
 2.3 documented two and deliberately deferred both, correctly, since this build ships without
 `C_HEAVY_DEBUGGER`. Re-reading the path for this tier confirmed both against current code and
@@ -1450,13 +1468,47 @@ reports itself as one-shot and then fires forever.
 **Ship first, alone:** the `once` fix. It is a contract violation visible over REST, independent
 of whether anyone ever builds heavy.
 
-**Be honest about the cost:** all three are source reads. No heavy binary has been run in this
-work and no `BKPNT_MEMORY` breakpoint has ever been observed to fire in this fork. The code
-changes are S and unit-testable on their own. Confirming any of them actually fires needs a heavy
-build, which is 5.7, so 5.6 and 5.7 land as one branch rather than in the order their numbers
-suggest: fix first, preset second, and the live confirmation is what closes both. Shipping the
-`once` fix alone with a unit test and no execution is defensible, but say so in the commit rather
-than implying the path was exercised.
+**Be honest about the cost:** all three were source reads when this item was written. The code
+changes are S. Verification turned out cheaper than the M this item budgeted, because a heavy
+tree already existed on this machine (`build-debugger`, `OPT_HEAVY_DEBUGGER:BOOL=ON`), so no new
+preset was needed and 5.7 was never actually a blocker.
+
+**Shipped, all three, plus a fourth defect the fixes exposed.**
+
+- **Seeding:** `AddMemBreakpoint` now reads the watched byte at creation and seeds it, so a
+  watchpoint no longer reports a spurious hit the first time it is checked on any address whose
+  byte is already non-zero. An unreadable address stays at 0 and falls through to
+  `CheckBreakpoint`'s own read check rather than being guessed at.
+- **Skip, not abandon:** the four `return false` sites in the memory branch are now `continue`.
+  Three are behind the `BKPNT_MEMORY_PROT` guard that `DEBUG_AddMemBreakpoint` never sets; the
+  `mem_readb_checked` one is reachable over REST.
+- **`once`:** both memory kinds now consult `GetOnce()` and self-delete, snapshotting the stop
+  record before the delete exactly as the physical branch documents, so a once-only record is
+  never built from freed memory. No `Activate(false)` to match that branch: a memory breakpoint
+  plants nothing in guest memory, so there is nothing to undo.
+- **Fourth defect, found while fixing the second:** `idx` was incremented at the tail of the
+  loop body, so any `continue` would have silently desynced it from the list position every
+  reported breakpoint index is built from. `idx` now advances with the iterator. Turning the
+  four returns into continues without this would have traded a scan-abort bug for a
+  wrong-index bug.
+
+**Verification.** Built with the heavy tree (only `debugger.cpp.o` rebuilt, object mtime
+confirmed moved), zero new warnings, full suite 1470 tests / 0 failures. Then live-verified
+against a real `dosbox_with_debugger` (isolated `HOME`, dummy SDL drivers, own port, shut down
+via `POST /api/v1/control/shutdown`, never touching any other instance), which reports
+`capabilities.debugger.state: "on"` and `effective_core: "normal"`:
+
+1. **A `BKPNT_MEMORY` watchpoint fires. This is the first time one has been observed to fire in
+   this fork.** Armed on `0040:006C` (the BIOS tick, confirmed changing by reading it twice a
+   second apart), `once=false`: stayed `active` across a 12-sample poll and reported
+   `hit_count=1`.
+2. **Seeding fix confirmed.** Armed on `0040:0049`, whose byte reads `0x03`, `once=false`:
+   `active` for the whole poll, `hit_count=0`. Before the fix the constructor's `ahValue(0)`
+   against an actual `3` fired immediately.
+3. **`once` fix confirmed**, as a controlled comparison against case 1: same address, same
+   conditions, only `once` differing. Present in the list before the resume, gone at the first
+   50ms poll after it, while case 1's non-once breakpoint stayed present with a hit. The only
+   code path that deletes it is the new once block, which runs only after a hit.
 
 #### 5.7 Heavy presets, and the binary-name trap
 **Engine. Effort: S. Maintainer's call. Status: not started.**
@@ -1468,16 +1520,43 @@ them: an `OPT_DEBUGGER` build names its output `dosbox_with_debugger`, while the
 harness defaults `DOSBOX_BIN` to `build/debug-linux/dosbox` in six separate files under
 `tests/integration/`.
 
-**Ship first, alone:** nothing, and not in number order. A preset that hands somebody a heavy
-binary should not also hand them three known defects in the exact path they enabled it for, but
-5.6 cannot be confirmed to fire without this preset either. Land them together, 5.6's fixes
-first in the branch.
+**Ship first, alone:** the presets, now that 5.6 has landed. The ordering worry this item
+originally carried is gone: 5.6 was confirmed against an existing hand-configured heavy tree, so
+this item was never actually a prerequisite for it. What remains is the plain argument for
+presets, which is that the hand-configure route is the only one documented and it lives in an
+untracked file.
 
 **Be honest about the cost:** a heavy build puts a non-inlinable call on every instruction in the
 interpreted cores and a memory-read hook with no empty-list early-out on every guest read, and it
 compiles out the `0xCC` fast path, so it also makes the already-working execute breakpoints
 slower. That is a performance decision for everyone who picks the preset, which is why it is the
 maintainer's call and not a mechanical addition.
+
+#### 5.13 A breakpoint added to a free-running emulator never arms
+**Bridge, and possibly Engine. Effort: S. Status: not started.**
+
+Found while live-verifying 5.6, and it invalidated the first two attempts at that test.
+`CBreakpoint::ActivateBreakpoints()` runs only when execution resumes through `DEBUG_Run()`, on
+the next `DEBUG_Resume()` - `debugger.cpp:3089-3091` documents this at the C++ level. If the
+emulator was never paused, `POST /api/v1/debug/continue` has nothing to resume, so the
+breakpoint is never armed and simply never fires. Observed directly: added on a free-running
+instance, a watchpoint on a byte confirmed to be changing stayed `"active": false` and
+`hit_count: 0` across a 3-second poll; pausing first, then adding, then continuing, armed it and
+it hit. `debug_breakpoint_add`'s description says "takes effect on the next debug_continue",
+which is true and still misleading, because it reads as a promise rather than a precondition.
+
+This is the same silent-clean shape as the rest of this tier: a breakpoint that reports
+`"status": "ok"` and an id, sits in `debug_breakpoint_list`, and does nothing.
+
+**Ship first, alone:** the tool-description fix - say plainly that the emulator must be paused
+when the breakpoint is added, or armed by a later pause/continue cycle, and that `"active":
+false` in `debug_breakpoint_list` means not armed rather than merely not yet hit.
+
+**Be honest about the cost:** the description fix is cheap and stops the surprise, but leaves a
+caller able to arm nothing and be told "ok". The engine alternative - arming on add whenever
+execution is already running - is a behavior change to a path shared with the interactive
+BP/BPINT commands, which deliberately match this semantics, so it needs a decision rather than
+a patch. Doing nothing is defensible; documenting nothing is not.
 
 ### 5D. Ghidra MCP (upstream, not ours)
 
@@ -1636,9 +1715,12 @@ direct-displacement writers" and never "no writers".
 
 ### 5F. What could not be verified
 
-**No heavy binary was run.** The evidence for the watchpoint path is configure-and-link plus a
-file on disk. `BKPNT_MEMORY` has never been observed to fire in this fork. Execute breakpoints are
-live-verified; the memory path is not.
+**~~No heavy binary was run.~~ Closed by 5.6.** A heavy binary has now been built and run, and
+`BKPNT_MEMORY` watchpoints have been observed to arm, fire, respect a seeded initial value, and
+self-delete on `once`. What is still unverified there: `BKPNT_MEMORY_PROT` and
+`BKPNT_MEMORY_LINEAR` (unreachable over REST, since `DEBUG_AddMemBreakpoint` only ever sets
+`BKPNT_MEMORY` or `BKPNT_MEMORY_READ`), the read trigger, and the per-instruction cost of a heavy
+build, which was never measured.
 
 **The assessed Ghidra program is not the binary that motivated any of this.** It is `OXYD1.EXE`
 (876 functions, `x86:LE:16:Protected Mode`, 455KB), confirmed by `list_open_programs` after the
