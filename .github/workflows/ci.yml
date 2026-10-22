@@ -70,7 +70,7 @@ jobs:
           submodules: false
 
       - name: Set up CMake
-        uses: lukka/get-cmake@v4.4.2
+        uses: lukka/get-cmake@v4.4.4
 
       - name: Install system dependencies
         if: runner.os == 'Linux'
