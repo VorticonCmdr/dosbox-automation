@@ -81,6 +81,17 @@ class StderrCapture(threading.Thread):
         return "\n".join(self.lines)
 
 
+def wait_for_emulation_ready(client, proc, capture, timeout=15):
+    """Do not leak the child process when startup fails before fixture yield."""
+    try:
+        client.wait_ready(timeout=timeout)
+    except Exception:
+        proc.kill()
+        proc.wait(timeout=3)
+        capture.join(timeout=2)
+        raise
+
+
 @pytest.fixture(scope="module")
 def dosbox(tmp_path_factory):
     """Start a headless DOSBox with webserver enabled, yield API client."""
@@ -139,10 +150,11 @@ def dosbox(tmp_path_factory):
     )
 
     try:
-        client.wait_ready(timeout=10)
+        client.wait_ready(timeout=15)
         client.wait_shell(timeout=10)
-    except TimeoutError:
+    except (TimeoutError, RuntimeError):
         proc.kill()
+        proc.wait(timeout=3)
         capture.join(timeout=2)
         pytest.fail(
             f"DOSBox failed to reach shell:\n{capture.get_output()[:2000]}"
@@ -310,7 +322,7 @@ def start_dosbox_instance(work_dir, autoexec_lines=None, extra_sets=None,
         )
 
     client = DosboxClient(f"http://127.0.0.1:{port}", token=token)
-    client.wait_ready(timeout=10)
+    wait_for_emulation_ready(client, proc, capture)
 
     return DosboxInstance(client, proc, capture, work_dir,
                           conf_path=conf_path)

@@ -318,6 +318,19 @@ def test_input_mouse_move_x_abs_out_of_range_rejected(dosbox):
 # Replay status and cancel
 # ---------------------------------------------------------------------------
 
+def wait_replay_finished(client, timeout=10):
+    # Replay delays advance in emulated time. A busy host can need more wall
+    # time, so wait for completion instead of assuming a fixed sleep is enough.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.replay_status()
+        assert response.status_code == 200, response.text
+        data = response.json()
+        if not data["active"]:
+            return data
+        time.sleep(0.05)
+    pytest.fail(f"Replay did not finish within {timeout}s: {data}")
+
 def test_replay_status_when_idle(dosbox_e2e):
     # Needs a genuinely fresh instance, not the shared module-scoped
     # `dosbox` fixture other tests in this file also use: replay_cancel()
@@ -359,9 +372,7 @@ def test_replay_status_reports_progress_for_pic_sequence(dosbox):
 
     # Let it finish, then confirm the finished run's numbers are
     # retained (not zeroed) and frozen (not still climbing).
-    time.sleep(1.2)
-    r = dosbox.replay_status()
-    data = r.json()
+    data = wait_replay_finished(dosbox)
     assert data["active"] is False
     assert data["dispatched"] == 2
     assert data["total"] == 2
@@ -414,6 +425,7 @@ def test_replay_cancel_stops_a_running_sequence(dosbox):
         {"type": "key", "key": "KBD_c", "pressed": False},
     ])
     assert r.status_code == 200
+    wait_replay_finished(dosbox)
 
 
 def test_replay_cancel_when_nothing_active(dosbox):

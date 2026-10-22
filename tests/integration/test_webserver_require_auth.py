@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 import requests
 
-from conftest import DOSBOX_BIN, StderrCapture, expected_config_dir, find_free_port
+from conftest import (
+    DOSBOX_BIN, StderrCapture, expected_config_dir, find_free_port,
+    wait_for_emulation_ready,
+)
+from dosbox_client import DosboxClient
 
 
 # -----------------------------------------------------------------------
@@ -92,6 +96,7 @@ def start_with_require_auth_disabled(work_dir):
             f"DOSBox did not start:\n{capture.get_output()[:2000]}"
         )
 
+    wait_for_emulation_ready(DosboxClient(f"http://127.0.0.1:{port}"), proc, capture)
     return proc, capture, port, config_dir
 
 

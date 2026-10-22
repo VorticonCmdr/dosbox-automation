@@ -1,11 +1,9 @@
 name: Set up vcpkg
 
 description: >
-  Points VCPKG_ROOT at the runner's preinstalled vcpkg, checks it out to
-  this repo's pinned baseline, and restores a binary cache keyed on that
-  baseline plus the toolchain, so CI doesn't rebuild every dependency from
-  source on each run. Linux only - trimmed from the fork's original
-  cross-platform action (removed in c630200d9) to what 4.4 needs.
+  Checks out and bootstraps this repository's pinned vcpkg baseline in
+  the job workspace and restores a binary cache keyed on the baseline,
+  manifest, triplets, and runner toolchain. Supports Linux, macOS, and Windows.
 
 inputs:
   name_os:
@@ -32,17 +30,27 @@ runs:
     - name: Set vcpkg env variables
       shell: bash
       run: |
-        echo "VCPKG_ROOT=${VCPKG_INSTALLATION_ROOT}" >> "$GITHUB_ENV"
+        echo "VCPKG_ROOT=${GITHUB_WORKSPACE}/.ci/vcpkg" >> "$GITHUB_ENV"
         echo "VCPKG_DEFAULT_BINARY_CACHE=${{ github.workspace }}/vcpkg_bin_cache" >> "$GITHUB_ENV"
         echo "DOSBOX_VCPKG_BASELINE=$(jq -r .\"builtin-baseline\" ./vcpkg.json)" >> "$GITHUB_ENV"
 
-    - name: Checkout vcpkg to baseline
+    - name: Check out pinned vcpkg
+      uses: actions/checkout@v7
+      with:
+        repository: microsoft/vcpkg
+        ref: ${{ env.DOSBOX_VCPKG_BASELINE }}
+        path: .ci/vcpkg
+        persist-credentials: false
+
+    - name: Bootstrap vcpkg (POSIX)
+      if: runner.os != 'Windows'
       shell: bash
-      run: |
-        cd "${VCPKG_ROOT}"
-        git reset --hard
-        git fetch
-        git checkout "$DOSBOX_VCPKG_BASELINE"
+      run: '"${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics'
+
+    - name: Bootstrap vcpkg (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: '& "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics'
 
     - name: Get vcpkg commit
       shell: bash
@@ -56,7 +64,7 @@ runs:
       run: |
         if [ -n "${{ inputs.compiler }}" ]; then INPUTS_COMPILER="${{ inputs.compiler }}-"; fi
         if [ -n "${{ inputs.compiler_version }}" ]; then INPUTS_COMPILER_VERSION="${{ inputs.compiler_version }}-"; fi
-        echo "cacheKey=vcpkg-${VCPKG_SHORT_HASH}-bin-cache-${{ inputs.name_os }}-${{ inputs.arch }}-${INPUTS_COMPILER}${INPUTS_COMPILER_VERSION}${ImageOS}-${ImageVersion}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}" >> "$GITHUB_OUTPUT"
+        echo "cacheKey=vcpkg-${VCPKG_SHORT_HASH}-bin-cache-${{ inputs.name_os }}-${{ inputs.arch }}-${INPUTS_COMPILER}${INPUTS_COMPILER_VERSION}${ImageOS}-${ImageVersion}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-triplets/**') }}" >> "$GITHUB_OUTPUT"
 
     - name: Restore vcpkg binary cache
       uses: actions/cache@v6

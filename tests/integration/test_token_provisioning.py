@@ -21,6 +21,7 @@ from conftest import (
     expected_config_dir,
     find_free_port,
     start_dosbox_instance,
+    wait_for_emulation_ready,
     WORKSPACE,
 )
 
@@ -111,7 +112,7 @@ def start_with_token_file(work_dir, use_env_token=False, token_file_setting=True
             )
 
     client = DosboxClient(f"http://127.0.0.1:{port}", token=token)
-    client.wait_ready(timeout=10)
+    wait_for_emulation_ready(client, proc, capture)
 
     return DosboxInstance(client, proc, capture, work_dir), token
 

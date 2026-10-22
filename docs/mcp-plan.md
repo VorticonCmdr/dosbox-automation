@@ -1,5 +1,9 @@
 # dosbox-automation: MCP capability plan
 
+For the current capability summary, build presets, and maintenance priorities,
+see [Fork status and maintenance](STATUS.md). This file retains the development
+history; the initial defect descriptions below are historical.
+
 Three things make the current surface weak for an agent, and almost everything else is downstream of them:
 
 1. **No way to wait.** Every "is it done yet" is a poll loop. Each iteration costs a turn, a round trip, and a full result block in the transcript.
@@ -10,7 +14,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5: 5.1-5.6 and 5.13 done, 5.7 and 5.8-5.12 open.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5: 5.1-5.7 and 5.13 done, 5.8-5.12 open.**
 
 ---
 
@@ -1512,7 +1516,12 @@ via `POST /api/v1/control/shutdown`, never touching any other instance), which r
    code path that deletes it is the new once block, which runs only after a hit.
 
 #### 5.7 Heavy presets, and the binary-name trap
-**Engine. Effort: S. Maintainer's call. Status: not started.**
+**Engine. Effort: S. Status: done.**
+
+Added isolated Linux/vcpkg, macOS, and Windows/VS2022 heavy-debugger presets.
+The [status guide](STATUS.md#build-and-verify) records the actual output names
+and explicit `DOSBOX_BIN` setup; CI exercises the heavy binary over HTTP and
+through the MCP bridge. The original rationale follows for context.
 
 `OPT_HEAVY_DEBUGGER` defaults off and no preset in `CMakePresets.json` sets it, so every
 documented route to a watchpoint currently ends at a hand-configured build. Two cache variables

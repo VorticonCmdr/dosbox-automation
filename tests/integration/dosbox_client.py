@@ -335,10 +335,14 @@ class DosboxClient:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                r = self.status()
+                # /status is served before the emulation loop starts.
+                # A bridged read proves the emulator can actually run commands.
+                r = self.cpu_state()
                 if r.status_code == 200:
                     return
-            except requests.ConnectionError:
+                if r.status_code != 503 or not r.json().get("retryable"):
+                    raise RuntimeError(f"DOSBox readiness failed: {r.status_code}: {r.text}")
+            except (requests.ConnectionError, requests.Timeout):
                 pass
             time.sleep(0.2)
         raise TimeoutError(f"DOSBox webserver not ready after {timeout}s")

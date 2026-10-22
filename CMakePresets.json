@@ -224,6 +224,36 @@
       "cacheVariables": {
         "OPT_SANITIZER": "ON"
       }
+    },
+    {
+      "name": "debug-linux-heavy-vcpkg",
+      "displayName": "Heavy debugger (debug-linux-vcpkg)",
+      "inherits": "debug-linux-vcpkg",
+      "binaryDir": "${sourceDir}/build/debug-linux-heavy",
+      "cacheVariables": {
+        "OPT_DEBUGGER": "ON",
+        "OPT_HEAVY_DEBUGGER": "ON"
+      }
+    },
+    {
+      "name": "debug-macos-heavy",
+      "displayName": "Heavy debugger (debug-macos)",
+      "inherits": "debug-macos",
+      "binaryDir": "${sourceDir}/build/debug-macos-heavy",
+      "cacheVariables": {
+        "OPT_DEBUGGER": "ON",
+        "OPT_HEAVY_DEBUGGER": "ON"
+      }
+    },
+    {
+      "name": "debug-windows-heavy-vs2022",
+      "displayName": "Heavy debugger (debug-windows-vs2022)",
+      "inherits": "debug-windows-vs2022",
+      "binaryDir": "${sourceDir}/build/debug-windows-heavy-vs2022",
+      "cacheVariables": {
+        "OPT_DEBUGGER": "ON",
+        "OPT_HEAVY_DEBUGGER": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -298,6 +328,21 @@
       "name": "release-windows",
       "configurePreset" : "release-windows",
       "configuration": "Release"
+    },
+    {
+      "name": "debug-linux-heavy-vcpkg",
+      "configurePreset": "debug-linux-heavy-vcpkg",
+      "configuration": "Debug"
+    },
+    {
+      "name": "debug-macos-heavy",
+      "configurePreset": "debug-macos-heavy",
+      "configuration": "Debug"
+    },
+    {
+      "name": "debug-windows-heavy-vs2022",
+      "configurePreset": "debug-windows-heavy-vs2022",
+      "configuration": "Debug"
     }
   ],
   "testPresets": [
@@ -407,6 +452,30 @@
       "name": "release-windows",
       "configurePreset" : "release-windows",
       "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug-linux-heavy-vcpkg",
+      "configurePreset": "debug-linux-heavy-vcpkg",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug-macos-heavy",
+      "configurePreset": "debug-macos-heavy",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug-windows-heavy-vs2022",
+      "configurePreset": "debug-windows-heavy-vs2022",
+      "configuration": "Debug",
       "output": {
         "outputOnFailure": true
       }
