@@ -839,7 +839,7 @@ static int LuaCaptureStop(lua_State* L)
 // Registration
 // ================================================================
 
-void RegisterDosboxApi(lua_State* L, LuaCoroutine* coroutine, DebugLog* debug_log)
+void RegisterDosboxApi(lua_State* L, LuaCoroutine*, DebugLog* debug_log)
 {
 	// Store pointers for the C callbacks.
 	lua_pushlightuserdata(L, debug_log);

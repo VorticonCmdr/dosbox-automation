@@ -1,6 +1,4 @@
 cmake_minimum_required(VERSION 3.25)
-include_directories(/opt/homebrew/opt/lua/include/lua5.5 /opt/homebrew/opt/lua/include)
-link_directories(/opt/homebrew/opt/lua/lib)
 
 # The project only tests preset build configurations, so we use
 # the IS_PRESET_USED variable to check and recommend using a preset.
@@ -58,7 +56,7 @@ if (MSVC)
   # Disable cl/clangcl warnings about insecure C functions
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 
-  # vcpkg builds Lua 5.5 as C (the port's cpp feature is off), so lua_yield
+  # The bundled Lua 5.5 library is built as C, so lua_yield
   # and luaL_error leave a C function through setjmp/longjmp. On Windows
   # MSVC's longjmp unwinds C++ frames, and the default /EHsc includes /EHc,
   # which tells the compiler extern "C" functions never throw - so it drops
@@ -519,22 +517,29 @@ endif()
 set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 
 # Find common external dependencies
-find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3)
+# The mapper uses SDL_SetDefaultTextureScaleMode, introduced in SDL 3.4.
+find_package(SDL3 3.4.0 REQUIRED CONFIG REQUIRED COMPONENTS SDL3)
 find_package(SDL3_image CONFIG REQUIRED)
 find_package(iir REQUIRED)
 find_package(PNG REQUIRED)
 find_package(OpenGL REQUIRED)
-find_package(FluidSynth REQUIRED CONFIG)
+# FluidSynth's package uses SameMinorVersion, so requesting 2.5 alone
+# incorrectly rejects a newer 2.6 installation.
+foreach(fluidsynth_minor 2.5 2.6 2.7 2.8 2.9)
+  find_package(FluidSynth ${fluidsynth_minor} QUIET CONFIG)
+  if(FluidSynth_FOUND)
+    break()
+  endif()
+endforeach()
+if(NOT FluidSynth_FOUND)
+  message(FATAL_ERROR "FluidSynth 2.5 or newer in the 2.x series is required")
+endif()
 if (C_ALSA)
   find_package(ALSA REQUIRED)
 endif()
 
 # SpeexDSP: vcpkg has no cmake config, only a .pc file
 pkg_check_modules(SPEEXDSP REQUIRED IMPORTED_TARGET speexdsp)
-
-# Lua 5.5 scripting engine and sol2 C++ bindings
-find_package(Lua REQUIRED)
-find_package(sol2 CONFIG REQUIRED)
 
 add_executable(dosbox src/main.cpp src/dosbox.cpp)
 if (OPT_DEBUGGER)

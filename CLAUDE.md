@@ -36,12 +36,12 @@ Release presets follow the same naming (`release-linux`, `release-macos`, etc).
 Full platform instructions: `docs/build-linux.md`, `docs/build-macos.md`,
 `docs/build-windows.md`.
 
-macOS uses system Homebrew Lua 5.5 (`src/lua/*.h` are symlinks into
-`/opt/homebrew/opt/lua/include/lua5.5/`), not vcpkg's Lua port.
+Lua 5.5 is bundled in `src/libs/lua` and built statically on every platform.
+No system Lua package or machine-specific header symlinks are needed.
 
 ## Tests
 
-Unit tests use the CMake/ctest integration (doctest-based, `tests/*.cpp`):
+Unit tests use the CMake/ctest integration (GoogleTest, `tests/*.cpp`):
 
 ```
 ctest -j 8 --preset debug-linux                                   # all tests
@@ -65,8 +65,8 @@ python3 tests/run-e2e.py --list-games          # list game manifests / disk avai
 ```
 `DOSBOX_BIN` env var points at the binary (default `build/debug-linux/dosbox`).
 
-Before compiling, verify all commits in a PR build individually:
-`scripts/tools/compile-commits.sh` (required for bisectability).
+The branch tip must build and pass the full test suite. The optional
+`scripts/tools/compile-commits.sh` checks individual commits for bisectability.
 
 ## Formatting and linting
 

@@ -1,4 +1,3 @@
-include_directories(/opt/homebrew/include/lua5.4 /opt/homebrew/include)
 target_sources(dosboxcommon PRIVATE
   lua_api.cpp
   lua_bridge_commands.cpp
@@ -10,5 +9,5 @@ target_sources(dosboxcommon PRIVATE
 )
 
 target_link_libraries(dosboxcommon PRIVATE
-  ${LUA_LIBRARIES}
+  lua
 )

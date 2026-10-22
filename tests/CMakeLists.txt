@@ -91,6 +91,7 @@ endif()
 target_link_libraries(dosbox_tests PRIVATE
     GTest::gmock_main
     dosboxcommon
+    lua
     SDL3::Headers
 )
 
