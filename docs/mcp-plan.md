@@ -14,7 +14,7 @@ Fix those before adding surface. Ordering below is impact per effort within each
 
 Effort scale: S = under a day, M = a few days, L = a week or more, XL = multi-week.
 
-**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5: 5.1-5.7 and 5.13 done, 5.8-5.12 open.**
+**Progress: 1.1-1.8, 2.1-2.18, 3.1-3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 done. Tier 4 complete. Tier 5: 5.1-5.7 and 5.13 done; 5.8-5.9 done in the Ghidra fork; 5.10-5.12 open; 5.14 reported.**
 
 ---
 
@@ -1593,7 +1593,14 @@ Filed as issues and PRs against `bethington/ghidra-mcp`. None of these block any
 of them are defects any consumer of that bridge hits, on any architecture.
 
 #### 5.8 Xref results say where the query landed
-**Ghidra MCP. Effort: S. Status: not started.**
+**Ghidra MCP. Effort: S. Status: done in our fork (`VorticonCmdr/ghidra-mcp`), not pushed, not
+upstreamed.** `get_xrefs_to`/`get_xrefs_from` now always report `resolved_address` and
+`in_memory_block`, and `get_bulk_xrefs` returns a per-address object carrying either its references
+or the reason the string did not resolve. The field is a boolean rather than the nullable block name
+first written, because Gson is built without `serializeNulls()` and dropped `"block": null` before it
+reached the wire - caught live, not by the unit test, which asserted `assertNull(body.get("block"))`
+and could not tell an absent key from a null value. Verified against `OXYD1.EXE`: `9999:0000` returns
+`count 0, in_memory_block false`, `1288:0000` returns `count 0, in_memory_block true, block Code82`.
 
 `getXrefsTo` parses the caller's string, queries `getReferencesTo` at exactly that address with no
 containment check and no resolution feedback, and on empty echoes the raw input back.
@@ -1607,9 +1614,9 @@ is in no block. Bundle the `@McpTool` description rewrite into the same PR: the 
 only about multiple address spaces, which cannot apply to a single-space program, and the more
 useful warning that does exist sits in an `@Param` that never reaches the MCP schema.
 
-**Ship first, alone:** the block echo plus the description rewrite, as one PR. Two adjacent
-methods in one file, and the containment idiom is already house style in four other services
-there.
+**~~Ship first, alone: the block echo plus the description rewrite, as one PR.~~ Shipped**, as two
+commits rather than one: the echo, then the Gson null-dropping fix that made the echo actually
+arrive.
 
 **Be honest about the cost:** this does not reach root cause (a) in general, and the disclosure is
 thinner than it sounds. On the assessed program the block names happen to encode Code versus Data,
@@ -1619,7 +1626,19 @@ self-disclosing one on some inputs. 5.1 is what actually covers the case, which 
 ships first and this ranks below it.
 
 #### 5.9 Silent-clean paths and dead parameters
-**Ghidra MCP. Effort: S. Status: not started.**
+**Ghidra MCP. Effort: S. Status: done in our fork (`VorticonCmdr/ghidra-mcp`), not pushed, not
+upstreamed.** `disassemble_bytes` now builds a real executable `AddressSetView` for
+`restrict_to_execute_memory` and takes a separate `follow_flow` defaulting to false. Bulk decompile
+returns `{results, count, total, truncated[, truncation_note]}` with a typed status per row instead
+of a flat map whose failures were strings starting `Error:`; the tool is `decompile_function` with
+`functions=`, since `batch_decompile` no longer exists and the `ENDPOINT_TIMEOUTS` entry this item
+asked for is already present. `search_byte_patterns` now rejects odd digit counts, non-hex
+characters and all-wildcard patterns rather than searching for something else, honours nibble
+wildcards, and reports `blocks_searched` / `blocks_uninitialized` / `bytes_searched`. The dead `mask`
+parameter was removed rather than implemented: masking already lives in the pattern, per IDA,
+x64dbg and YARA, and a byte-granular mask cannot express the nibble case anyway. On `OXYD1.EXE` the
+coverage counters showed 30 of 58 blocks uninitialized - about 40% of the address space that every
+previous zero-match answer had silently excluded.
 
 `batch_decompile` caps at 20 functions and drops refs 21 and up with no error, no note and no
 count (verified: 25 refs in, 20 keys out), and reports per-function failures as map values
@@ -1635,13 +1654,15 @@ server can legitimately spend far longer, the Python dispatcher retries a timeou
 the plugin's HTTP pool is three threads, so one large pre-flight batch can occupy every worker with
 abandoned decompile passes and starve unrelated calls.
 
-**Ship first, alone:** the `restrict_to_execute_memory` rebind or rename. It is a
-mutation-widening parameter whose documentation says the opposite of what it does.
+**~~Ship first, alone: the `restrict_to_execute_memory` rebind or rename.~~ Shipped, and it was
+worse than described:** the parameter was not merely misnamed, it was bound to `DisassembleCommand`'s
+`followFlow` argument with a null restricted set, so the documented-safe default turned unbounded
+flow-following on inside a committed transaction.
 
-**Be honest about the cost:** none of this makes the three proposed warning literals fire. The
-value is that a scan stops reading silence as cleanliness, not that it starts finding jump tables.
-Until it lands, cap client-side batches at 8 to 10 refs and never retry a `batch_decompile`
-timeout by hand.
+**Be honest about the cost:** none of this made the three proposed warning literals fire. The value
+is that a scan stops reading silence as cleanliness, not that it starts finding jump tables. The
+client-side batch cap of 8 to 10 refs still stands - the plugin's HTTP pool is three threads
+regardless of how honestly the response is now shaped.
 
 #### 5.10 Operand-value search, and an instruction-containing lookup
 **Ghidra MCP. Effort: M. Status: not started.**
@@ -1710,6 +1731,60 @@ expose `program.getModificationNumber()` on `get_current_program_info` and `anal
 small Java change with no local substitute in a repo we do not own. Until one of those lands, 5.2
 stays a human-readable convention, which is still most of its value.
 
+#### 5.14 The bridge's default transport hides a fifth of the server
+**Ghidra MCP. Effort: S for 20 of the 21 annotation-scanned endpoints, plus an unsized architecture
+decision for the 21st, plus a non-additive constructor change - not one number, and not ours to
+land. Status: reported here, deliberately not fixed.**
+
+One Ghidra process serves `/mcp/schema` on two transports with two different catalogs. Measured
+live against the same pid at the same moment: TCP `127.0.0.1:8089` answers 239 tools in 18
+categories, the UDS socket answers 186 in 11. The bridge prefers UDS, so an agent sees 185
+registered tools and no indication the other 53 exist. (185 rather than 186 because `/import_file`
+collides with one of the bridge's own static tool names and is skipped - unrelated to the 53, and a
+red herring for anyone who notices that gap first.) Every `debugger_*` route, both `emulate_*`,
+`prompt_policy`, and the whole `server_*` family are in the missing set.
+
+Two construction sites drifted apart. `ServerManager.registerTool()` builds an `AnnotationScanner`
+over ten services; `GhidraMCPPlugin.startServer()` builds one over the same ten plus
+`emulationService`, `debuggerService` and `promptPolicyService`, then calls
+`ManualToolDescriptors.addAll` with 32 more paths. 21 annotation-scanned plus 32 hand-registered
+is exactly the 53. The UDS server also registers a context only per `scanner.getEndpoints()`
+entry and is handed `null` for its `guiEndpoints` consumer at both call sites, so 52 of the 53 are
+not merely unadvertised over UDS, they 404 there. `/mcp/schema` is the one exception, routed but
+absent from its own output. The 404 is luck rather than design: `UdsHttpServer` falls back to
+longest-prefix matching when an exact path misses, and it only returns 404 because no registered
+context happens to be a prefix of any missing path. Had one been, the request would have been
+silently handed to the wrong handler instead.
+
+This is drift, not a security boundary, and the repo's own artifacts say so. `UdsHttpServer` carries
+auth-exemption code for `/mcp/health`, `/health` and `/check_connection` - three paths it can never
+serve, so that branch cannot fire. `ManualToolDescriptorsParityTest` has an `EXEMPT` set for
+deliberate catalog omissions holding exactly one path, and none of the 53 is in it. `ServiceFactory`'s
+javadoc claims it "mirrors the order and wiring in `ServerManager.registerTool`" while building 13
+services including the two `registerTool` omits, so the offline tests validate a catalog no transport
+serves. The parity test cannot see the gap because it reads `GhidraMCPPlugin.java` and the headless
+server by filename and never `ServerManager.java` - its regex would have matched fine. And the
+project already fixed this exact shape once, for eight headless endpoints, and called it a bug.
+
+**Ship first, alone:** nothing. This is the one item here to report rather than patch. Adding the
+three services to `ServerManager`'s scanner looks like a four-line change and is not: a second
+`PromptPolicyService` gets its own arming clock for a Swing timer that auto-clicks "Save Modified
+Files" across every window in the JVM, so `disable()` over one transport cannot disarm the other and
+`status()` answers a confident false. `DebuggerService` would be the first service in that singleton
+to capture a raw `PluginTool` by value, and the scanner is built once under `if (server == null)` and
+never rebuilt, so it pins whichever window registered first. The 20 non-policy endpoints are safely
+addable; `prompt_policy` needs a shared instance, which is an architecture decision belonging to the
+maintainer - and would also close a latent bug where a disposed plugin's armed auto-clicker keeps
+running with no route left to stop it.
+
+**Be honest about the cost:** this fixes nothing for us today, because `debugger_*` and `emulate_*`
+are not what our RE workflow uses - `list_bookmarks`, `search_byte_patterns` and the xref calls all
+sit in the 186 that UDS serves. The value is the shape of the finding, which is 5.1 one layer down:
+`check_tools` answers `not_found` for tools that demonstrably exist in the running process, and
+`search_tools("debugger emulate")` returns 0 over UDS against 20 over TCP. That is not silence about
+a gap, it is a confident denial - the same failure as a clean, empty `get_xrefs_to`, and it is worth
+knowing that the tool list itself is subject to the rule this tier is built on.
+
 ### 5E. Assessed and rejected
 
 **Adopting the five-tier sweep as a standing procedure.** Its cost is paid on every query and its
@@ -1767,6 +1842,12 @@ the whole marker idea, is asserted nowhere in that repo.
 **The decompiler's warning vocabulary was never pinned to a version.** It is larger than three
 entries and version-dependent, so the literals have to be established by observation against the
 build in use rather than carried between projects.
+
+**5.14's tool counts are one moment, one process, one open program.** 239 and 186 were read off pid
+87519 with `OXYD1.EXE` loaded, seconds apart. The mechanism behind the gap is structural and was
+re-derived from source independently of the measurement, so the finding transfers; the two numbers
+do not. They move with the plugin version, and would move again if a future release adds a service
+to one construction site and not the other, which is the whole failure being described.
 
 ---
 

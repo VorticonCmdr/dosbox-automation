@@ -1,7 +1,7 @@
 # Fork status and maintenance
 
 This fork adds remote debugging and automation to dosbox-automation. The
-[developer reference](index.html) and generated
+[developer reference](index.html), [debugger guide](DEBUGGER.md), and generated
 [OpenAPI specification](../resources/webserver/openapi.json) describe the user-facing
 surface. The [MCP development log](mcp-plan.md) retains the implementation history
 and unfinished reverse-engineering work; its opening problem statements describe
