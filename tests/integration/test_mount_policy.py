@@ -17,6 +17,7 @@ dosbox fixture directly.
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,42 @@ HAS_MFORMAT = shutil.which("mformat") is not None
 
 
 # -- Helpers --
+
+
+@pytest.mark.parametrize("require_auth", [True, False])
+@pytest.mark.parametrize("command,denial", [
+    ("mount a", "outside allowed directories"),
+    ("boot", "BOOT: Blocked - policy violation"),
+])
+def test_guest_image_command_cannot_bypass_roots(
+    dosbox_e2e, tmp_path, command, denial, require_auth,
+):
+    """Guest commands obey image roots even with token-free browser access."""
+    game_dir = (tmp_path / "game").resolve()
+    game_dir.mkdir()
+    disk = write_floppy_image((tmp_path / "outside" / "disk.img").resolve())
+    marker = "POLICY_DONE"
+    inst = dosbox_e2e(
+        conf_dir=game_dir,
+        autoexec_lines=["@echo off", f'{command} "{disk}"', f"echo {marker}"],
+        extra_sets=[f"webserver_require_auth={str(require_auth).lower()}"],
+    )
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        response = inst.client.screen_text()
+        assert response.status_code == 200, response.text
+        if marker in response.json().get("text", ""):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"Autoexec did not finish:\n{inst.capture_thread.get_output()}")
+
+    assert denial in inst.capture_thread.get_output()
+    assert not any(
+        drive["letter"] == "A" and drive["mounted"]
+        for drive in inst.client.drive_list().json()["drives"]
+    )
 
 def create_fat12_floppy(path: Path) -> Path:
     """Create a valid FAT12 1.44M floppy image using mformat."""

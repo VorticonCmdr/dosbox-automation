@@ -1070,6 +1070,9 @@ void WEBSERVER_Init()
 	MountPolicy::InitPolicyConfig(get_primary_config_path());
 
 	auto section = get_section("webserver");
+	// Set before AUTOEXEC runs, including when a requested server cannot
+	// bind: commands supplied by that configuration must stay restricted.
+	MountPolicy::SetInjectionPossible(section->GetBool("webserver_enabled"));
 
 	if (section->GetBool("webserver_enabled")) {
 		const auto addr = section->GetString("webserver_bind_address");

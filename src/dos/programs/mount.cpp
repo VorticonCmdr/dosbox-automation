@@ -844,6 +844,7 @@ static void LogMountDenied(const std::string& path, const MountVerdict& verdict)
 	case DenyReason::NotRegularFile:
 		reason_text = "not a regular file";
 		break;
+	case DenyReason::NotADirectory: reason_text = "not a directory"; break;
 	case DenyReason::SymlinkComponent:
 		reason_text = "symlink in path";
 		break;
@@ -1032,10 +1033,14 @@ bool MOUNT::ProcessPaths(MountParameters& params, bool path_relative_to_last_con
 			return false;
 		}
 
-		// Validate every image path before any construction
-		for (const auto& img_path : params.paths) {
+		// Open the canonical path that passed policy, rather than
+		// resolving the original spelling again in each image backend.
+		for (auto& img_path : params.paths) {
 			const auto img_verdict = MountPolicy::ValidateImagePath(
-			        std_fs::path(img_path), MountOrigin::Interactive, {});
+			        std_fs::path(img_path),
+			        MountOrigin::GuestCommand,
+			        MountPolicy::AllowedImageRoots(),
+			        MountPolicy::ConfAnchor());
 			if (!img_verdict.allowed) {
 				LogMountDenied(img_path, img_verdict);
 				NOTIFY_DisplayWarning(Notification::Source::Console,
@@ -1044,6 +1049,7 @@ bool MOUNT::ProcessPaths(MountParameters& params, bool path_relative_to_last_con
 				                      img_path.c_str());
 				return false;
 			}
+			img_path = img_verdict.resolved.string();
 		}
 
 		// Ensure consistency between type and fstype if user didn't

@@ -31,6 +31,7 @@ std::string_view DriveDenyReasonCode(DenyReason reason)
 	case DenyReason::None: return "none";
 	case DenyReason::DoesNotResolve: return "does_not_resolve";
 	case DenyReason::NotRegularFile: return "not_regular_file";
+	case DenyReason::NotADirectory: return "not_a_directory";
 	case DenyReason::SymlinkComponent: return "symlink_component";
 	case DenyReason::SystemPath: return "system_path";
 	case DenyReason::OutsideWhitelist: return "outside_whitelist";
@@ -61,7 +62,8 @@ void DriveSwapCommand::Execute()
 	const auto verdict =
 	        MountPolicy::ValidateImagePath(std::filesystem::path(image_path),
 	                                       MountOrigin::Api,
-	                                       MountPolicy::AllowedImageRoots());
+	                                       MountPolicy::AllowedImageRoots(),
+	                                       MountPolicy::ConfAnchor());
 	if (!verdict.allowed) {
 		deny_reason = verdict.reason;
 		error       = "Blocked by mount policy";

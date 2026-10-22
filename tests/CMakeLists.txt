@@ -18,6 +18,7 @@ add_executable(dosbox_tests
     math_utils_tests.cpp
     messages_adjust_tests.cpp
     mixer_tests.cpp
+    ne2000_tests.cpp
     port_containers_tests.cpp
     program_mixer_tests.cpp
     rect_tests.cpp

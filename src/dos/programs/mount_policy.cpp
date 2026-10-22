@@ -18,7 +18,10 @@
 //       2. mount_allowed_bases - extra directory roots listed in the
 //          [webserver] section of the primary config file.
 //       3. mount_allowed_image_roots - same, but for image files
-//          (floppies, CDs). Read from the primary config too.
+//          (floppies, CDs). Read from the primary config too. The conf
+//          anchor counts here as well, so a recipe can swap the disks
+//          sitting next to its own conf without the user editing the
+//          primary config.
 //     Anything outside these roots is blocked, even from autoexec.
 //     System directories are always blocked in both modes.
 //
@@ -46,6 +49,7 @@
 #include "mount_policy_linux.h"
 #endif
 
+#include "config/config.h"
 #include "dosbox.h"
 #include "misc/support.h"
 
@@ -79,6 +83,20 @@ void Lock()
 bool IsLocked()
 {
 	return mount_locked.load(std::memory_order_acquire);
+}
+
+// Named for the property, not today's only source of it: any future way
+// to drive the guest registers here instead of adding a fourth door.
+static std::atomic<bool> injection_possible{false};
+
+void SetInjectionPossible(bool possible)
+{
+	injection_possible.store(possible, std::memory_order_release);
+}
+
+bool IsInjectionPossible()
+{
+	return injection_possible.load(std::memory_order_acquire);
 }
 
 #if defined(WIN32)
@@ -426,9 +444,14 @@ MountVerdict ValidateDirectoryMount(const std::filesystem::path& raw_path,
 		return verdict;
 	}
 
-	// OwnerTrusted skips the whitelist: human at the keyboard,
-	// no webserver, no injector can exist
-	if (policy == DirMountPolicy::OwnerTrusted) {
+	// Keep type and trust decisions inside the policy, including for
+	// callers that claim owner trust while an injector is enabled.
+	auto ec = std::error_code();
+	if (!std::filesystem::is_directory(*canonical, ec) || ec) {
+		verdict.reason = DenyReason::NotADirectory;
+		return verdict;
+	}
+	if (policy == DirMountPolicy::OwnerTrusted && !IsInjectionPossible()) {
 		verdict.allowed = true;
 		verdict.reason  = DenyReason::None;
 		return verdict;
@@ -452,7 +475,8 @@ MountVerdict ValidateDirectoryMount(const std::filesystem::path& raw_path,
 
 MountVerdict ValidateImagePath(const std::filesystem::path& raw_path,
                                MountOrigin origin,
-                               const std::vector<std::filesystem::path>& allowed_image_roots)
+                               const std::vector<std::filesystem::path>& allowed_image_roots,
+                               const std::filesystem::path& conf_anchor)
 {
 	auto verdict = MountVerdict{};
 
@@ -488,11 +512,20 @@ MountVerdict ValidateImagePath(const std::filesystem::path& raw_path,
 		return verdict;
 	}
 
-	// API origin requires the path to be under an allowed root.
-	// Empty list = no roots configured = deny all API image mounts.
-	if (origin == MountOrigin::Api) {
-		if (allowed_image_roots.empty() ||
-		    !IsUnderAnyRoot(*canonical, allowed_image_roots)) {
+	// The whitelist applies to the API always, and to guest commands
+	// whenever something can type on the user's behalf. The conf anchor
+	// counts as a root: a conf that can autoexec a MOUNT of any image
+	// cannot be given less authority than its own autoexec.
+	if (origin == MountOrigin::Api || IsInjectionPossible()) {
+		auto all_roots = std::vector<std::filesystem::path>{};
+		if (!conf_anchor.empty()) {
+			all_roots.push_back(conf_anchor);
+		}
+		all_roots.insert(all_roots.end(),
+		                 allowed_image_roots.begin(),
+		                 allowed_image_roots.end());
+
+		if (all_roots.empty() || !IsUnderAnyRoot(*canonical, all_roots)) {
 			verdict.reason = DenyReason::OutsideWhitelist;
 			return verdict;
 		}
@@ -669,6 +702,14 @@ const std::vector<std::filesystem::path>& AllowedImageRoots()
 {
 	assert(policy_initialized);
 	return policy_paths.allowed_image_roots;
+}
+
+std::filesystem::path ConfAnchor()
+{
+	if (!control || control->loaded_config_paths_canonical.empty()) {
+		return {};
+	}
+	return control->loaded_config_paths_canonical.back().parent_path();
 }
 
 } // namespace MountPolicy

@@ -14,6 +14,7 @@ enum class DenyReason {
 	None,
 	DoesNotResolve,
 	NotRegularFile,
+	NotADirectory,
 	SymlinkComponent,
 	SystemPath,
 	OutsideWhitelist,
@@ -26,7 +27,7 @@ struct MountVerdict {
 	std::filesystem::path resolved = {};
 };
 
-enum class MountOrigin { Interactive, Api };
+enum class MountOrigin { GuestCommand, Api };
 
 // OwnerTrusted: human at the keyboard, webserver off, no injector possible.
 // WhitelistEnforced: webserver on, or autoexec-driven mount.
@@ -55,9 +56,14 @@ MountVerdict ValidateDirectoryMount(const std::filesystem::path& raw_path,
                                     const std::vector<std::filesystem::path>& allowed_bases,
                                     DirMountPolicy policy);
 
-MountVerdict ValidateImagePath(
-        const std::filesystem::path& raw_path, MountOrigin origin,
-        const std::vector<std::filesystem::path>& allowed_image_roots);
+// conf_anchor counts as an allowed root wherever the whitelist applies,
+// matching ValidateDirectoryMount. Defaults to empty, which only ever
+// blocks more. Guest commands are whitelisted too once an injector exists,
+// so the caller states where the command came from, not whether to trust it.
+MountVerdict ValidateImagePath(const std::filesystem::path& raw_path,
+                               MountOrigin origin,
+                               const std::vector<std::filesystem::path>& allowed_image_roots,
+                               const std::filesystem::path& conf_anchor = {});
 
 #if defined(WIN32)
 bool IsDeviceNamespacePath(const std::string& path);
@@ -68,11 +74,21 @@ bool IsDeviceNamespacePath(const std::string& path);
 void Lock();
 bool IsLocked();
 
+// Whether anything other than a human at the keyboard can drive the guest.
+// A guest MOUNT or BOOT is only trusted while this is false.
+void SetInjectionPossible(bool possible);
+bool IsInjectionPossible();
+
 // Read allowed_bases and allowed_image_roots from the primary config
 // file. Called once at startup. Values are read-only after init.
 void InitPolicyConfig(const std::filesystem::path& primary_config_path);
 const std::vector<std::filesystem::path>& AllowedBases();
 const std::vector<std::filesystem::path>& AllowedImageRoots();
+
+// Parent directory of the last -conf file on the command line, canonical.
+// Empty when no -conf was loaded. The third policy root, alongside the two
+// accessors above.
+std::filesystem::path ConfAnchor();
 
 struct PolicyPaths {
 	std::vector<std::filesystem::path> allowed_bases       = {};

@@ -47,8 +47,11 @@ webserver an attack surface by design. The short version:
 - Every MOUNT, BOOT, and drive-swap path is validated before a drive is
   constructed: paths must resolve, symlink components are rejected, system
   directories are blocked, and disk images must pass structural validation.
-  With the webserver enabled, directory mounts are whitelist-restricted,
-  and a one-way mount lock can freeze the mount configuration until
+  With the webserver enabled, directory and image mounts are whitelist-restricted,
+  including guest `MOUNT` and `BOOT` commands. Image mounts and swaps accept
+  the config anchor as well as explicitly allowed image roots. Image backends
+  receive the canonical path that passed validation.
+  A one-way mount lock can freeze the mount configuration until
   restart. Whitelists are read from the primary config only, so a bundled
   game config cannot widen them.
 - Lua scripts run sandboxed: no filesystem or process access, bytecode
