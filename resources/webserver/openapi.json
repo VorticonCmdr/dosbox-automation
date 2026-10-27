@@ -3408,6 +3408,230 @@
         }
       }
     },
+    "/api/v1/debug/call": {
+      "post": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Call a guest routine from the paused state and restore the machine",
+        "description": "Runs the routine at segment:offset like its callers do, once per case, each from the state the debugger is paused in, and restores guest RAM, VGA memory, CPU/FPU state, the decoder and the main loop afterwards. The return lands on a DOSBox callback (far16, near32) or on a 4-byte stub written at CS:stub_offset (near16; excluded from the diff). Real DOS, BIOS and DPMI handlers answer the routine's interrupts. Hardware interrupts stay off unless timers is true, so the same inputs give the same result. Every port access, interrupt and DOSBox-side handler call (DOS, BIOS, EMS, mouse) is reported. Handler calls outside a short list of functions known to touch only guest RAM, port I/O, exceptions and elapsed machine time are listed per case in unrestored, since the restore cannot cover them. return: replace is for a state paused at the routine's first instruction. The emulation thread runs the routine while it holds the Bridge, so other requests wait until the call returns (bounded by timeout_ms). Paging must be off. Limits: capabilities.debug_call.",
+        "operationId": "debugCall",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "segment",
+                  "offset"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "near16",
+                      "far16",
+                      "near32"
+                    ]
+                  },
+                  "return": {
+                    "type": "string",
+                    "enum": [
+                      "push",
+                      "replace"
+                    ],
+                    "default": "push",
+                    "description": "push the sentinel return address like a call instruction, or replace the return address already at SS:SP (paused at the routine's first instruction, so stack arguments stay in place)"
+                  },
+                  "segment": {
+                    "type": "integer",
+                    "description": "real mode: segment of the entry; near32: the current CS selector"
+                  },
+                  "offset": {
+                    "type": "integer"
+                  },
+                  "stub_offset": {
+                    "type": "integer",
+                    "description": "near16 only: CS offset of the return stub (default 0xFFFC)"
+                  },
+                  "registers": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "integer"
+                    },
+                    "description": "single case: eax..esp, eflags, ds, es, fs, gs"
+                  },
+                  "memory": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/DebugCallPatch"
+                    }
+                  },
+                  "cases": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "registers": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "integer"
+                          }
+                        },
+                        "memory": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/DebugCallPatch"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ranges": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "properties": {
+                        "space": {
+                          "type": "string",
+                          "enum": [
+                            "ram",
+                            "vram"
+                          ],
+                          "default": "ram"
+                        },
+                        "start": {
+                          "type": "integer"
+                        },
+                        "end": {
+                          "type": "integer",
+                          "description": "exclusive"
+                        }
+                      }
+                    }
+                  },
+                  "max_cycles": {
+                    "type": "integer",
+                    "default": 50000000
+                  },
+                  "max_diff_bytes": {
+                    "type": "integer",
+                    "default": 1048576,
+                    "description": "per range and case; longer diffs set truncated"
+                  },
+                  "timeout_ms": {
+                    "type": "integer",
+                    "default": 10000,
+                    "maximum": 60000
+                  },
+                  "timers": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              },
+              "example": {
+                "kind": "far16",
+                "segment": 4096,
+                "offset": 256,
+                "cases": [
+                  {
+                    "registers": {
+                      "eax": 10,
+                      "ecx": 6
+                    }
+                  }
+                ],
+                "ranges": [
+                  {
+                    "space": "ram",
+                    "start": 131072,
+                    "end": 143360
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "status ok with one result per case, or status not_paused when the debugger is not paused.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "results": [
+                    {
+                      "returned": true,
+                      "error": null,
+                      "cycles": 7,
+                      "timer_ticks": 0,
+                      "registers": {
+                        "eax": 13,
+                        "ebx": 24,
+                        "ecx": 3,
+                        "edx": 4,
+                        "esi": 0,
+                        "edi": 0,
+                        "ebp": 0,
+                        "esp": 65534,
+                        "eip": 4096,
+                        "eflags": 514,
+                        "cs": 61440,
+                        "ds": 8192,
+                        "es": 8192,
+                        "ss": 10240,
+                        "fs": 0,
+                        "gs": 0
+                      },
+                      "ranges": [
+                        {
+                          "space": "ram",
+                          "start": 131072,
+                          "end": 143360,
+                          "changed_bytes": 1,
+                          "truncated": false,
+                          "diffs": [
+                            {
+                              "address": 139264,
+                              "data": "AQ=="
+                            }
+                          ]
+                        }
+                      ],
+                      "ports": [],
+                      "interrupts": [],
+                      "handlers": [],
+                      "unrestored": []
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "501": {
+            "$ref": "#/components/responses/DebuggerNotBuilt"
+          }
+        }
+      }
+    },
     "/api/v1/debug/wait": {
       "get": {
         "tags": [
@@ -4253,6 +4477,25 @@
       }
     },
     "schemas": {
+      "DebugCallPatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "address",
+          "data"
+        ],
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "physical address in guest RAM"
+          },
+          "data": {
+            "type": "string",
+            "format": "byte",
+            "description": "base64"
+          }
+        }
+      },
       "Error": {
         "type": "object",
         "required": [

@@ -15,6 +15,7 @@
 #include "cpu/cpu.h"
 #include "cpu/paging.h"
 #include "debugger/debugger.h"
+#include "debugger/debugger_call.h"
 #include "dos/programs.h"
 #include "fpu/fpu.h"
 #include "gui/mapper.h"
@@ -886,6 +887,18 @@ void CPU_Interrupt(Bitu num, Bitu type, Bitu oldeip)
 		return;
 	}
 	last_interrupt = num;
+
+#if C_DEBUGGER
+	if (DebugCall::active) {
+		DebugCall::NoteInterrupt(static_cast<uint8_t>(num),
+		                         reg_ah,
+		                         (type & CPU_INT_EXCEPTION)
+		                                 ? DebugCall::InterruptKind::Exception
+		                         : (type & CPU_INT_SOFTWARE)
+		                                 ? DebugCall::InterruptKind::Software
+		                                 : DebugCall::InterruptKind::Hardware);
+	}
+#endif
 
 	FillFlags();
 #if C_DEBUGGER

@@ -45,7 +45,7 @@ constexpr auto EngineName = "dosbox-automation";
 // item (4.2, closing the negotiation loop itself: dosbox/info finally
 // sends this field, GET /api/v1/hello is implemented for the first time)
 // is 1.14.0 - see PROTOCOL.md's changelog entry of the same number.
-constexpr auto McpProtocol = "1.14";
+constexpr auto McpProtocol = "1.15";
 
 // httplib::Server::set_payload_max_length's cap, applied to every request
 // body regardless of route. Named so the capability descriptor

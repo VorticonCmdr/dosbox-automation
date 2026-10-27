@@ -14,6 +14,7 @@
 #include "cpu/callback.h"
 #include "cpu/cpu.h"
 #include "cpu/lazyflags.h"
+#include "debugger/debugger_call.h"
 
 //#define ENABLE_PORTLOG
 
@@ -149,8 +150,21 @@ void log_io(io_width_t width, bool write, io_port_t port, io_val_t val)
 #define log_io(W, X, Y, Z)
 #endif
 
+// Counts port accesses made by a routine run through DebugCall, which cannot
+// restore device state and so must report every device it touched.
+static inline void note_debug_call_port([[maybe_unused]] const io_port_t port,
+                                        [[maybe_unused]] const bool is_write)
+{
+#if C_DEBUGGER
+	if (DebugCall::active) {
+		DebugCall::NotePort(port, is_write);
+	}
+#endif
+}
+
 void IO_WriteB(io_port_t port, uint8_t val)
 {
+	note_debug_call_port(port, true);
 	log_io(io_width_t::byte, true, port, val);
 	if (GETFLAG(VM) && (CPU_IO_Exception(port, 1))) {
 		const auto old_lflags = lflags;
@@ -185,6 +199,7 @@ void IO_WriteB(io_port_t port, uint8_t val)
 
 void IO_WriteW(io_port_t port, uint16_t val)
 {
+	note_debug_call_port(port, true);
 	log_io(io_width_t::word, true, port, val);
 	if (GETFLAG(VM) && (CPU_IO_Exception(port, 2))) {
 		const auto old_lflags = lflags;
@@ -219,6 +234,7 @@ void IO_WriteW(io_port_t port, uint16_t val)
 
 void IO_WriteD(io_port_t port, uint32_t val)
 {
+	note_debug_call_port(port, true);
 	log_io(io_width_t::dword, true, port, val);
 	if (GETFLAG(VM) && (CPU_IO_Exception(port, 4))) {
 		const auto old_lflags = lflags;
@@ -252,6 +268,7 @@ void IO_WriteD(io_port_t port, uint32_t val)
 
 uint8_t IO_ReadB(io_port_t port)
 {
+	note_debug_call_port(port, false);
 	uint8_t retval;
 	if (GETFLAG(VM) && (CPU_IO_Exception(port, 1))) {
 		const auto old_lflags = lflags;
@@ -289,6 +306,7 @@ uint8_t IO_ReadB(io_port_t port)
 
 uint16_t IO_ReadW(io_port_t port)
 {
+	note_debug_call_port(port, false);
 	uint16_t retval;
 	if (GETFLAG(VM) && (CPU_IO_Exception(port, 2))) {
 		const auto old_lflags = lflags;
@@ -325,6 +343,7 @@ uint16_t IO_ReadW(io_port_t port)
 
 uint32_t IO_ReadD(io_port_t port)
 {
+	note_debug_call_port(port, false);
 	uint32_t retval;
 	if (GETFLAG(VM) && (CPU_IO_Exception(port, 4))) {
 		const auto old_lflags = lflags;

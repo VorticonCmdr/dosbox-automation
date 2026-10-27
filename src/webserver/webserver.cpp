@@ -14,6 +14,7 @@
 #include "private/batch.h"
 #include "private/cpu.h"
 #include "private/debug.h"
+#include "private/debug_call.h"
 #include "private/disassemble.h"
 #include "private/dos.h"
 #include "private/freeze.h"
@@ -275,6 +276,7 @@ static const std::vector<ApiRoute>& get_api_route_table()
 	         Debug	                                                                                     },
 	        {  HttpMethod::Post,          "/api/v1/debug/run_to",              DebugRunToCommand::Post,   Debug},
 	        {  HttpMethod::Post,        "/api/v1/debug/step_out",            DebugStepOutCommand::Post,   Debug},
+	        {  HttpMethod::Post,            "/api/v1/debug/call",               DebugCallCommand::Post,   Debug},
 	        {   HttpMethod::Get,            "/api/v1/debug/wait",               DebugWaitHandlers::Get,   Debug},
 
 	        {   HttpMethod::Get,

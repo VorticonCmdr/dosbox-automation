@@ -7,6 +7,7 @@ target_sources(dosboxcommon PRIVATE
   control.cpp
   cpu.cpp
   debug.cpp
+  debug_call.cpp
   debug_events.cpp
   disassemble.cpp
   dos.cpp

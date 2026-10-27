@@ -5,6 +5,7 @@ target_sources(dosboxcommon PRIVATE
 if (OPT_DEBUGGER)
   target_sources(dosboxcommon PRIVATE
     debugger.cpp
+    debugger_call.cpp
     debugger_gui.cpp)
 
   target_link_libraries(dosboxcommon PRIVATE imgui)

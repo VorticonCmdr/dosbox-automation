@@ -152,6 +152,40 @@ configured), not the debugger's on-screen message pane.
 
 ## What's REST/Lua only
 
+`POST /api/v1/debug/call` runs one guest routine like its callers do, from
+the state the debugger is paused in, and puts the machine back afterwards.
+It's meant for differential testing of reimplementations: send inputs (any
+number of cases per request), get back the registers and memory diffs the
+routine produced. Real DOS, BIOS and DPMI answer the routine's interrupts.
+
+- Kinds: `far16` and `near16` in real mode (near16 writes a 4-byte return
+  stub at `CS:stub_offset`, 0xFFFC by default, and keeps it out of the
+  diff), `near32` in protected mode with a 32-bit code segment. Paging must
+  be off.
+- `return: push` (default) pushes the sentinel return address like a call
+  instruction. When the debugger is paused at the routine's first
+  instruction, the caller's return address is already at SS:SP: use
+  `return: replace` there, or every stack argument shifts by one slot.
+- Restored after every case: guest RAM, VGA memory and latches, CPU and FPU
+  state, the cycle counters, the active core and the main loop. Breakpoints
+  are disarmed for the call and re-armed as they were.
+- Not restored: device registers (anything reached through port I/O),
+  state DOSBox keeps in its own structures (current directory, open files,
+  EMS mappings, mouse driver) and machine time. The response counts every
+  port access, interrupt and DOSBox-side handler call. Handler calls are
+  checked against a short allow-list of functions known to touch only
+  guest RAM (get time, get vector, memory allocation and the like); the
+  rest, plus port I/O, exceptions and elapsed time, are listed under
+  `unrestored`, so a client can refuse such results.
+- Hardware interrupts stay off unless `timers` is set, so the same inputs
+  always give the same result. With `timers` the PIC runs without wall-clock
+  pacing; machine time then advances and isn't rewound.
+- The routine runs on the emulation thread while it holds the Bridge, so
+  other requests wait for it. `max_cycles` and `timeout_ms` bound it.
+- The routine runs on the normal core whatever `core` is set to.
+
+Limits are in `capabilities.debug_call` of `GET /api/v1/dosbox/info`.
+
 Stepping out of the current function and running to a specific address exist
 through the debugger REST API (`/api/v1/debug/step_out`,
 `/api/v1/debug/run_to`) and the MCP debugger tools; there's no `STEPOUT` or

@@ -4,11 +4,14 @@
 
 #include "capabilities.h"
 
+#include "private/debug_call.h"
+
 #include "bridge.h"
 #include "drive.h"
 #include "input.h"
 #include "private/backtrace.h"
 #include "private/batch.h"
+#include "private/debug_call.h"
 #include "private/disassemble.h"
 #include "private/dos.h"
 #include "private/freeze.h"
@@ -110,6 +113,29 @@ CapabilityInfo ComputeDebuggerCapability(const bool built, const bool heavy,
 	return info;
 }
 
+CapabilityInfo ComputeDebugCallCapability(const bool built)
+{
+	CapabilityInfo info;
+	info.limits["max_cases"]               = MaxCallCases;
+	info.limits["max_patches_per_case"]    = MaxCallPatchesPerCase;
+	info.limits["max_patch_bytes"]         = MaxCallPatchBytes;
+	info.limits["max_ranges"]              = MaxCallRanges;
+	info.limits["max_range_bytes"]         = MaxCallRangeBytes;
+	info.limits["max_response_diff_bytes"] = MaxCallResponseDiffBytes;
+	info.limits["max_cycles"]              = MaxCallCycles;
+	info.limits["max_timeout_ms"]          = MaxCallTimeoutMs;
+	if (!built) {
+		info.state = CapabilityState::Off;
+		info.reason = "needs the debugger (C_DEBUGGER=0 in this binary)";
+		return info;
+	}
+	info.state = CapabilityState::On;
+	info.reason =
+	        "runs a guest routine from the paused state and restores RAM, VRAM and CPU state; "
+	        "real mode near16/far16, protected mode near32 without paging";
+	return info;
+}
+
 json BuildCapabilitiesBlock()
 {
 	json memory_limits;
@@ -170,6 +196,8 @@ json BuildCapabilitiesBlock()
 	        ComputeDebuggerCapability(static_cast<bool>(C_DEBUGGER),
 	                                  static_cast<bool>(C_HEAVY_DEBUGGER),
 	                                  CPU_GetActiveCoreKind()));
+	j["debug_call"] = ToJson(
+	        ComputeDebugCallCapability(static_cast<bool>(C_DEBUGGER)));
 	j["script"] = ToJson(AlwaysOn("always available", script_limits));
 	json disassemble_limits;
 	disassemble_limits["max_count"] = MaxDisassembleCount;

@@ -37,6 +37,7 @@ struct CapabilityInfo {
 // dynamic core, just not from a call site native to the JIT). Memory
 // (type="memory") breakpoints are a separate, heavier check compiled in
 // only under C_HEAVY_DEBUGGER, on every core.
+CapabilityInfo ComputeDebugCallCapability(bool built);
 CapabilityInfo ComputeDebuggerCapability(bool built, bool heavy, CoreKind core);
 
 // Builds the full "capabilities" block for GET /api/v1/dosbox/info: one
