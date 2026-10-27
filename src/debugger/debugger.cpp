@@ -1329,6 +1329,27 @@ bool DEBUG_IntBreakpoint(uint8_t intNum)
 	return true;
 }
 
+std::vector<uint64_t> DEBUG_DisarmBreakpoints()
+{
+	std::vector<uint64_t> armed = {};
+	for (const auto bp : BPoints) {
+		if (bp->IsActive()) {
+			armed.push_back(bp->GetId());
+		}
+	}
+	CBreakpoint::DeactivateBreakpoints();
+	return armed;
+}
+
+void DEBUG_RearmBreakpoints(const std::vector<uint64_t>& ids)
+{
+	for (const auto id : ids) {
+		if (auto bp = CBreakpoint::FindById(id)) {
+			bp->Activate(true);
+		}
+	}
+}
+
 static bool StepOver()
 {
 	exitLoop     = false;

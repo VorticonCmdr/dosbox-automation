@@ -422,6 +422,11 @@ void DOSBOX_SetLoop(LoopHandler* handler)
 	loop = handler;
 }
 
+LoopHandler* DOSBOX_GetLoop()
+{
+	return loop;
+}
+
 void DOSBOX_SetNormalLoop()
 {
 	loop = normal_loop;

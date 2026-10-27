@@ -24,6 +24,13 @@ void DEBUG_Destroy();
 void DEBUG_DrawScreen();
 bool DEBUG_Breakpoint();
 bool DEBUG_IntBreakpoint(uint8_t intNum);
+
+// Disarms every breakpoint (patched INT3 bytes go back to the original
+// code) and returns the ids of those that were armed, for
+// DEBUG_RearmBreakpoints to arm exactly those again. Used around code that
+// must see and snapshot the unpatched guest memory (DebugCall).
+std::vector<uint64_t> DEBUG_DisarmBreakpoints();
+void DEBUG_RearmBreakpoints(const std::vector<uint64_t>& ids);
 void DEBUG_Enable(bool pressed);
 void DEBUG_CheckExecuteBreakpoint(uint16_t seg, uint32_t off);
 bool DEBUG_ExitLoop(void);

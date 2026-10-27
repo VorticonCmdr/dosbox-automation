@@ -70,6 +70,9 @@ const char* DOSBOX_GetDetailedVersion() noexcept;
 
 void DOSBOX_RunMachine();
 void DOSBOX_SetLoop(LoopHandler * handler);
+// The loop DOSBOX_RunMachine() currently runs, so a caller that swaps in its
+// own loop (DebugCall) can put the previous one back.
+LoopHandler* DOSBOX_GetLoop();
 void DOSBOX_SetNormalLoop();
 
 void DOSBOX_SetMachineTypeFromConfig(SectionProp& section);
